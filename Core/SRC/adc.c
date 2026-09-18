@@ -259,6 +259,29 @@ uint16_t Studio_ADC1_ReadColdRaw(void)
   return Studio_ADC1_ReadChannel(LL_ADC_CHANNEL_4);
 }
 
+uint16_t Studio_ADC1_ReadCurrentRaw(void)
+{
+  return Studio_ADC1_ReadChannel(LL_ADC_CHANNEL_6);
+}
+
+uint32_t Studio_ADC1_ReadCurrentMilliamp(void)
+{
+  uint32_t adc_code = Studio_ADC1_ReadCurrentRaw();
+  uint64_t adc_voltage_uV;
+  uint64_t shunt_voltage_uV;
+  uint64_t current_mA;
+
+  /* Vadc = code * Vref / 4095; undo the INA output divider, then divide by
+   * (shunt resistance * amplifier gain). Keep integer arithmetic in uV. */
+  adc_voltage_uV = ((uint64_t)adc_code * TEC_CURRENT_ADC_VREF_MV * 1000ULL) /
+                   4095ULL;
+  shunt_voltage_uV = (adc_voltage_uV * TEC_CURRENT_DIVIDER_DEN) /
+                     TEC_CURRENT_DIVIDER_NUM;
+  current_mA = (shunt_voltage_uV * 1000ULL) /
+               ((uint64_t)TEC_CURRENT_SHUNT_UOHM * TEC_CURRENT_AMP_GAIN);
+  return (uint32_t)current_mA;
+}
+
 int32_t Studio_ADC1_ReadHotMilliCelsius(void)
 {
   return NTC3950_AdcToMilliCelsius(Studio_ADC1_ReadHotRaw());

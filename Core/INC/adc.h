@@ -55,10 +55,29 @@ extern "C" {
 #define TEC_CURR_Pin LL_GPIO_PIN_6
 #define TEC_CURR_Port GPIOA
 
+/* INA181A2 current-sense chain: 20 mOhm shunt, gain 50 V/V, 10k/10k divider. */
+#ifndef TEC_CURRENT_SHUNT_UOHM
+#define TEC_CURRENT_SHUNT_UOHM       (20000UL)
+#endif
+#ifndef TEC_CURRENT_AMP_GAIN
+#define TEC_CURRENT_AMP_GAIN         (50UL)
+#endif
+#ifndef TEC_CURRENT_DIVIDER_NUM
+#define TEC_CURRENT_DIVIDER_NUM      (1UL)
+#endif
+#ifndef TEC_CURRENT_DIVIDER_DEN
+#define TEC_CURRENT_DIVIDER_DEN      (2UL)
+#endif
+#ifndef TEC_CURRENT_ADC_VREF_MV
+#define TEC_CURRENT_ADC_VREF_MV      (1800UL)
+#endif
+
 void Studio_ADC1_Init(void);
 uint16_t Studio_ADC1_ReadChannel(uint32_t channel);
 uint16_t Studio_ADC1_ReadHotRaw(void);
 uint16_t Studio_ADC1_ReadColdRaw(void);
+uint16_t Studio_ADC1_ReadCurrentRaw(void);
+uint32_t Studio_ADC1_ReadCurrentMilliamp(void);
 int32_t Studio_ADC1_ReadHotMilliCelsius(void);
 int32_t Studio_ADC1_ReadColdMilliCelsius(void);
 
