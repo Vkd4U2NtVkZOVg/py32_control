@@ -1,0 +1,30 @@
+# ==== Build outputs (EIDE / PySupport / raw tools) ====
+EIDE/build/
+build/
+*.o
+*.obj
+*.d
+*.elf
+*.axf
+*.hex
+*.bin
+*.map
+*.lst
+*.ld.*
+*.icf.*
+
+# ==== QuarkTS: submodule content is tracked by its own repo ====
+# (nothing to ignore here; Drivers/QuarkTS is a git submodule)
+
+# ==== Tool / editor artifacts ====
+.video_agent/
+Drivers/.video_agent/
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# ==== System files ====
+Thumbs.db
+desktop.ini

@@ -1,0 +1,151 @@
+version: "4.1"
+name: TEST
+type: ARM
+deviceName: PY32F030x8
+packDir: ""
+srcDirs: []
+virtualFolder:
+  name: <virtual_root>
+  files: []
+  folders:
+    - name: Application
+      files: []
+      folders:
+        - name: EIDE
+          files:
+            - path: startup_py32f030xx.s
+          folders: []
+        - name: User
+          files: []
+          folders:
+            - name: Core
+              files:
+                - path: ../Core/SRC/fsm_demo.c
+                - path: ../Core/SRC/main.c
+                - path: ../Core/SRC/gpio.c
+                - path: ../Core/SRC/adc.c
+                - path: ../Core/SRC/tim.c
+                - path: ../Core/SRC/usart.c
+                - path: ../Core/SRC/i2c.c
+                - path: ../Core/SRC/soft_i2c.c
+                - path: ../Core/SRC/rcc.c
+                - path: ../Core/SRC/py32f030_it.c
+              folders: []
+    - name: Drivers
+      files: []
+      folders:
+        - name: CMSIS
+          files:
+            - path: ../Core/SRC/system_py32f030.c
+          folders: []
+        - name: PY32F030_HAL_Driver
+          files:
+            - path: ../Drivers/PY32F030_HAL_Driver/Src/py32f0xx_ll_utils.c
+            - path: ../Drivers/PY32F030_HAL_Driver/Src/py32f0xx_ll_rcc.c
+            - path: ../Drivers/PY32F030_HAL_Driver/Src/py32f0xx_ll_dma.c
+            - path: ../Drivers/PY32F030_HAL_Driver/Src/py32f0xx_ll_pwr.c
+            - path: ../Drivers/PY32F030_HAL_Driver/Src/py32f0xx_ll_gpio.c
+            - path: ../Drivers/PY32F030_HAL_Driver/Src/py32f0xx_ll_exti.c
+            - path: ../Drivers/PY32F030_HAL_Driver/Src/py32f0xx_ll_adc.c
+            - path: ../Drivers/PY32F030_HAL_Driver/Src/py32f0xx_ll_i2c.c
+            - path: ../Drivers/PY32F030_HAL_Driver/Src/py32f0xx_ll_usart.c
+            - path: ../Drivers/PY32F030_HAL_Driver/Src/py32f0xx_ll_tim.c
+          folders: []
+        - name: QuarkTS
+          files:
+            - path: ../Drivers/QuarkTS/qkernel.c
+            - path: ../Drivers/QuarkTS/qtasks.c
+            - path: ../Drivers/QuarkTS/qclock.c
+            - path: ../Drivers/QuarkTS/qstimers.c
+            - path: ../Drivers/QuarkTS/qcritical.c
+            - path: ../Drivers/QuarkTS/qlists.c
+            - path: ../Drivers/QuarkTS/qmemmang.c
+            - path: ../Drivers/QuarkTS/qqueues.c
+            - path: ../Drivers/QuarkTS/qfsm.c
+            - path: ../Drivers/QuarkTS/qcoroutine.c
+            - path: ../Drivers/QuarkTS/qioutils.c
+            - path: ../Drivers/QuarkTS/qtrace.c
+            - path: ../Drivers/QuarkTS/qedgecheck.c
+            - path: ../Drivers/QuarkTS/qresponse.c
+            - path: ../Drivers/QuarkTS/qbsbuffers.c
+            - path: ../Drivers/QuarkTS/qatcli.c
+            - path: ../Core/SRC/qport_py32.c
+          folders: []
+dependenceList: []
+outDir: build
+miscInfo:
+  uid: ""
+targets:
+  Debug:
+    cppPreprocessAttrs:
+      defineList:
+        - PY32F030x8
+        - USE_FULL_LL_DRIVER
+      incList:
+        - ../Core/INC
+        - ../Drivers/CMSIS/Include
+        - ../Drivers/PY32F030_HAL_Driver/Inc
+        - ../Drivers/CMSIS/Device/PY32F030/Include
+        - ../Drivers/QuarkTS/include
+      libList: []
+    excludeList: []
+    settings:
+      debugger: cortex-debug
+    toolchain: GCC
+    toolchainConfigMap:
+      GCC:
+        archExtensions: ""
+        cpuType: Cortex-M0+
+        floatingPointHardware: none
+        options:
+          version: 5
+          afterBuildTasks: []
+          asm-compiler:
+            ASM_FLAGS: ""
+          beforeBuildTasks: []
+          c/cpp-compiler:
+            CXX_FLAGS: ""
+            C_FLAGS: ""
+            language-c: c11
+            language-cpp: c++11
+            one-elf-section-per-data: true
+            one-elf-section-per-function: true
+            optimization: level-debug
+            warnings: all-warnings
+          global:
+            $float-abi-type: softfp
+            misc-control: --specs=nosys.specs --specs=nano.specs
+            output-debug-info: enable
+          linker:
+            LD_FLAGS: " "
+            LIB_FLAGS: -lm
+            output-format: elf
+            remove-unused-input-sections: true
+        scatterFilePath: PY32F030K28U6-E.ld
+        storageLayout:
+          RAM: []
+          ROM: []
+        useCustomScatterFile: true
+    uploadConfigMap:
+      JLink:
+        baseAddr: ""
+        bin: ""
+        cpuInfo:
+          cpuName: PY32F030x8
+          endor: Puya
+        otherCmds: ""
+        proType: 1
+        speed: 1000
+      OpenOCD:
+        baseAddr: "0x08000000"
+        bin: ""
+        interface: cmsis-dap
+        target: py32f030
+      pyOCD:
+        baseAddr: "0x08000000"
+        bin: ""
+        config: .eide/debug.pyocd.yaml
+        otherCmds: '"--pack=${env:PYSDEPATH}/packs/PY32F0xx_DFP.pack"'
+        speed: 4M
+        targetName: PY32F030x8
+    uploader: pyOCD

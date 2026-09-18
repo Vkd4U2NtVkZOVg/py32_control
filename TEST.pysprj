@@ -1,0 +1,633 @@
+{
+  "appVersion": "1.0.6",
+  "gitHash": "3baf956fd28b8ae808b9c11a43e2232d1fa07e8e",
+  "createTime": 1789715797865,
+  "lastTime": 1789715797865,
+  "version": 6,
+  "name": "TEST",
+  "platform": "EIDE",
+  "vendor": "Puya",
+  "serial": "PY32F030",
+  "series": "PY32F030",
+  "chip": "PY32F030K28U6-E",
+  "firmversion": "V1.5.0",
+  "frameWork": "cortex-m0+",
+  "minstack": "0x200",
+  "minheap": "0x100",
+  "ramSize": "0x2000",
+  "flashSize": "0x10000",
+  "default_firmware_location": true,
+  "custom_firmware_location": "",
+  "library_copy": "all",
+  "data": {
+    "lastTime": 1789726695879,
+    "version": 6,
+    "gpioBindings": {
+      "version": 1,
+      "rows": [
+        {
+          "pinName": "PF0",
+          "locked": false,
+          "source": "auto",
+          "alternates": [
+            "RCC_OSC_IN"
+          ],
+          "primarySignal": "RCC_OSC_IN"
+        },
+        {
+          "pinName": "PF1",
+          "locked": false,
+          "source": "auto",
+          "alternates": [
+            "RCC_OSC_OUT"
+          ],
+          "primarySignal": "RCC_OSC_OUT"
+        },
+        {
+          "pinName": "PF2",
+          "locked": true,
+          "source": "manual",
+          "alternates": [
+            "NRST"
+          ],
+          "primarySignal": "NRST"
+        },
+        {
+          "pinName": "PA3",
+          "locked": false,
+          "source": "auto",
+          "alternates": [
+            "I2C1_SCL"
+          ],
+          "primarySignal": "I2C1_SCL"
+        },
+        {
+          "pinName": "PA2",
+          "locked": false,
+          "source": "auto",
+          "alternates": [
+            "I2C1_SDA"
+          ],
+          "primarySignal": "I2C1_SDA"
+        },
+        {
+          "pinName": "PA4",
+          "locked": false,
+          "source": "auto",
+          "alternates": [
+            "ADC1_IN4"
+          ],
+          "primarySignal": "ADC1_IN4"
+        },
+        {
+          "pinName": "PA5",
+          "locked": false,
+          "source": "auto",
+          "alternates": [
+            "ADC1_IN5"
+          ],
+          "primarySignal": "ADC1_IN5"
+        },
+        {
+          "pinName": "PA6",
+          "locked": false,
+          "source": "auto",
+          "alternates": [
+            "ADC1_IN6"
+          ],
+          "primarySignal": "ADC1_IN6"
+        },
+        {
+          "pinName": "PF3",
+          "locked": true,
+          "source": "manual",
+          "alternates": [
+            "GPIO_Input"
+          ],
+          "primarySignal": "GPIO_Input"
+        },
+        {
+          "pinName": "PA0",
+          "locked": true,
+          "source": "manual",
+          "alternates": [
+            "USART2_TX"
+          ],
+          "primarySignal": "USART2_TX"
+        },
+        {
+          "pinName": "PA1",
+          "locked": true,
+          "source": "manual",
+          "alternates": [
+            "USART2_RX"
+          ],
+          "primarySignal": "USART2_RX"
+        },
+        {
+          "pinName": "PA7",
+          "locked": true,
+          "source": "manual",
+          "alternates": [
+            "TIM3_CH2"
+          ],
+          "primarySignal": "TIM3_CH2"
+        },
+        {
+          "pinName": "PB2",
+          "locked": true,
+          "source": "manual",
+          "alternates": [
+            "GPIO_Output"
+          ],
+          "primarySignal": "GPIO_Output"
+        },
+        {
+          "pinName": "PA8",
+          "locked": true,
+          "source": "manual",
+          "alternates": [
+            "GPIO_Output"
+          ],
+          "primarySignal": "GPIO_Output"
+        },
+        {
+          "pinName": "PA9",
+          "locked": false,
+          "source": "auto",
+          "alternates": [
+            "USART1_TX"
+          ],
+          "primarySignal": "USART1_TX"
+        },
+        {
+          "pinName": "PA10",
+          "locked": false,
+          "source": "auto",
+          "alternates": [
+            "USART1_RX"
+          ],
+          "primarySignal": "USART1_RX"
+        },
+        {
+          "pinName": "PA11",
+          "locked": true,
+          "source": "manual",
+          "alternates": [
+            "GPIO_Output"
+          ],
+          "primarySignal": "GPIO_Output"
+        },
+        {
+          "pinName": "PA12",
+          "locked": true,
+          "source": "manual",
+          "alternates": [
+            "GPIO_Output"
+          ],
+          "primarySignal": "GPIO_Output"
+        },
+        {
+          "pinName": "PA13",
+          "locked": true,
+          "source": "manual",
+          "alternates": [
+            "SWDIO"
+          ],
+          "primarySignal": "SWDIO"
+        },
+        {
+          "pinName": "PA14",
+          "locked": true,
+          "source": "manual",
+          "alternates": [
+            "SWCLK"
+          ],
+          "primarySignal": "SWCLK"
+        },
+        {
+          "pinName": "PA15",
+          "locked": true,
+          "source": "manual",
+          "alternates": [
+            "GPIO_Output"
+          ],
+          "primarySignal": "GPIO_Output"
+        },
+        {
+          "pinName": "PB3",
+          "locked": true,
+          "source": "manual",
+          "alternates": [
+            "GPIO_EXTI3"
+          ],
+          "primarySignal": "GPIO_EXTI3"
+        },
+        {
+          "pinName": "PB5",
+          "locked": true,
+          "source": "manual",
+          "alternates": [
+            "GPIO_Output"
+          ],
+          "primarySignal": "GPIO_Output"
+        },
+        {
+          "pinName": "PB6",
+          "locked": true,
+          "source": "manual",
+          "alternates": [
+            "GPIO_Output"
+          ],
+          "primarySignal": "GPIO_Output"
+        },
+        {
+          "pinName": "PB7",
+          "locked": true,
+          "source": "manual",
+          "alternates": [
+            "GPIO_Output"
+          ],
+          "primarySignal": "GPIO_Output"
+        },
+        {
+          "pinName": "PF4",
+          "locked": true,
+          "source": "manual",
+          "alternates": [
+            "BOOT0"
+          ],
+          "primarySignal": "BOOT0"
+        },
+        {
+          "pinName": "PB8",
+          "locked": true,
+          "source": "manual",
+          "alternates": [
+            "GPIO_Output"
+          ],
+          "primarySignal": "GPIO_Output"
+        },
+        {
+          "pinName": "PB0",
+          "locked": true,
+          "source": "manual",
+          "alternates": [
+            "GPIO_Output"
+          ],
+          "primarySignal": "GPIO_Output"
+        },
+        {
+          "pinName": "PB1",
+          "locked": true,
+          "source": "manual",
+          "alternates": [
+            "GPIO_Output"
+          ],
+          "primarySignal": "GPIO_Output"
+        },
+        {
+          "pinName": "PB4",
+          "locked": true,
+          "source": "manual",
+          "alternates": [
+            "GPIO_Input"
+          ],
+          "primarySignal": "GPIO_Input"
+        }
+      ]
+    },
+    "value": {
+      "RCC.MODE.HSE.value": {
+        "type": "global-value",
+        "order": 1,
+        "value": "ON"
+      },
+      "PF2;NRST": {
+        "type": "pins-af",
+        "order": 3
+      },
+      "I2C1.MODE.Mode.value": {
+        "type": "global-value",
+        "order": 7,
+        "value": "I2C"
+      },
+      "I2C1.Parameter.GeneralCallMode.value": {
+        "type": "global-value",
+        "order": 8,
+        "value": "Enable"
+      },
+      "ADC1.MODE.IN4.value": {
+        "type": "global-value",
+        "order": 9,
+        "value": true
+      },
+      "ADC1.MODE.IN5.value": {
+        "type": "global-value",
+        "order": 10,
+        "value": true
+      },
+      "ADC1.MODE.IN6.value": {
+        "type": "global-value",
+        "order": 11,
+        "value": true
+      },
+      "PF3;GPIO_Input": {
+        "type": "pins-af",
+        "order": 12
+      },
+      "GPIO.GPIO.body.PF3.user_label.value": {
+        "type": "global-value",
+        "order": 13,
+        "value": "KEY1"
+      },
+      "PA0;USART2_TX": {
+        "type": "pins-af",
+        "order": 14
+      },
+      "USART2.MODE.Mode.value": {
+        "type": "global-value",
+        "order": 15,
+        "value": "Asynchronous"
+      },
+      "PA1;USART2_RX": {
+        "type": "pins-af",
+        "order": 16
+      },
+      "ADC1.GPIO.body.0.user_label.value": {
+        "type": "global-value",
+        "order": 17,
+        "value": "TEC_COLD_TEMP"
+      },
+      "ADC1.GPIO.body.1.user_label.value": {
+        "type": "global-value",
+        "order": 18,
+        "value": "TEC_HOT_TEMP"
+      },
+      "ADC1.GPIO.body.2.user_label.value": {
+        "type": "global-value",
+        "order": 19,
+        "value": "TEC_CURR"
+      },
+      "PA7;TIM3_CH2": {
+        "type": "pins-af",
+        "order": 20
+      },
+      "TIM3.MODE.Channel2.value": {
+        "type": "global-value",
+        "order": 21,
+        "value": "pwm_ch"
+      },
+      "TIM3.GPIO.body.0.user_label.value": {
+        "type": "global-value",
+        "order": 23,
+        "value": "FAN_PWM"
+      },
+      "PB2;GPIO_Output": {
+        "type": "pins-af",
+        "order": 25
+      },
+      "GPIO.GPIO.body.PB2.user_label.value": {
+        "type": "global-value",
+        "order": 26,
+        "value": "CM108B_VOLUP"
+      },
+      "PA8;GPIO_Output": {
+        "type": "pins-af",
+        "order": 27
+      },
+      "GPIO.GPIO.body.PA8.user_label.value": {
+        "type": "global-value",
+        "order": 28,
+        "value": "TRES_RST"
+      },
+      "USART1.MODE.Mode.value": {
+        "type": "global-value",
+        "order": 29,
+        "value": "Asynchronous"
+      },
+      "PA11;GPIO_Output": {
+        "type": "pins-af",
+        "order": 30
+      },
+      "GPIO.GPIO.body.PA11.user_label.value": {
+        "type": "global-value",
+        "order": 31,
+        "value": "FAN_CH_SW"
+      },
+      "PA12;GPIO_Output": {
+        "type": "pins-af",
+        "order": 32
+      },
+      "GPIO.GPIO.body.PA12.user_label.value": {
+        "type": "global-value",
+        "order": 33,
+        "value": "TEC_VEN"
+      },
+      "PA13;SWDIO": {
+        "type": "pins-af",
+        "order": 34
+      },
+      "PA14;SWCLK": {
+        "type": "pins-af",
+        "order": 35
+      },
+      "PA15;GPIO_Output": {
+        "type": "pins-af",
+        "order": 36
+      },
+      "GPIO.GPIO.body.PA15.user_label.value": {
+        "type": "global-value",
+        "order": 37,
+        "value": "TRES_VDD33USB_CTRL"
+      },
+      "PB3;GPIO_EXTI3": {
+        "type": "pins-af",
+        "order": 38
+      },
+      "GPIO.GPIO_EXTI.body.PB3.user_label.value": {
+        "type": "global-value",
+        "order": 39,
+        "value": "FAN_TACH"
+      },
+      "PB5;GPIO_Output": {
+        "type": "pins-af",
+        "order": 40
+      },
+      "GPIO.GPIO.body.PB5.user_label.value": {
+        "type": "global-value",
+        "order": 41,
+        "value": "TRES_BOOT0"
+      },
+      "PB6;GPIO_Output": {
+        "type": "pins-af",
+        "order": 42
+      },
+      "GPIO.GPIO.body.PB6.user_label.value": {
+        "type": "global-value",
+        "order": 43,
+        "value": "TRES_PWR_EN"
+      },
+      "PB7;GPIO_Output": {
+        "type": "pins-af",
+        "order": 44
+      },
+      "GPIO.GPIO.body.PB7.user_label.value": {
+        "type": "global-value",
+        "order": 45,
+        "value": "MIX3_BOOTKEY"
+      },
+      "PF4;BOOT0": {
+        "type": "pins-af",
+        "order": 46
+      },
+      "PB8;GPIO_Output": {
+        "type": "pins-af",
+        "order": 47
+      },
+      "GPIO.GPIO.body.PB8.user_label.value": {
+        "type": "global-value",
+        "order": 48,
+        "value": "MIX3_RST"
+      },
+      "PB0;GPIO_Output": {
+        "type": "pins-af",
+        "order": 50
+      },
+      "GPIO.GPIO.body.PB0.user_label.value": {
+        "type": "global-value",
+        "order": 51,
+        "value": "SOFT_IIC_SDA"
+      },
+      "PB1;GPIO_Output": {
+        "type": "pins-af",
+        "order": 52
+      },
+      "GPIO.GPIO.body.PB1.user_label.value": {
+        "type": "global-value",
+        "order": 53,
+        "value": "SOFT_IIC_SCL"
+      },
+      "PB4;GPIO_Input": {
+        "type": "pins-af",
+        "order": 54
+      },
+      "GPIO.GPIO.body.PB4.user_label.value": {
+        "type": "global-value",
+        "order": 55,
+        "value": "SOM_BOOTED"
+      },
+      "GPIO.GPIO.body.PA8.pull.value": {
+        "type": "global-value",
+        "order": 56,
+        "value": "Down"
+      },
+      "GPIO.GPIO.body.PA11.pull.value": {
+        "type": "global-value",
+        "order": 57,
+        "value": "Down"
+      },
+      "GPIO.GPIO.body.PA12.pull.value": {
+        "type": "global-value",
+        "order": 58,
+        "value": "Down"
+      },
+      "GPIO.GPIO.body.PA15.pull.value": {
+        "type": "global-value",
+        "order": 59,
+        "value": "Down"
+      },
+      "GPIO.GPIO.body.PB0.pull.value": {
+        "type": "global-value",
+        "order": 60,
+        "value": "Up"
+      },
+      "GPIO.GPIO.body.PB1.pull.value": {
+        "type": "global-value",
+        "order": 61,
+        "value": "Up"
+      },
+      "GPIO.GPIO.body.PB2.pull.value": {
+        "type": "global-value",
+        "order": 62,
+        "value": "Up"
+      },
+      "GPIO.GPIO.body.PB4.pull.value": {
+        "type": "global-value",
+        "order": 63,
+        "value": "Down"
+      },
+      "GPIO.GPIO.body.PB5.pull.value": {
+        "type": "global-value",
+        "order": 64,
+        "value": "Down"
+      },
+      "GPIO.GPIO.body.PB6.pull.value": {
+        "type": "global-value",
+        "order": 65,
+        "value": "Down"
+      },
+      "GPIO.GPIO.body.PB7.pull.value": {
+        "type": "global-value",
+        "order": 66,
+        "value": "Up"
+      },
+      "GPIO.GPIO.body.PB8.pull.value": {
+        "type": "global-value",
+        "order": 67,
+        "value": "Up"
+      },
+      "GPIO.GPIO.body.PF3.pull.value": {
+        "type": "global-value",
+        "order": 68,
+        "value": "Up"
+      },
+      "RCC.firmware.value": {
+        "type": "global-other",
+        "order": 69,
+        "value": "ll"
+      },
+      "GPIO.firmware.value": {
+        "type": "global-other",
+        "order": 70,
+        "value": "ll"
+      },
+      "DMA.firmware.value": {
+        "type": "global-other",
+        "order": 71,
+        "value": "ll"
+      },
+      "NVIC.firmware.value": {
+        "type": "global-other",
+        "order": 72,
+        "value": "ll"
+      },
+      "I2C1.firmware.value": {
+        "type": "global-other",
+        "order": 73,
+        "value": "ll"
+      },
+      "ADC1.firmware.value": {
+        "type": "global-other",
+        "order": 74,
+        "value": "ll"
+      },
+      "USART2.firmware.value": {
+        "type": "global-other",
+        "order": 75,
+        "value": "ll"
+      },
+      "USART1.firmware.value": {
+        "type": "global-other",
+        "order": 76,
+        "value": "ll"
+      },
+      "TIM3.firmware.value": {
+        "type": "global-other",
+        "order": 77,
+        "value": "ll"
+      }
+    }
+  },
+  "templateVersion": 3
+}
