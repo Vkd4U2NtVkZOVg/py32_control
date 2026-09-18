@@ -181,6 +181,9 @@ static qSM_Status_t fsm_RunSlow_Cb( qSM_Handler_t h )
     return qSM_STATUS_EXIT_SUCCESS;
 }
 
+/* Forward declaration (defined below): guard for the EVT_RESET transition. */
+static qBool_t fsm_Reset_Guard( qSM_Handler_t h );
+
 static qSM_Status_t fsm_Error_Cb( qSM_Handler_t h )
 {
     FSM_Instance_t *inst = FSM_Instance_Of( h );
@@ -196,8 +199,12 @@ static qSM_Status_t fsm_Error_Cb( qSM_Handler_t h )
             inst->data.resets++;
             break;
         case EVT_RESET:
-            h->NextState = &inst->stateIdle;
-            return qSM_STATUS_SIGNAL_HANDLED;
+            /* guarded: only recover once the ERROR state has been held >= 3 s */
+            if ( fsm_Reset_Guard( h ) ) {
+                h->NextState = &inst->stateIdle;
+                return qSM_STATUS_SIGNAL_HANDLED;
+            }
+            break;
         default:
             break;
     }
