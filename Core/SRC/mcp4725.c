@@ -1,0 +1,68 @@
+/**
+ * @file mcp4725.c
+ * @brief MCP4725A0 software-I2C driver.
+ */
+#include "mcp4725.h"
+
+#define MCP4725_CMD_FAST       (0x00U)
+#define MCP4725_CMD_EEPROM     (0x60U)
+#define MCP4725_CMD_DAC        (0x40U)
+
+static MCP4725_Status_t mcp_status(SoftI2C_Status_t status)
+{
+    return (MCP4725_Status_t)status;
+}
+
+MCP4725_Status_t MCP4725_Init(void)
+{
+    return MCP4725_SetCode(0U);
+}
+
+MCP4725_Status_t MCP4725_SetCode(uint16_t code)
+{
+    uint8_t data[2];
+
+    if (code > MCP4725_MAX_CODE) {
+        code = MCP4725_MAX_CODE;
+    }
+
+    /* Fast mode: 00 PD1 PD0 D11 D10 D9 D8, followed by D7..D0. */
+    data[0] = (uint8_t)(MCP4725_CMD_FAST | ((code >> 8U) & 0x0FU));
+    data[1] = (uint8_t)(code & 0xFFU);
+    return mcp_status(SoftI2C_Master_Write(MCP4725_I2C_ADDR, data, 2U));
+}
+
+MCP4725_Status_t MCP4725_SetVoltage_mV(uint16_t millivolts, uint16_t vdd_millivolts)
+{
+    uint32_t code;
+
+    if (vdd_millivolts == 0U) {
+        return MCP4725_ERR_PARAM;
+    }
+    if (millivolts >= vdd_millivolts) {
+        code = MCP4725_MAX_CODE;
+    } else {
+        code = ((uint32_t)millivolts * MCP4725_MAX_CODE) /
+               (uint32_t)vdd_millivolts;
+    }
+    return MCP4725_SetCode((uint16_t)code);
+}
+
+MCP4725_Status_t MCP4725_SetVoltage(uint16_t millivolts, uint16_t vdd_millivolts)
+{
+    return MCP4725_SetVoltage_mV(millivolts, vdd_millivolts);
+}
+
+MCP4725_Status_t MCP4725_WriteEEPROM(uint16_t code)
+{
+    uint8_t data[2];
+
+    if (code > MCP4725_MAX_CODE) {
+        code = MCP4725_MAX_CODE;
+    }
+
+    /* Write DAC register and EEPROM, normal power-down mode. */
+    data[0] = (uint8_t)(MCP4725_CMD_EEPROM | ((code >> 8U) & 0x0FU));
+    data[1] = (uint8_t)(code & 0xFFU);
+    return mcp_status(SoftI2C_Master_Write(MCP4725_I2C_ADDR, data, 2U));
+}

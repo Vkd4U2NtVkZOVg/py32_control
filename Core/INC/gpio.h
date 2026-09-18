@@ -55,6 +55,7 @@ extern "C" {
 #define TEC_VEN_Port GPIOA
 #define TRES_VDD33USB_CTRL_Pin LL_GPIO_PIN_15
 #define TRES_VDD33USB_CTRL_Port GPIOA
+/* Schematic net mapping: PB0 = PY_SOFT_IIC_SDA, PB1 = PY_SOFT_IIC_SCL. */
 #define SOFT_IIC_SDA_Pin LL_GPIO_PIN_0
 #define SOFT_IIC_SDA_Port GPIOB
 #define SOFT_IIC_SCL_Pin LL_GPIO_PIN_1
