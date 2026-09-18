@@ -33,6 +33,7 @@
 #include "py32f030_it.h"
 /* USER CODE BEGIN Includes */
 #include "qport_py32.h"
+#include "fan.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -154,6 +155,11 @@ void SysTick_Handler(void)
 /* For the available peripheral interrupt handler names, */
 /* please refer to the startup file. */
 /******************************************************************************/
+
+void EXTI2_3_IRQHandler(void)
+{
+  Fan_Tach_IRQHandler();
+}
 
 /* USER CODE BEGIN 1 */
 

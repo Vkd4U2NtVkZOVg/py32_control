@@ -39,6 +39,7 @@
 #include "adc.h"
 #include "usart.h"
 #include "tim.h"
+#include "fan.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "QuarkTS.h"
@@ -112,6 +113,7 @@ int main(void)
   Studio_ADC1_Init();
   Studio_USART2_Init();
   Studio_TIM3_Init();
+  Fan_Init();
   Studio_USART1_Init();
   /* USER CODE BEGIN 2 */
   /* Register QuarkTS critical-section handlers (Cortex-M0+ / CMSIS) */

@@ -99,7 +99,8 @@ void Studio_TIM3_Init(void)
 
   TIM_InitStruct.Prescaler = 0;
   TIM_InitStruct.CounterMode = LL_TIM_COUNTERMODE_UP;
-  TIM_InitStruct.Autoreload = 65535;
+  /* 8 MHz / 25 kHz = 320 timer ticks, suitable for a 4-wire fan. */
+  TIM_InitStruct.Autoreload = 319U;
   TIM_InitStruct.ClockDivision = LL_TIM_CLOCKDIVISION_DIV1;
   TIM_InitStruct.RepetitionCounter = 0;
   /* Initialize TIM3 */

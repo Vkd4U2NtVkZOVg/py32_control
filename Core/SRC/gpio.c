@@ -131,6 +131,9 @@ void Studio_GPIO_Init(void)
   EXTI_InitStruct.LineCommand = ENABLE;
   LL_EXTI_Init(&EXTI_InitStruct);
   LL_EXTI_SetEXTISource(LL_EXTI_CONFIG_PORTB, LL_EXTI_CONFIG_LINE3);
+  LL_EXTI_EnableIT(LL_EXTI_LINE_3);
+  NVIC_SetPriority(EXTI2_3_IRQn, 1U);
+  NVIC_EnableIRQ(EXTI2_3_IRQn);
 
   /* USER CODE BEGIN Studio_GPIO_Init 1 */
 
