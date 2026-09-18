@@ -211,9 +211,62 @@ void Studio_ADC1_Init(void)
   LL_ADC_REG_SetSequencerChAdd(ADC1, LL_ADC_CHANNEL_6);
 
   Studio_ADC1_Calibrate();
+  LL_ADC_Enable(ADC1);
   /* USER CODE BEGIN Studio_ADC1_Init 1 */
 
   /* USER CODE END Studio_ADC1_Init 1 */
+}
+
+/*---------------------------------------------------------------------------*/
+/* Single-channel conversion helpers. A single software-triggered conversion
+ * is used so each result is explicitly associated with its requested channel. */
+uint16_t Studio_ADC1_ReadChannel(uint32_t channel)
+{
+  uint32_t timeout = 100000U;
+  uint16_t value = 0U;
+
+  if (LL_ADC_IsEnabled(ADC1) != 0U) {
+    LL_ADC_Disable(ADC1);
+    while (LL_ADC_IsEnabled(ADC1) != 0U) {
+      /* wait for the ADC disable handshake */
+    }
+  }
+
+  LL_ADC_REG_SetSequencerChannels(ADC1, channel);
+  LL_ADC_ClearFlag_EOC(ADC1);
+  LL_ADC_ClearFlag_EOS(ADC1);
+  LL_ADC_Enable(ADC1);
+  LL_ADC_REG_StartConversion(ADC1);
+  timeout = 100000U;
+  while ((LL_ADC_IsActiveFlag_EOC(ADC1) == 0U) && (timeout-- != 0U)) {
+    /* wait for end of conversion */
+  }
+  if (timeout != 0U) {
+    value = LL_ADC_REG_ReadConversionData12(ADC1);
+  }
+  LL_ADC_ClearFlag_EOC(ADC1);
+  LL_ADC_ClearFlag_EOS(ADC1);
+  return value;
+}
+
+uint16_t Studio_ADC1_ReadHotRaw(void)
+{
+  return Studio_ADC1_ReadChannel(LL_ADC_CHANNEL_5);
+}
+
+uint16_t Studio_ADC1_ReadColdRaw(void)
+{
+  return Studio_ADC1_ReadChannel(LL_ADC_CHANNEL_4);
+}
+
+int32_t Studio_ADC1_ReadHotMilliCelsius(void)
+{
+  return NTC3950_AdcToMilliCelsius(Studio_ADC1_ReadHotRaw());
+}
+
+int32_t Studio_ADC1_ReadColdMilliCelsius(void)
+{
+  return NTC3950_AdcToMilliCelsius(Studio_ADC1_ReadColdRaw());
 }
 
 /* USER CODE BEGIN ExternalFunctions */

@@ -40,6 +40,7 @@ extern "C" {
 
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "ntc3950.h"
 /* USER CODE BEGIN Includes */
 
 /* USER CODE END Includes */
@@ -55,6 +56,11 @@ extern "C" {
 #define TEC_CURR_Port GPIOA
 
 void Studio_ADC1_Init(void);
+uint16_t Studio_ADC1_ReadChannel(uint32_t channel);
+uint16_t Studio_ADC1_ReadHotRaw(void);
+uint16_t Studio_ADC1_ReadColdRaw(void);
+int32_t Studio_ADC1_ReadHotMilliCelsius(void);
+int32_t Studio_ADC1_ReadColdMilliCelsius(void);
 
 /* USER CODE BEGIN Prototypes */
 

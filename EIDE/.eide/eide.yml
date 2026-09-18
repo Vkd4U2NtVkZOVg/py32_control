@@ -24,6 +24,7 @@ virtualFolder:
                 - path: ../Core/SRC/main.c
                 - path: ../Core/SRC/gpio.c
                 - path: ../Core/SRC/adc.c
+                - path: ../Core/SRC/ntc3950.c
                 - path: ../Core/SRC/tim.c
                 - path: ../Core/SRC/usart.c
                 - path: ../Core/SRC/i2c.c
