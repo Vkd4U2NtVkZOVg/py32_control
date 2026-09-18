@@ -308,8 +308,12 @@ void FSM_Example_Init(void)
         qStateMachine_InstallSignalQueue( &inst->machine, &inst->sigQueue );
         qStateMachine_InstallTimeoutSpec( &inst->machine, &inst->timeoutSpec );
 
-        qStateMachine_Set_StateTimeouts( &inst->stateRunFast, s_fastTO, qFLM_ArraySize( s_fastTO ) );
-        qStateMachine_Set_StateTimeouts( &inst->stateRunSlow, s_slowTO, qFLM_ArraySize( s_slowTO ) );
+        /* QuarkTS declares a non-const pointer here but treats the table as   */
+        /* read-only; cast away const so the tables stay in flash.             */
+        qStateMachine_Set_StateTimeouts( &inst->stateRunFast, (qSM_TimeoutStateDefinition_t *)s_fastTO,
+                                         qFLM_ArraySize( s_fastTO ) );
+        qStateMachine_Set_StateTimeouts( &inst->stateRunSlow, (qSM_TimeoutStateDefinition_t *)s_slowTO,
+                                         qFLM_ArraySize( s_slowTO ) );
 
         /* Poll this machine every 100 ms */
         qOS_Add_StateMachineTask( &inst->task, &inst->machine, qMedium_Priority,
