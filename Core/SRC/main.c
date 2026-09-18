@@ -43,6 +43,7 @@
 /* USER CODE BEGIN Includes */
 #include "QuarkTS.h"
 #include "fsm_demo.h"
+#include "qport_py32.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -76,7 +77,7 @@
 /* USER CODE END ExternalFunctions */
 
 /* USER CODE BEGIN 0 */
-extern void QPort_Setup( void );
+
 /* USER CODE END 0 */
 
 /**
@@ -116,8 +117,8 @@ int main(void)
   /* Register QuarkTS critical-section handlers (Cortex-M0+ / CMSIS) */
   QPort_Setup();
 
-  /* Start the scheduler: tick source = HAL_GetTick (1 kHz SysTick timebase) */
-  qOS_Setup( HAL_GetTick, (qTimingBase_t)0.001f, NULL );
+  /* Start the scheduler: tick source = QOS_Tick_Get (1 kHz SysTick timebase) */
+  qOS_Setup( QOS_Tick_Get, (qTimingBase_t)0.001f, NULL );
 
   /* State-machine demo (registers its own state-machine + controller tasks) */
   FSM_Example_Init();

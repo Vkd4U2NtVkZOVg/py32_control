@@ -33,6 +33,7 @@
 #include "main.h"
 #include "QuarkTS.h"
 #include "fsm_demo.h"
+#include "qport_py32.h"
 
 /*============================================================================*/
 /* Tune this to compare RAM usage (override with -D at build time too)        */
@@ -85,17 +86,17 @@ static FSM_Instance_t s_fsm[ FSM_NUM_INSTANCES ];
 /*============================================================================*/
 static void Led_On( void )
 {
-    HAL_GPIO_WritePin( GPIOF, GPIO_PIN_3, GPIO_PIN_SET );
+    LL_GPIO_SetOutputPin( GPIOF, LL_GPIO_PIN_3 );
 }
 
 static void Led_Off( void )
 {
-    HAL_GPIO_WritePin( GPIOF, GPIO_PIN_3, GPIO_PIN_RESET );
+    LL_GPIO_ResetOutputPin( GPIOF, LL_GPIO_PIN_3 );
 }
 
 static void Led_Toggle( void )
 {
-    HAL_GPIO_TogglePin( GPIOF, GPIO_PIN_3 );
+    LL_GPIO_TogglePin( GPIOF, LL_GPIO_PIN_3 );
 }
 
 /*============================================================================*/
@@ -187,7 +188,7 @@ static qSM_Status_t fsm_Error_Cb( qSM_Handler_t h )
     switch ( h->Signal ) {
         case QSM_SIGNAL_ENTRY:
             if ( inst->data.isLedOwner ) { Led_On(); }
-            inst->data.errorEntryTick = HAL_GetTick();
+            inst->data.errorEntryTick = QOS_Tick_Get();
             inst->data.inError = qTrue;
             break;
         case QSM_SIGNAL_EXIT:
@@ -213,7 +214,7 @@ static qBool_t fsm_Reset_Guard( qSM_Handler_t h )
     FSM_InstanceData_t *d = &FSM_Instance_Of( h )->data;
 
     if ( ( qTrue == d->inError ) &&
-         ( ( HAL_GetTick() - d->errorEntryTick ) >= 3000UL ) ) {
+         ( ( QOS_Tick_Get() - d->errorEntryTick ) >= 3000UL ) ) {
         return qTrue;                   /* allow the transition */
     }
     return qFalse;                      /* reject it for now    */

@@ -51,7 +51,6 @@ extern "C" {
 #include "py32f0xx_ll_adc.h"
 #include "py32f0xx_ll_usart.h"
 #include "py32f0xx_ll_tim.h"
-#include "py32f0xx_hal.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 

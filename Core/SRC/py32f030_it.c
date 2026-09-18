@@ -32,7 +32,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "py32f030_it.h"
 /* USER CODE BEGIN Includes */
-
+#include "qport_py32.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -142,7 +142,7 @@ void SysTick_Handler(void)
   /* USER CODE BEGIN SysTick_Handler 0 */
 
   /* USER CODE END SysTick_Handler 0 */
-  HAL_IncTick();                      /* advance the HAL time base (used by QuarkTS) */
+  QOS_Tick_Inc();                  /* advance the 1 kHz time base (QuarkTS) */
   /* USER CODE BEGIN SysTick_Handler 1 */
 
   /* USER CODE END SysTick_Handler 1 */

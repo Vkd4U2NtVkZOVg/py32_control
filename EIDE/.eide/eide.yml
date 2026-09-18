@@ -28,7 +28,6 @@ virtualFolder:
                 - path: ../Core/SRC/usart.c
                 - path: ../Core/SRC/i2c.c
                 - path: ../Core/SRC/soft_i2c.c
-                - path: ../Core/SRC/hal_shim.c
                 - path: ../Core/SRC/rcc.c
                 - path: ../Core/SRC/py32f030_it.c
               folders: []
