@@ -21,6 +21,7 @@ virtualFolder:
             - name: Core
               files:
                 - path: ../Core/SRC/fsm_demo.c
+                - path: ../Core/SRC/notification_demo.c
                 - path: ../Core/SRC/main.c
                 - path: ../Core/SRC/gpio.c
                 - path: ../Core/SRC/adc.c

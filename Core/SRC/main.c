@@ -45,6 +45,7 @@
 #include "QuarkTS.h"
 #include "fsm_demo.h"
 #include "qport_py32.h"
+#include "notification_demo.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -124,6 +125,7 @@ int main(void)
 
   /* State-machine demo (registers its own state-machine + controller tasks) */
   FSM_Example_Init();
+  Notification_Demo_Init();
   /* USER CODE END 2 */
 
   /* Infinite loop */
