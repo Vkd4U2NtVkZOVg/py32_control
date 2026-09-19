@@ -35,6 +35,9 @@ virtualFolder:
                 - path: ../Core/SRC/aht20.c
                 - path: ../Core/SRC/rcc.c
                 - path: ../Core/SRC/py32f030_it.c
+                - path: ../Core/SRC/tres_seq.c
+                - path: ../Core/SRC/tres_cmd.c
+                - path: ../Core/SRC/tres_i2c_slave.c
               folders: []
     - name: Drivers
       files: []
