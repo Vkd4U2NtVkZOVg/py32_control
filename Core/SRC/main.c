@@ -46,6 +46,9 @@
 #include "fsm_demo.h"
 #include "qport_py32.h"
 #include "notification_demo.h"
+#include "tres_seq.h"
+#include "tres_cmd.h"
+#include "tres_i2c_slave.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -126,6 +129,13 @@ int main(void)
   /* State-machine demo (registers its own state-machine + controller tasks) */
   FSM_Example_Init();
   Notification_Demo_Init();
+
+  /* TRES power/boot sequencer + Linux-host I2C interface.               */
+  /* Order matters: the command parser task must exist before the I2C    */
+  /* slave IRQ is enabled (its ISR posts into the parser mailbox).       */
+  TRES_Cmd_Init();
+  TRES_Seq_Init();          /* registers the FSM task, injects autoboot */
+  TRES_I2C_Slave_Init();
   /* USER CODE END 2 */
 
   /* Infinite loop */
