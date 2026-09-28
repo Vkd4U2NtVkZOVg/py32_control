@@ -21,7 +21,7 @@ extern "C" {
 #define FAN_PWM_FREQUENCY_HZ      (25000UL)
 #endif
 #ifndef FAN_TIMER_CLOCK_HZ
-#define FAN_TIMER_CLOCK_HZ        (8000000UL)
+#define FAN_TIMER_CLOCK_HZ        (32000000UL)
 #endif
 
 void Fan_Init(void);
@@ -30,7 +30,6 @@ void Fan_SetDutyPercent(uint8_t duty_percent);
 uint8_t Fan_GetDutyPercent(void);
 uint32_t Fan_GetTachPulses(void);
 void Fan_ClearTachPulses(void);
-uint32_t Fan_GetRPM(uint32_t sample_window_ms);
 void Fan_Tach_IRQHandler(void);
 
 #ifdef __cplusplus

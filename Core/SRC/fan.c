@@ -3,7 +3,6 @@
  * @brief Four-wire fan PWM and tachometer implementation.
  */
 #include "fan.h"
-#include "qport_py32.h"
 
 #define FAN_PWM_PERIOD_TICKS ((FAN_TIMER_CLOCK_HZ / FAN_PWM_FREQUENCY_HZ) - 1UL)
 
@@ -66,24 +65,6 @@ void Fan_ClearTachPulses(void)
     __disable_irq();
     s_tach_pulses = 0U;
     __set_PRIMASK(primask);
-}
-
-uint32_t Fan_GetRPM(uint32_t sample_window_ms)
-{
-    uint32_t pulses;
-    uint32_t start;
-
-    if ((sample_window_ms == 0U) || (FAN_TACH_PULSES_PER_REV == 0U)) {
-        return 0U;
-    }
-    Fan_ClearTachPulses();
-    start = QOS_Tick_Get();
-    while ((uint32_t)(QOS_Tick_Get() - start) < sample_window_ms) {
-        /* wait while SysTick and the tach EXTI continue counting */
-    }
-    pulses = Fan_GetTachPulses();
-    return (pulses * 60000UL) /
-           (sample_window_ms * FAN_TACH_PULSES_PER_REV);
 }
 
 void Fan_Tach_IRQHandler(void)
