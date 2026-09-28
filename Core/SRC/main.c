@@ -32,6 +32,12 @@
 
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+
+#if defined(__GNUC__)
+/* Keep every function in this translation unit unoptimized for bring-up. */
+#pragma GCC optimize ("O0")
+#endif
+
 #include "rcc.h"
 #include "gpio.h"
 #include "i2c.h"
@@ -49,6 +55,13 @@
 #include "tres_seq.h"
 #include "tres_cmd.h"
 #include "tres_i2c_slave.h"
+#include "aht20_task.h"
+#include "fan_task.h"
+#include "nv_params.h"
+#include "usart2_dma.h"
+#include "sdm845_detect.h"
+#include "sdm845_boot.h"
+#include "stdio.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -103,6 +116,7 @@ int main(void)
   /* USER CODE BEGIN Init */
 
   /* USER CODE END Init */
+  
 
   /* Configure the system clock */
   Studio_RCC_Init();
@@ -116,19 +130,22 @@ int main(void)
   SoftI2C_Init();
   Studio_ADC1_Init();
   Studio_USART2_Init();
+  USART2_DMA_Start();       /* USART2 (PA0/PA1) DMA RX via DMA1_Channel1 */
   Studio_TIM3_Init();
   Fan_Init();
   Studio_USART1_Init();
+  NvParams_Init();          /* load non-volatile parameters (FLASH, no write) */
   /* USER CODE BEGIN 2 */
-  /* Register QuarkTS critical-section handlers (Cortex-M0+ / CMSIS) */
+  /* Enable the 1 kHz SysTick tick + critical sections (QPort_Setup); the
+     scheduler needs this time base live before qOS_Setup is called. */
   QPort_Setup();
 
   /* Start the scheduler: tick source = QOS_Tick_Get (1 kHz SysTick timebase) */
   qOS_Setup( QOS_Tick_Get, (qTimingBase_t)0.001f, NULL );
 
   /* State-machine demo (registers its own state-machine + controller tasks) */
-  FSM_Example_Init();
-  Notification_Demo_Init();
+  //FSM_Example_Init();
+  //Notification_Demo_Init();
 
   /* TRES power/boot sequencer + Linux-host I2C interface.               */
   /* Order matters: the command parser task must exist before the I2C    */
@@ -136,6 +153,10 @@ int main(void)
   TRES_Cmd_Init();
   TRES_Seq_Init();          /* registers the FSM task, injects autoboot */
   TRES_I2C_Slave_Init();
+  AHT20_Task_Init();        /* 10 s periodic AHT20 dew-point measurement */
+  Fan_Task_Init();          /* 2 s periodic fan RPM measurement */
+  Sdm845_Detect_Init();     /* SDM845 boot-success detect (USART2 DMA shell) */
+  Sdm845_Boot_Init();       /* SDM845 boot/reset/strap state machine */
   /* USER CODE END 2 */
 
   /* Infinite loop */

@@ -2,7 +2,7 @@ version: "4.1"
 name: TEST
 type: ARM
 deviceName: PY32F030x8
-packDir: ""
+packDir: .pack/Puya/PY32F0xx_DFP.1.2.8
 srcDirs: []
 virtualFolder:
   name: <virtual_root>
@@ -28,16 +28,24 @@ virtualFolder:
                 - path: ../Core/SRC/ntc3950.c
                 - path: ../Core/SRC/tim.c
                 - path: ../Core/SRC/fan.c
+                - path: ../Core/SRC/fan_task.c
                 - path: ../Core/SRC/usart.c
                 - path: ../Core/SRC/i2c.c
                 - path: ../Core/SRC/soft_i2c.c
                 - path: ../Core/SRC/mcp4725.c
                 - path: ../Core/SRC/aht20.c
+                - path: ../Core/SRC/nv_params.c
+                - path: ../Core/SRC/tec_pid.c
+                - path: ../Core/SRC/usart2_dma.c
+                - path: ../Core/SRC/sdm845_detect.c
+                - path: ../Core/SRC/sdm845_boot.c
+                - path: ../Drivers/Embedded-PID/src/pid.c
                 - path: ../Core/SRC/rcc.c
                 - path: ../Core/SRC/py32f030_it.c
                 - path: ../Core/SRC/tres_seq.c
                 - path: ../Core/SRC/tres_cmd.c
                 - path: ../Core/SRC/tres_i2c_slave.c
+                - path: ../Core/SRC/aht20_task.c
               folders: []
     - name: Drivers
       files: []
@@ -89,14 +97,23 @@ targets:
       defineList:
         - PY32F030x8
         - USE_FULL_LL_DRIVER
+        # Board crystal is 16 MHz. The LL library defaults HSE_VALUE to 24 MHz
+        # (py32f0xx_ll_rcc.h), which silently corrupts every runtime clock
+        # computation (USART BRR = 48M/115200 = 0x1A1 instead of 0x116).
+        # Define it globally BEFORE ll_rcc.h so all translation units agree.
+        - HSE_VALUE=16000000U
       incList:
+        - .
         - ../Core/INC
         - ../Drivers/CMSIS/Include
         - ../Drivers/PY32F030_HAL_Driver/Inc
         - ../Drivers/CMSIS/Device/PY32F030/Include
         - ../Drivers/QuarkTS/include
+        - ../Drivers/Embedded-PID/src
       libList: []
-    excludeList: []
+    excludeList:
+      - <virtual_root>/Application/User/Core/fsm_demo.c
+      - <virtual_root>/Application/User/Core/notification_demo.c
     settings:
       debugger: cortex-debug
     toolchain: GCC
@@ -156,4 +173,4 @@ targets:
         otherCmds: '"--pack=${env:PYSDEPATH}/packs/PY32F0xx_DFP.pack"'
         speed: 4M
         targetName: PY32F030x8
-    uploader: pyOCD
+    uploader: JLink

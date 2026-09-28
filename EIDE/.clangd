@@ -1,0 +1,20 @@
+CompileFlags:
+  Add:
+    - -isystemc:\program files (x86)\gnu arm embedded toolchain\10
+      2020-q4-major\arm-none-eabi\include\newlib-nano
+    - -isystemc:\program files (x86)\gnu arm embedded toolchain\10
+      2020-q4-major\arm-none-eabi\include\c++\10.2.1
+    - -isystemc:\program files (x86)\gnu arm embedded toolchain\10
+      2020-q4-major\arm-none-eabi\include\c++\10.2.1\arm-none-eabi\thumb\v6-m\nofp
+    - -isystemc:\program files (x86)\gnu arm embedded toolchain\10
+      2020-q4-major\arm-none-eabi\include\c++\10.2.1\backward
+    - -isystemc:\program files (x86)\gnu arm embedded toolchain\10
+      2020-q4-major\lib\gcc\arm-none-eabi\10.2.1\include
+    - -isystemc:\program files (x86)\gnu arm embedded toolchain\10
+      2020-q4-major\lib\gcc\arm-none-eabi\10.2.1\include-fixed
+    - -isystemc:\program files (x86)\gnu arm embedded toolchain\10
+      2020-q4-major\arm-none-eabi\include
+  Remove: []
+  CompilationDatabase: ./build/Debug
+  Compiler: C:\Program Files (x86)\GNU Arm Embedded Toolchain\10
+    2020-q4-major\bin\arm-none-eabi-gcc.exe
