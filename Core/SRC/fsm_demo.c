@@ -39,7 +39,7 @@
 /* Tune this to compare RAM usage (override with -D at build time too)        */
 /*============================================================================*/
 #ifndef FSM_NUM_INSTANCES
-    #define FSM_NUM_INSTANCES   4U
+    #define FSM_NUM_INSTANCES   1U
 #endif
 
 /* User-defined signals                                                        */
