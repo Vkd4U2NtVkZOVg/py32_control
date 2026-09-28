@@ -94,8 +94,16 @@ void Studio_GPIO_Init(void)
   GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
   LL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  LL_GPIO_ResetOutputPin(GPIOB, SOFT_IIC_SDA_Pin|SOFT_IIC_SCL_Pin|CM108B_VOLUP_Pin|MIX3_BOOTKEY_Pin|MIX3_RST_Pin);
-  GPIO_InitStruct.Pin = SOFT_IIC_SDA_Pin|SOFT_IIC_SCL_Pin|CM108B_VOLUP_Pin|MIX3_BOOTKEY_Pin|MIX3_RST_Pin;
+  LL_GPIO_ResetOutputPin(GPIOB, SOFT_IIC_SDA_Pin|SOFT_IIC_SCL_Pin|CM108B_VOLUP_Pin);
+  GPIO_InitStruct.Pin = SOFT_IIC_SDA_Pin|SOFT_IIC_SCL_Pin|CM108B_VOLUP_Pin;
+  GPIO_InitStruct.Mode = LL_GPIO_MODE_OUTPUT;
+  GPIO_InitStruct.Pull = LL_GPIO_PULL_UP;
+  GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_LOW;
+  GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
+  LL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  LL_GPIO_SetOutputPin(GPIOB, MIX3_BOOTKEY_Pin|MIX3_RST_Pin);
+  GPIO_InitStruct.Pin = MIX3_BOOTKEY_Pin|MIX3_RST_Pin;
   GPIO_InitStruct.Mode = LL_GPIO_MODE_OUTPUT;
   GPIO_InitStruct.Pull = LL_GPIO_PULL_UP;
   GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_LOW;
