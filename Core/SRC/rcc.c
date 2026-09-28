@@ -78,8 +78,9 @@ void Studio_RCC_Init(void)
   /* USER CODE BEGIN Studio_RCC_Init 0 */
 
   /* USER CODE END Studio_RCC_Init 0 */
-  LL_FLASH_SetLatency(LL_FLASH_LATENCY_0);
-  while(LL_FLASH_GetLatency() != LL_FLASH_LATENCY_0)
+  /* 32 MHz HCLK requires one Flash wait state. Set it before raising SYSCLK. */
+  LL_FLASH_SetLatency(LL_FLASH_LATENCY_1);
+  while(LL_FLASH_GetLatency() != LL_FLASH_LATENCY_1)
   {
   }
 
@@ -90,22 +91,29 @@ void Studio_RCC_Init(void)
   }
 
   /* Enable and initialize HSE */
-  LL_RCC_HSE_SetFreqRegion(LL_RCC_HSE_16_32MHz);
+  LL_RCC_HSE_SetFreqRegion(LL_RCC_HSE_8_16MHz);
   LL_RCC_HSE_Enable();
   while(LL_RCC_HSE_IsReady() != 1)
   {
   }
 
-  LL_RCC_SetAHBPrescaler(LL_RCC_SYSCLK_DIV_1);
-  LL_RCC_SetAPB1Prescaler(LL_RCC_APB1_DIV_1);
-  LL_RCC_SetSysClkSource(LL_RCC_SYS_CLKSOURCE_HSISYS);
-  while(LL_RCC_GetSysClkSource() != LL_RCC_SYS_CLKSOURCE_STATUS_HSISYS)
+  /* PY32F030 PLL is fixed at HSE x2: 16 MHz HSE -> 32 MHz SYSCLK. */
+  LL_RCC_PLL_SetMainSource(LL_RCC_PLLSOURCE_HSE);
+  LL_RCC_PLL_Enable();
+  while(LL_RCC_PLL_IsReady() != 1)
   {
   }
 
-  LL_Init1msTick(8000000);
+  LL_RCC_SetAHBPrescaler(LL_RCC_SYSCLK_DIV_1);
+  LL_RCC_SetAPB1Prescaler(LL_RCC_APB1_DIV_1);
+  LL_RCC_SetSysClkSource(LL_RCC_SYS_CLKSOURCE_PLL);
+  while(LL_RCC_GetSysClkSource() != LL_RCC_SYS_CLKSOURCE_STATUS_PLL)
+  {
+  }
+
+  LL_Init1msTick(32000000);
   /* Update the SystemCoreClock global variable(which can be updated also through SystemCoreClockUpdate function) */
-  LL_SetSystemCoreClock(8000000);
+  LL_SetSystemCoreClock(32000000);
 
   /* USER CODE BEGIN Studio_RCC_Init 1 */
 

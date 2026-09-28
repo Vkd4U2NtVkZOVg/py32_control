@@ -20,21 +20,14 @@
 /*============================================================================*/
 /* Tuning                                                                      */
 /*============================================================================*/
-#ifndef SOFT_I2C_BUS_SPEED_HZ
-    #define SOFT_I2C_BUS_SPEED_HZ      (100000UL)   /* 100 kHz (standard mode) */
-#endif
-
-#ifndef SOFT_I2C_CPU_MHZ
-    #define SOFT_I2C_CPU_MHZ           (8u)         /* HSI after Studio_RCC_Init */
-#endif
-
-/* Soft delay: ~ (loads/cmp/branch + NOP) per iteration -> conservative /3.   */
-#define SOFT_I2C_LOOPS_PER_US          ((SOFT_I2C_CPU_MHZ) / 3u)
-
-/* One bit period = 1 / fSCL seconds; we delay half a period (high/low) and a  */
-/* short settle window before sampling a read bit.                            */
-#define SOFT_I2C_HALF_BIT_US           (uint32_t)(1000000UL / 2u / SOFT_I2C_BUS_SPEED_HZ)
-#define SOFT_I2C_QUARTER_BIT_US        (uint32_t)(1000000UL / 4u / SOFT_I2C_BUS_SPEED_HZ)
+/* Timing is intentionally fixed for the 32 MHz PY32F030 clock and 100 kHz
+ * standard-mode bus. Keeping these constants literal avoids division in the
+ * timing path and makes the generated delay deterministic. The loop factor
+ * was derived from the 32 MHz -O0/-Og instruction timing and should be
+ * re-calibrated if the compiler optimization level or clock changes.         */
+#define SOFT_I2C_LOOPS_PER_US          (11U)
+#define SOFT_I2C_HALF_BIT_US           (5U)
+#define SOFT_I2C_QUARTER_BIT_US        (2U)
 
 /* R/W bit appended to a 7-bit address.                                       */
 #define SOFT_I2C_WRITE_BIT             0U
@@ -245,8 +238,8 @@ SoftI2C_Status_t SoftI2C_Master_Write(uint8_t addr7, const uint8_t *buf, uint16_
         return SOFT_I2C_ERR_PARAM;
     }
 
-    __disable_irq();
     primask = __get_PRIMASK();
+    __disable_irq();
 
     if (SOFT_I2C_OK != (stg = SoftI2C_Start())) {
         __set_PRIMASK(primask);
@@ -278,8 +271,8 @@ SoftI2C_Status_t SoftI2C_Master_Read(uint8_t addr7, uint8_t *buf, uint16_t len)
         return SOFT_I2C_ERR_PARAM;
     }
 
-    __disable_irq();
     primask = __get_PRIMASK();
+    __disable_irq();
 
     if (SOFT_I2C_OK != (stg = SoftI2C_Start())) {
         __set_PRIMASK(primask);
@@ -309,8 +302,8 @@ SoftI2C_Status_t SoftI2C_WriteReg(uint8_t addr7, uint8_t reg, const uint8_t *buf
         return SOFT_I2C_ERR_PARAM;
     }
 
-    __disable_irq();
     primask = __get_PRIMASK();
+    __disable_irq();
 
     if (SOFT_I2C_OK != (stg = SoftI2C_Start())) {
         __set_PRIMASK(primask);
@@ -346,8 +339,8 @@ SoftI2C_Status_t SoftI2C_ReadReg(uint8_t addr7, uint8_t reg, uint8_t *buf, uint1
         return SOFT_I2C_ERR_PARAM;
     }
 
-    __disable_irq();
     primask = __get_PRIMASK();
+    __disable_irq();
 
     if (SOFT_I2C_OK != (stg = SoftI2C_Start())) {
         __set_PRIMASK(primask);
