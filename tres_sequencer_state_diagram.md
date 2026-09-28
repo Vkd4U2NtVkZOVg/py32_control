@@ -38,46 +38,61 @@ flowchart LR
 ```mermaid
 stateDiagram-v2
     direction TB
+    [*] --> STATE_POWER_ON
 
-    [*] --> PWR_UP
+    state STATE_POWER_ON {
+        [*] --> Rail_Up
+        Rail_Up --> [*] : t_rail, PWR_EN=1, BOOT0=0, USB=0
+    }
+    STATE_POWER_ON --> STATE_BOOT_WAIT_NORMAL : 主电源爬升完成
 
-    PWR_UP --> BOOT_WAIT_NORMAL : 超时 t_rail
-    BOOT_WAIT_NORMAL --> RUNNING : SOM_BOOTED 上升沿(链式确认)
-    BOOT_WAIT_NORMAL --> RUNNING : SOM_BOOTED 已为高 / 超时 t_appboot(宽限)
+    state STATE_BOOT_WAIT_NORMAL {
+        [*] --> Release_RST
+        Release_RST --> Check_SOM : 释放 RST, BOOT0=0 已采样
+        Check_SOM --> Check_SOM : SOM_BOOTED 未拉高(无超时, 一直等)
+        Check_SOM --> Booted : SOM_BOOTED 上升沿
+        Check_SOM --> Booted : SOM_BOOTED 已高 / t_appboot 宽限
+    }
+    STATE_BOOT_WAIT_NORMAL --> STATE_RUNNING : 启动链确认 (上升沿, 或已高 + t_appboot)
 
-    RUNNING --> PULSE_RESET : CMD_RESET [BOOT0=0, VDD33USB=0]
-    RUNNING --> PULSE_RESET : CMD_ENTER_DFU [BOOT0=1, VDD33USB=1]
-    DFU_ACTIVE --> PULSE_RESET : CMD_RESET [BOOT0=0, VDD33USB=0](烧完重启回 app)
+    state STATE_RUNNING {
+        [*] --> Idle
+        Idle --> Do_Reset : CMD_RESET
+        Idle --> Do_DFU : CMD_ENTER_DFU
+    }
+    STATE_RUNNING --> STATE_RESET_PULSE : CMD_RESET
+    STATE_RUNNING --> STATE_RESET_PULSE_DFU : CMD_ENTER_DFU
 
-    PULSE_RESET --> BOOT_WAIT_NORMAL : BOOT0=0 / 超时 t_rst
-    PULSE_RESET --> BOOT_WAIT_DFU : BOOT0=1 / 超时 t_rst
-    BOOT_WAIT_DFU --> DFU_ACTIVE : 超时 t_enum
+    state STATE_RESET_PULSE {
+        [*] --> Assert
+        Assert --> [*] : BOOT0=0, USB=0, RST=0, t_rst 后释放
+    }
+    STATE_RESET_PULSE --> STATE_BOOT_WAIT_NORMAL : 复位完成
 
-    PWR_UP : entry: PWR_EN=1, VDD33USB=0, BOOT0=0; RST 保持 0
-    BOOT_WAIT_NORMAL : entry: 释放 RST(BOOT0=0 已采样)
-    BOOT_WAIT_NORMAL : 等 SOM_BOOTED; 无超时, 起不来就一直等(C1)
-    BOOT_WAIT_DFU : entry: 释放 RST(BOOT0=1 已采样, H7 进系统 DFU)
-    RUNNING : TRES app + Linux 均在运行; VDD33USB=0; host_ready=1
-    DFU_ACTIVE : 等待主机 dfu-util; VDD33USB 必须保持 1
-    PULSE_RESET : entry: RST=0; 进门前按命令设好 BOOT0/VDD33USB
+    state STATE_RESET_PULSE_DFU {
+        [*] --> Assert
+        Assert --> [*] : BOOT0=1, USB=1, RST=0, t_rst 后释放
+    }
+    STATE_RESET_PULSE_DFU --> STATE_BOOT_WAIT_DFU : 复位完成
 
-    note right of RUNNING
-        REPORT_FAIL: 只把失败计数 +1(暴露在 STATUS/RETRIES
-        给主机读), 不触发任何迁移 —— TRES 是否存活由主机判断
-    end note
+    state STATE_BOOT_WAIT_DFU {
+        [*] --> Enumerate
+        Enumerate --> [*] : H7 进系统 DFU, 等 t_enum 枚举
+    }
+    STATE_BOOT_WAIT_DFU --> STATE_DFU_ACTIVE : USB 枚举完成
 
-    note left of DFU_ACTIVE
-        DFU 时 TRES 不再启动 SOM, SOM_BOOTED 不会上升;
-        烧完由主机发 CMD_RESET(BOOT0=0, VDD33USB=0) 重启回 app,
-        USB 轨随之关断
-    end note
+    state STATE_DFU_ACTIVE {
+        [*] --> Wait_Dfu
+        Wait_Dfu --> [*] : 等 dfu-util, USB=1, CMD_RESET 后退出
+    }
+    STATE_DFU_ACTIVE --> STATE_RESET_PULSE : CMD_RESET(退出DFU, BOOT0=0, USB=0)
 ```
 
 ### 关键设计决策
 
 1. **冷启动无条件 NORMAL,无电源管理**。初始状态就是 `PWR_UP`,机器上电即自启动 BOOT0=0,不需要主机、也不需要注入开机命令;不存在 OFF/关机/FAULT 路径。
-2. **DFU 是"复位进入",不是"掉电进入"**。因为 SOM 由 TRES 启动、TRES 由 PY32 启动,冷启动阶段没有主机在线、不可能进 DFU;DFU 只在 SOM 起来后由主机发 `CMD_ENTER_DFU` 触发:源状态先置 `BOOT0=1`、`VDD33USB=1`,再进 `PULSE_RESET` 拉低 RST,超时后释放——H7 在 RST 释放瞬间采样 BOOT0=1,进系统 bootloader。全程不断电。
-3. **BOOT0/VDD33USB 由源状态在进 `PULSE_RESET` 前置位**,保证它们在 RST 断言期间稳定;`PULSE_RESET` 超时后按 BOOT0 电平分流到正常启动或 DFU。因此不再需要 `mode` 变量。
+2. **DFU 是"复位进入",不是"掉电进入"**。因为 SOM 由 TRES 启动、TRES 由 PY32 启动,冷启动阶段没有主机在线、不可能进 DFU;DFU 只在 SOM 起来后由主机发 `CMD_ENTER_DFU` 触发:进入 `PULSE_RESET_DFU` 时置 `BOOT0=1`、`VDD33USB=1` 并拉低 RST,超时后释放——H7 在 RST 释放瞬间采样 BOOT0=1,进系统 bootloader。全程不断电。
+3. **复位脉冲拆成两个目标唯一的状态**:`PULSE_RESET_NORMAL` / `PULSE_RESET_DFU` 各自在 entry 置好 `BOOT0`/`VDD33USB` 并断言 RST(保证它们在 RST 断言期间稳定),超时后分别**固定**流向 `BOOT_WAIT_NORMAL` / `BOOT_WAIT_DFU`——不再需要"按 BOOT0 电平分流",也不再需要 `mode` 变量。
 4. **`REPORT_FAIL` 只计数、不迁移**。命令层直接 `s_failCnt++`,主机读 `RETRIES` 得知失败次数,PY32 不做任何自动动作(不重启、不锁存)。
 5. **冷启动无监督超时**。`BOOT_WAIT_NORMAL` 只等 `SOM_BOOTED`,若 TRES 起不来就一直等,不留自动干预。
 
@@ -87,19 +102,19 @@ stateDiagram-v2
 |---|---|---|---|---|
 | PWR_UP | 1 | 0(复位保持) | 0 | 0 |
 | BOOT_WAIT_NORMAL / RUNNING | 1 | 1(释放) | 0(保持) | 0 |
-| PULSE_RESET(CMD_RESET) | 1 | 0(脉冲) | 0 | 0 |
-| PULSE_RESET(CMD_ENTER_DFU) | 1 | 0(脉冲) | 1 | 1 |
+| PULSE_RESET_NORMAL | 1 | 0(脉冲) | 0 | 0 |
+| PULSE_RESET_DFU | 1 | 0(脉冲) | 1 | 1 |
 | BOOT_WAIT_DFU / DFU_ACTIVE | 1 | 1(释放) | 1(保持) | 1 |
 
 ## ①② 层接口设计
 
 ### 命令与合法性矩阵(解析任务强制执行)
 
-| 命令 | PWR_UP/BOOT_WAIT_NORMAL | RUNNING | PULSE_RESET | BOOT_WAIT_DFU | DFU_ACTIVE |
-|---|---|---|---|---|---|
-| `CMD_RESET` | ✗ | ✓(BOOT0=0) | ✗ | ✗ | ✓(退出 DFU,BOOT0=0) |
-| `CMD_ENTER_DFU` | ✗ | ✓(BOOT0=1) | ✗ | ✗ | ✗(已在 DFU) |
-| `CMD_REPORT_FAIL` | ✓(计数) | ✓(计数) | ✓(计数) | ✓(计数) | ✓(计数) |
+| 命令 | PWR_UP/BOOT_WAIT_NORMAL | RUNNING | PULSE_RESET_NORMAL | PULSE_RESET_DFU | BOOT_WAIT_DFU | DFU_ACTIVE |
+|---|---|---|---|---|---|---|
+| `CMD_RESET` | ✗ | ✓(BOOT0=0) | ✗ | ✗ | ✗ | ✓(退出 DFU,BOOT0=0) |
+| `CMD_ENTER_DFU` | ✗ | ✓(BOOT0=1) | ✗ | ✗ | ✗ | ✗(已在 DFU) |
+| `CMD_REPORT_FAIL` | ✓(计数) | ✓(计数) | ✓(计数) | ✓(计数) | ✓(计数) | ✓(计数) |
 
 `CMD_REPORT_FAIL` 在所有状态都接受、只计数不迁移;其余两条命令仅在 RUNNING / DFU_ACTIVE 有效。
 
@@ -120,7 +135,7 @@ stateDiagram-v2
 |---|---|---|---|
 | `t_rail` | PWR_UP | 50 ms | 主电源爬升,示波器实测 |
 | `t_appboot` | BOOT_WAIT_NORMAL | 2 s | 复位重启场景的宽限(SOM_BOOTED 已高) |
-| `t_rst` | PULSE_RESET | 20 ms | NRST 最小脉宽 + 外部电容充电 |
+| `t_rst` | PULSE_RESET_NORMAL / PULSE_RESET_DFU | 20 ms | NRST 最小脉宽 + 外部电容充电 |
 | `t_enum` | BOOT_WAIT_DFU | 3 s | DFU USB 枚举窗,别设太短 |
 
 ## QuarkTS 实现映射

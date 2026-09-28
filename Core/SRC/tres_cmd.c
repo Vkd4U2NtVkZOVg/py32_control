@@ -48,13 +48,13 @@ static uint8_t Policy_Apply(uint8_t cmd, uint8_t param)
 
     if ( cmd == TRES_CMD_RESET ) {
         /* reset/reboot allowed only from RUNNING or DFU_ACTIVE              */
-        if ( ( st == (uint8_t)TRES_ST_RUNNING ) ||
-             ( st == (uint8_t)TRES_ST_DFU_ACTIVE ) ) {
+        if ( ( st == (uint8_t)TRES_RUNNING ) ||
+             ( st == (uint8_t)TRES_DFU_ACTIVE ) ) {
             TRES_Seq_RequestReset();
             return 1u;
         }
     } else if ( cmd == TRES_CMD_ENTER_DFU ) {
-        if ( st == (uint8_t)TRES_ST_RUNNING ) {
+        if ( st == (uint8_t)TRES_RUNNING ) {
             TRES_Seq_RequestEnterDfu();
             return 1u;
         }

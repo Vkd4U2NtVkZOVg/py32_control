@@ -7,9 +7,9 @@
   *
   *     PWR_UP -> BOOT_WAIT_NORMAL -> RUNNING
   *                                    |  CMD_RESET
-  *     RUNNING --CMD_RESET--> PULSE_RESET --BOOT0=0--> BOOT_WAIT_NORMAL
-  *     RUNNING --CMD_ENTER_DFU--> PULSE_RESET --BOOT0=1--> BOOT_WAIT_DFU
-  *                          -> DFU_ACTIVE --CMD_RESET--> PULSE_RESET (exit DFU)
+*     RUNNING --CMD_RESET--> PULSE_RESET_NORMAL --BOOT0=0--> BOOT_WAIT_NORMAL
+ *     RUNNING --CMD_ENTER_DFU--> PULSE_RESET_DFU --BOOT0=1--> BOOT_WAIT_DFU
+ *                          -> DFU_ACTIVE --CMD_RESET--> PULSE_RESET_NORMAL (exit DFU)
   *
   * Cold boot is unconditional: the initial state IS PWR_UP, so TRES always
   * boots NORMAL (BOOT0=0) with no host interaction. There is no OFF / power
@@ -55,12 +55,13 @@ extern "C" {
 /* Exported types ------------------------------------------------------------*/
 /** Sequencer states, exposed as STATUS bit[3:0] to the host. */
 typedef enum {
-    TRES_ST_PWR_UP = 0,
-    TRES_ST_BOOT_WAIT_NORMAL,
-    TRES_ST_RUNNING,
-    TRES_ST_PULSE_RESET,
-    TRES_ST_BOOT_WAIT_DFU,
-    TRES_ST_DFU_ACTIVE
+    TRES_PWR_UP = 0,
+    TRES_BOOT_WAIT_NORMAL,
+    TRES_RUNNING,
+    TRES_PULSE_RESET_NORMAL,
+    TRES_PULSE_RESET_DFU,
+    TRES_BOOT_WAIT_DFU,
+    TRES_DFU_ACTIVE
 } TRES_State_t;
 
 /* Exported functions --------------------------------------------------------*/

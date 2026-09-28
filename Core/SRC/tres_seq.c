@@ -3,22 +3,49 @@
   * @file    tres_seq.c
   * @brief   TRES (STM32H7) boot/reset/DFU sequencer state machine (QuarkTS).
   *
-  * Six states, no power management:
+  * State machine (polled every 10 ms), no power management:
   *
   *     [*] --> PWR_UP --t_rail--> BOOT_WAIT_NORMAL --SOM_BOOTED--> RUNNING
-  *     RUNNING --CMD_RESET--> PULSE_RESET --BOOT0=0--> BOOT_WAIT_NORMAL
-  *     RUNNING --CMD_ENTER_DFU--> PULSE_RESET --BOOT0=1--> BOOT_WAIT_DFU
-  *                          --t_enum--> DFU_ACTIVE --CMD_RESET--> PULSE_RESET
+  *     RUNNING --CMD_RESET--> PULSE_RESET_NORMAL --> BOOT_WAIT_NORMAL
+  *     RUNNING --CMD_ENTER_DFU--> PULSE_RESET_DFU --> BOOT_WAIT_DFU
+  *                       --t_enum--> DFU_ACTIVE --CMD_RESET--> PULSE_RESET_NORMAL
   *
+  *   PWR_UP          asserts PWR_EN=1, BOOT0=0, VDD33USB=0; RST stays asserted
+  *                   (from GPIO init) until BOOT_WAIT_NORMAL releases it.
+  *   BOOT_WAIT_NORMAL releases RST and waits for the whole boot chain: a fresh
+  *                   SOM_BOOTED rising edge, or (host already high) the t_appboot
+  *                   grace, confirms the chain -> RUNNING. No supervision timeout.
+  *   RUNNING         idle; samples SOM_BOOTED to keep host_ready, and accepts
+  *                   CMD_RESET (-> NORMAL) / CMD_ENTER_DFU (-> DFU).
+  *   PULSE_RESET_NORMAL asserts RST with BOOT0=0, VDD33USB=0; fixed target
+  *                   BOOT_WAIT_NORMAL after t_rst.
+  *   PULSE_RESET_DFU asserts RST with BOOT0=1, VDD33USB=1; fixed target
+  *                   BOOT_WAIT_DFU after t_rst.
+  *   BOOT_WAIT_DFU   releases RST (BOOT0=1 latched); t_enum enumeration window
+  *                   -> DFU_ACTIVE.
+  *   DFU_ACTIVE      waits for the host dfu-util session; VDD33USB stays 1.
+  *                   CMD_RESET -> PULSE_RESET_NORMAL (entry clears BOOT0/USB).
+  *
+  * The reset pulse is split into two states whose target is fixed: before their
+  * t_rst timeout they assert RST and set BOOT0/VDD33USB, then both states leave
+  * for a single, predetermined next state (NORMAL -> BOOT_WAIT_NORMAL,
+  * DFU -> BOOT_WAIT_DFU). No level-based routing is needed, so BOOT0 is set in
+  * the state entry rather than by the source state.
+  *
+  * Every long delay is a state-machine timeout, so the task yields the CPU
+  * between states; fixed one-shot delays (t_rail / t_rst / t_enum) use const
+  * timeout-spec tables in flash, like the s_fastTO[] pattern of fsm_demo.c.
   * The machine is polled every 10 ms; QuarkTS invokes the current state
   * callback on every task cycle (Signal == QSM_SIGNAL_NONE when nothing is
   * queued), so tick-based supervision (t_appboot grace) works without extra
-  * wake-up signals. Fixed one-shot delays (t_rail / t_rst / t_enum) use const
-  * timeout-spec tables in flash, like the s_fastTO[] pattern of fsm_demo.c.
+  * wake-up signals.
   *
-  * BOOT0 and VDD33USB are set by the *source* state (RUNNING / DFU_ACTIVE)
-  * just before entering PULSE_RESET, so that their levels are stable while
-  * RST is asserted; PULSE_RESET routes on the BOOT0 level after the pulse.
+  * NOTE: never assign h->NextState inside a QSM_SIGNAL_ENTRY handler. The
+  * QuarkTS engine calls the entry action via qStateMachine_StateOnEntry(),
+  * which does not check NextState (only qStateMachine_StateOnSignal() does).
+  * The sampling states above (BOOT_WAIT_NORMAL, RUNNING) therefore set
+  * h->NextState in the periodic-poll (QSM_SIGNAL_NONE) branch, which the engine
+  * does deliver through StateOnSignal. All fixed delays use timeout tables.
   ******************************************************************************
   */
 #include "main.h"
@@ -46,7 +73,8 @@ typedef struct {
 } TRES_Data_t;
 
 static qSM_State_t stPwrUp, stBootWaitN, stRunning,
-                   stPulseReset, stBootWaitD, stDfuActive;
+                   stPulseResetNormal, stPulseResetDfu,
+                   stBootWaitD, stDfuActive;
 
 typedef struct {
     qTask_t            task;
@@ -81,11 +109,6 @@ static void Pins_Boot0( uint8_t on )
 {
     if ( on != 0u ) { LL_GPIO_SetOutputPin( GPIOB, TRES_BOOT0_Pin ); }
     else           { LL_GPIO_ResetOutputPin( GPIOB, TRES_BOOT0_Pin ); }
-}
-
-static uint8_t Pins_Boot0Level( void )
-{
-    return ( LL_GPIO_IsOutputPinSet( GPIOB, TRES_BOOT0_Pin ) != 0u ) ? 1u : 0u;
 }
 
 static void Pins_VddUsb( uint8_t on )
@@ -126,7 +149,7 @@ static qSM_Status_t st_PwrUp_Cb( qSM_Handler_t h )
 
     switch ( h->Signal ) {
         case QSM_SIGNAL_ENTRY:
-            d->stateId = (uint8_t)TRES_ST_PWR_UP;
+            d->stateId = (uint8_t)TRES_PWR_UP;
             Pins_PwrOn();              /* PWR_EN=1                           */
             Pins_Boot0( 0u );          /* cold boot is always NORMAL          */
             Pins_VddUsb( 0u );         /* USB rail off until a DFU request    */
@@ -145,17 +168,20 @@ static qSM_Status_t st_BootWaitNormal_Cb( qSM_Handler_t h )
 {
     TRES_Data_t *d = (TRES_Data_t *)h->StateData;
 
-    if ( QSM_SIGNAL_ENTRY == h->Signal ) {
-        d->stateId   = (uint8_t)TRES_ST_BOOT_WAIT_NORMAL;
-        d->entryTick = QOS_Tick_Get();
-        Pins_RstRelease();             /* BOOT0=0 is latched by the H7 here   */
-        /* capture the current level so a pre-asserted host (reset path)     */
-        /* does not look like a fresh edge                                    */
-        d->somPrev   = Pins_SomBooted();
-        d->hostReady = d->somPrev;
-        d->somRise   = 0u;
-        d->somFall   = 0u;
-        return qSM_STATUS_EXIT_SUCCESS;
+    switch ( h->Signal ) {
+        case QSM_SIGNAL_ENTRY:
+            d->stateId   = (uint8_t)TRES_BOOT_WAIT_NORMAL;
+            d->entryTick = QOS_Tick_Get();
+            Pins_RstRelease();             /* BOOT0=0 is latched by the H7 here   */
+            /* capture the current level so a pre-asserted host (reset path)     */
+            /* does not look like a fresh edge                                    */
+            d->somPrev   = Pins_SomBooted();
+            d->hostReady = d->somPrev;
+            d->somRise   = 0u;
+            d->somFall   = 0u;
+            return qSM_STATUS_EXIT_SUCCESS;
+        default:
+            break;
     }
 
     /* periodic supervision: wait for the whole boot chain, no timeout (C1). */
@@ -179,25 +205,19 @@ static qSM_Status_t st_Running_Cb( qSM_Handler_t h )
 {
     TRES_Data_t *d = (TRES_Data_t *)h->StateData;
 
-    if ( QSM_SIGNAL_ENTRY == h->Signal ) {
-        d->stateId = (uint8_t)TRES_ST_RUNNING;
-        d->hostReady = Pins_SomBooted();
-        d->somPrev   = d->hostReady;
-        d->somRise   = 0u;
-        d->somFall   = 0u;
-        return qSM_STATUS_EXIT_SUCCESS;
-    }
-
     switch ( h->Signal ) {
-        case SIG_RESET:                /* normal re-boot: USB rail stays off */
-            Pins_Boot0( 0u );
-            Pins_VddUsb( 0u );
-            h->NextState = &stPulseReset;
+        case QSM_SIGNAL_ENTRY:
+            d->stateId = (uint8_t)TRES_RUNNING;
+            d->hostReady = Pins_SomBooted();
+            d->somPrev   = d->hostReady;
+            d->somRise   = 0u;
+            d->somFall   = 0u;
+            return qSM_STATUS_EXIT_SUCCESS;
+        case SIG_RESET:                /* normal re-boot: steps to NORMAL    */
+            h->NextState = &stPulseResetNormal;
             return qSM_STATUS_SIGNAL_HANDLED;
-        case SIG_ENTER_DFU:            /* DFU: BOOT0 high + USB rail on      */
-            Pins_Boot0( 1u );
-            Pins_VddUsb( 1u );
-            h->NextState = &stPulseReset;
+        case SIG_ENTER_DFU:            /* DFU entry: steps to DFU pulse      */
+            h->NextState = &stPulseResetDfu;
             return qSM_STATUS_SIGNAL_HANDLED;
         default:
             break;
@@ -208,18 +228,39 @@ static qSM_Status_t st_Running_Cb( qSM_Handler_t h )
     return qSM_STATUS_EXIT_SUCCESS;
 }
 
-static qSM_Status_t st_PulseReset_Cb( qSM_Handler_t h )
+static qSM_Status_t st_PulseResetNormal_Cb( qSM_Handler_t h )
 {
     TRES_Data_t *d = (TRES_Data_t *)h->StateData;
 
     switch ( h->Signal ) {
         case QSM_SIGNAL_ENTRY:
-            d->stateId = (uint8_t)TRES_ST_PULSE_RESET;
-            Pins_RstAssert();          /* BOOT0/VDD33USB already set by the  */
-            break;                     /* source state before this transition*/
+            d->stateId = (uint8_t)TRES_PULSE_RESET_NORMAL;
+            Pins_Boot0( 0u );          /* boot NORMAL, USB rail off          */
+            Pins_VddUsb( 0u );
+            Pins_RstAssert();          /* pulse low, released after t_rst    */
+            break;
         case SIG_SEQ_TIMEOUT:
-            h->NextState = ( Pins_Boot0Level() != 0u ) ? &stBootWaitD
-                                                       : &stBootWaitN;
+            h->NextState = &stBootWaitN;   /* fixed target                    */
+            return qSM_STATUS_SIGNAL_HANDLED;
+        default:
+            break;
+    }
+    return qSM_STATUS_EXIT_SUCCESS;
+}
+
+static qSM_Status_t st_PulseResetDfu_Cb( qSM_Handler_t h )
+{
+    TRES_Data_t *d = (TRES_Data_t *)h->StateData;
+
+    switch ( h->Signal ) {
+        case QSM_SIGNAL_ENTRY:
+            d->stateId = (uint8_t)TRES_PULSE_RESET_DFU;
+            Pins_Boot0( 1u );          /* boot to system DFU, USB rail on    */
+            Pins_VddUsb( 1u );
+            Pins_RstAssert();          /* pulse low, released after t_rst    */
+            break;
+        case SIG_SEQ_TIMEOUT:
+            h->NextState = &stBootWaitD;   /* fixed target                    */
             return qSM_STATUS_SIGNAL_HANDLED;
         default:
             break;
@@ -233,7 +274,7 @@ static qSM_Status_t st_BootWaitDfu_Cb( qSM_Handler_t h )
 
     switch ( h->Signal ) {
         case QSM_SIGNAL_ENTRY:
-            d->stateId = (uint8_t)TRES_ST_BOOT_WAIT_DFU;
+            d->stateId = (uint8_t)TRES_BOOT_WAIT_DFU;
             Pins_RstRelease();         /* BOOT0=1 latched: system DFU starts */
             break;
         case SIG_SEQ_TIMEOUT:
@@ -251,13 +292,11 @@ static qSM_Status_t st_DfuActive_Cb( qSM_Handler_t h )
 
     switch ( h->Signal ) {
         case QSM_SIGNAL_ENTRY:
-            d->stateId = (uint8_t)TRES_ST_DFU_ACTIVE;
+            d->stateId = (uint8_t)TRES_DFU_ACTIVE;
             /* VDD33USB must stay 1; host drives the DFU session             */
             break;
         case SIG_RESET:                /* flash done: exit DFU, boot app     */
-            Pins_Boot0( 0u );
-            Pins_VddUsb( 0u );         /* USB rail off again                 */
-            h->NextState = &stPulseReset;
+            h->NextState = &stPulseResetNormal;  /* entry clears BOOT0/USB   */
             return qSM_STATUS_SIGNAL_HANDLED;
         default:
             break;
@@ -327,15 +366,16 @@ void TRES_Seq_Init( void )
     s_seq.data.somPrev   = 0u;
     s_seq.data.somRise   = 0u;
     s_seq.data.somFall   = 0u;
-    s_seq.data.stateId   = (uint8_t)TRES_ST_PWR_UP;
+    s_seq.data.stateId   = (uint8_t)TRES_PWR_UP;
     s_seq.data.entryTick = 0u;
 
     qStateMachine_Setup( &s_seq.machine, NULL, &stPwrUp, NULL, NULL );
 
     qStateMachine_StateSubscribe( &s_seq.machine, &stPwrUp,      NULL, st_PwrUp_Cb,           NULL, &s_seq.data );
     qStateMachine_StateSubscribe( &s_seq.machine, &stBootWaitN,  NULL, st_BootWaitNormal_Cb,  NULL, &s_seq.data );
-    qStateMachine_StateSubscribe( &s_seq.machine, &stRunning,    NULL, st_Running_Cb,         NULL, &s_seq.data );
-    qStateMachine_StateSubscribe( &s_seq.machine, &stPulseReset, NULL, st_PulseReset_Cb,      NULL, &s_seq.data );
+    qStateMachine_StateSubscribe( &s_seq.machine, &stRunning,           NULL, st_Running_Cb,         NULL, &s_seq.data );
+    qStateMachine_StateSubscribe( &s_seq.machine, &stPulseResetNormal,  NULL, st_PulseResetNormal_Cb, NULL, &s_seq.data );
+    qStateMachine_StateSubscribe( &s_seq.machine, &stPulseResetDfu,     NULL, st_PulseResetDfu_Cb,    NULL, &s_seq.data );
     qStateMachine_StateSubscribe( &s_seq.machine, &stBootWaitD,  NULL, st_BootWaitDfu_Cb,     NULL, &s_seq.data );
     qStateMachine_StateSubscribe( &s_seq.machine, &stDfuActive,  NULL, st_DfuActive_Cb,       NULL, &s_seq.data );
 
@@ -347,7 +387,8 @@ void TRES_Seq_Init( void )
     /* QuarkTS declares a non-const pointer here but treats the table as     */
     /* read-only; cast away const so the tables stay in flash.               */
     qStateMachine_Set_StateTimeouts( &stPwrUp,      (qSM_TimeoutStateDefinition_t *)s_toRail,  qFLM_ArraySize( s_toRail ) );
-    qStateMachine_Set_StateTimeouts( &stPulseReset, (qSM_TimeoutStateDefinition_t *)s_toPulse, qFLM_ArraySize( s_toPulse ) );
+    qStateMachine_Set_StateTimeouts( &stPulseResetNormal, (qSM_TimeoutStateDefinition_t *)s_toPulse, qFLM_ArraySize( s_toPulse ) );
+    qStateMachine_Set_StateTimeouts( &stPulseResetDfu,    (qSM_TimeoutStateDefinition_t *)s_toPulse, qFLM_ArraySize( s_toPulse ) );
     qStateMachine_Set_StateTimeouts( &stBootWaitD,  (qSM_TimeoutStateDefinition_t *)s_toEnum,  qFLM_ArraySize( s_toEnum ) );
 
     /* FSM task polls every 10 ms; all sequencing delays are >= 5 ms         */
