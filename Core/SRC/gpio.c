@@ -136,7 +136,9 @@ void Studio_GPIO_Init(void)
   NVIC_EnableIRQ(EXTI2_3_IRQn);
 
   /* USER CODE BEGIN Studio_GPIO_Init 1 */
-
+  /* TRES_PWR_EN is left low here on purpose: the TRES sequencer raises it in
+     the PWR_UP state entry (Pins_PwrOn), matching the state diagram and its
+     anti-backfeed intent. RST stays low (asserted) until BOOT_WAIT releases it. */
   /* USER CODE END Studio_GPIO_Init 1 */
 }
 
