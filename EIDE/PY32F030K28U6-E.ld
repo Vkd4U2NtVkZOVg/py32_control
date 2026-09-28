@@ -62,7 +62,9 @@ _Min_Stack_Size = 0x200; /* required amount of stack */
 MEMORY
 {
 RAM (xrw)      : ORIGIN = 0x20000000, LENGTH = 8K
-FLASH (rx)      : ORIGIN = 0x8000000, LENGTH = 64K
+FLASH (rx)      : ORIGIN = 0x8000000, LENGTH = 60K
+/* The last 4 KB sector (0x0800F000-0x0800FFFF) is reserved for the
+   non-volatile parameter store (nv_params.c); do not map code/data into it. */
 }
 
 /* Define output sections */
