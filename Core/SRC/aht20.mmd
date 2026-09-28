@@ -1,0 +1,47 @@
+stateDiagram-v2
+    [*] --> STATE_POWER_ON_WAIT : 上电启动
+    
+    STATE_POWER_ON_WAIT --> STATE_CHECK_STATUS : 延时 >= 100ms
+
+    state STATE_CHECK_STATUS {
+        [*] --> Send_0x71
+        Send_0x71 --> Judge : 读取1字节状态字
+        Judge --> Need_Init : (状态字 & 0x18) != 0x18
+        Judge --> Normal : (状态字 & 0x18) == 0x18
+    }
+
+    STATE_CHECK_STATUS --> STATE_SPECIAL_INIT : 未通过(需初始化寄存器)
+    STATE_CHECK_STATUS --> STATE_PRE_TRIGGER : 已通过(状态正常)
+
+    STATE_SPECIAL_INIT --> STATE_PRE_TRIGGER : 寄存器初始化完成
+
+    STATE_PRE_TRIGGER --> STATE_TRIGGER : 延时 10ms
+    
+    state STATE_TRIGGER {
+        [*] --> Send_AC
+        Send_AC --> [*] : 发送 0xAC 及其参数 0x33, 0x00
+    }
+
+    STATE_TRIGGER --> STATE_WAIT_MEASURE : 触发命令发送成功
+
+    state STATE_WAIT_MEASURE {
+        [*] --> Check_Busy
+        Check_Busy --> Check_Busy : 状态字 Bit[7] == 1 (忙)
+        Check_Busy --> Ready : 状态字 Bit[7] == 0 (闲)
+    }
+
+    STATE_WAIT_MEASURE --> STATE_READ_DATA : 测量完成 (>=80ms 且 Bit[7]=0)
+
+    state STATE_READ_DATA {
+        [*] --> Read_Bytes
+        Read_Bytes --> [*] : 读取6字节数据及可选CRC
+    }
+
+    STATE_READ_DATA --> STATE_PARSE : 读取成功
+
+    state STATE_PARSE {
+        [*] --> Calculate
+        Calculate --> [*] : 计算温湿度值
+    }
+
+    STATE_PARSE --> STATE_TRIGGER : 采样间隔延时到达 (周期 > 1秒)
