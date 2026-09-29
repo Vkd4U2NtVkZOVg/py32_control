@@ -1,22 +1,22 @@
 /**
  * @file sdm845_detect.h
- * @brief SDM845 boot-success detection from the Linux shell over USART2 DMA.
+ * @brief Two-stage SDM845 boot detection from the Linux shell over USART2 DMA.
  *
- * This layer reads the USART2 DMA ring buffer (usart2_dma.c) and decides
- * whether the target SoC has brought up Linux by matching a boot banner string
- * and measuring how long the shell has been quiet. It is built to be robust to
- * a continuous stream of \r\n output from the shell: the boot string is matched
- * with a streaming KMP automaton (state survives across poll calls), and "boot
- * complete" additionally requires the line to have been idle for a while, so
- * transient banner fragments cannot cause a false positive.
+ * This layer reads the USART2 DMA ring buffer (usart2_dma.c) and tracks the
+ * SoC boot progress through TWO independent streaming KMP matchers:
  *
- * Boot is considered successful when BOTH conditions hold:
- *   - the target string "Loader Build Info" has been seen in the RX stream, and
- *   - the USART line has been quiet (no new byte) for >= SDM845_BOOT_IDLE_MS.
+ *   stage 1: "Loader Build Info"  - the bootloader banner (SoC is alive)
+ *   stage 2: "login"              - a getty prompt (Linux user space is up)
  *
- * A periodic QuarkTS task polls the ring and runs the matcher. The SDM845 boot
- * state machine queries Sdm845_Detect_IsBooted() when it needs to confirm the
- * boot chain and Sdm845_Detect_GetIdleMs() to drive its own idle timeout.
+ * Matching state survives across poll calls (robust to a continuous stream of
+ * \r\n shell output), and a stage only latches when its exact string appears
+ * as a contiguous byte run.
+ *
+ * "Boot complete" means stage 2 has been seen AND the line has been quiet for
+ * >= SDM845_BOOT_IDLE_MS; Sdm845_Detect_IsBooted() reports exactly that. The
+ * individual stage latches (IsStage1Seen / IsStage2Seen) let the boot state
+ * machine fail with better precision: a loader without a login points at a
+ * kernel/init hang, not at a dead SoC.
  */
 #ifndef __SDM845_DETECT_H__
 #define __SDM845_DETECT_H__
@@ -28,11 +28,23 @@
 extern "C" {
 #endif
 
-/** Target banner string that marks a successful boot. */
+/** Stage 1 target: bootloader banner (SoC bootloader is alive). */
 #define SDM845_BOOT_BANNER      "Loader Build Info"
-#define SDM845_BOOT_BANNER_LEN  (sizeof(SDM845_BOOT_BANNER) - 1u)
 
-/** Idle time (ms) that must elapse after the banner to declare "boot OK". */
+/** Stage 2 target: getty login prompt (Linux user space is up). */
+#define SDM845_LOGIN_BANNER     "login"
+
+/* String lengths remain derived from the string literals, while enum values
+ * are valid integer constant expressions usable for array sizes and switch/
+ * preprocessor-independent compile-time layout. */
+enum {
+    SDM845_BOOT_BANNER_LEN  = (int)(sizeof(SDM845_BOOT_BANNER) - 1u),
+    SDM845_LOGIN_BANNER_LEN = (int)(sizeof(SDM845_LOGIN_BANNER) - 1u),
+    SDM845_BANNER_MAX_LEN   = (SDM845_BOOT_BANNER_LEN > SDM845_LOGIN_BANNER_LEN)
+                              ? SDM845_BOOT_BANNER_LEN : SDM845_LOGIN_BANNER_LEN
+};
+
+/** Idle time (ms) that must elapse after stage 2 to declare "boot OK". */
 #define SDM845_BOOT_IDLE_MS     (2000u)
 
 /** Poll period (s) of the detection task (also the RX ring read period). */
@@ -40,14 +52,24 @@ extern "C" {
 
 /**
  * @brief Register and start the SDM845 boot-detection task. Reads the USART2
- *        DMA ring, feeds the banner KMP matcher, and tracks the idle timer.
+ *        DMA ring, feeds both stage matchers, and tracks the idle timer.
  *        Call once after qOS_Setup and USART2_DMA_Start().
  */
 void Sdm845_Detect_Init(void);
 
 /**
- * @brief Non-zero once the boot banner has been observed and the line has been
- *        idle for the required window. Latches true (never clears).
+ * @brief Stage 1 latch: "Loader Build Info" has been seen in the RX stream.
+ */
+uint8_t Sdm845_Detect_IsStage1Seen(void);
+
+/**
+ * @brief Stage 2 latch: "login" has been seen in the RX stream.
+ */
+uint8_t Sdm845_Detect_IsStage2Seen(void);
+
+/**
+ * @brief Non-zero once stage 2 ("login") has been observed AND the line has
+ *        been idle for the required window. Latches true (never clears).
  */
 uint8_t Sdm845_Detect_IsBooted(void);
 

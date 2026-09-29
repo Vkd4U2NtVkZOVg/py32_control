@@ -26,7 +26,8 @@ extern "C" {
 typedef enum {
     SDM845_POWER_ON_WAIT = 0,
     SDM845_PWR_PRESS,
-    SDM845_BOOT_CHECK,
+    SDM845_BOOT_CHECK,      /**< stage 1: wait for "Loader Build Info"         */
+    SDM845_STAGE2_WAIT,     /**< stage 2: wait for "login" (Linux user space)  */
     SDM845_BOOT_SUCCESS,
     SDM845_BOOT_RESET,
     SDM845_PMIC_SETTLE,

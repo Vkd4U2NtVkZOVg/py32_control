@@ -1,11 +1,12 @@
 /**
  * @file sdm845_detect.c
- * @brief SDM845 boot-success detection from the Linux shell over USART2 DMA.
+ * @brief Two-stage SDM845 boot detection from the Linux shell over USART2 DMA.
  *
- * Uses a streaming KMP matcher for the boot banner so matching state survives
- * across poll calls (robust to continuous shell output), plus an idle timer
- * driven by QOS_Tick_Get() (1 ms time base). Boot is declared only when the
- * banner has matched AND the line has been quiet for SDM845_BOOT_IDLE_MS.
+ * Two independent streaming KMP matchers run side by side over the same byte
+ * stream (stage 1: "Loader Build Info", stage 2: "login"). Each matcher keeps
+ * its own fail table and automaton state, so matching survives across poll
+ * calls and neither target can shadow the other. Boot latches only when
+ * stage 2 has matched AND the line has been idle for SDM845_BOOT_IDLE_MS.
  */
 #include "sdm845_detect.h"
 #include "usart2_dma.h"
@@ -13,17 +14,23 @@
 #include "qport_py32.h"
 
 /*---------------------------------------------------------------------------*/
-/* Streaming KMP matcher state                                                */
+/* Streaming KMP matcher instance                                             */
 /*---------------------------------------------------------------------------*/
-static const char s_pattern[ SDM845_BOOT_BANNER_LEN ] = SDM845_BOOT_BANNER;
-static uint8_t  s_fail[ SDM845_BOOT_BANNER_LEN ];
-static uint32_t s_q;              /* KMP match state: how much of banner matched */
+typedef struct {
+    const char *pattern;                    /* target string                   */
+    uint32_t    len;                        /* pattern length                  */
+    uint8_t     fail[ SDM845_BANNER_MAX_LEN ];
+    uint32_t    q;                          /* matched-prefix length (state)   */
+    uint8_t     seen;                       /* latched: matched at least once  */
+} Sdm845_Matcher_t;
+
+static Sdm845_Matcher_t s_stage1;           /* "Loader Build Info"             */
+static Sdm845_Matcher_t s_stage2;           /* "login"                         */
 
 /*---------------------------------------------------------------------------*/
 /* Detection results + idle timer                                             */
 /*---------------------------------------------------------------------------*/
-static uint8_t  s_banner_seen;    /* banner matched at least once              */
-static uint8_t  s_booted;         /* banner seen + idle window elapsed (latch) */
+static uint8_t  s_booted;         /* stage2 seen + idle window elapsed (latch) */
 static uint32_t s_last_rx_tick;   /* QOS_Tick_Get() at the last received byte  */
 static uint8_t  s_any_rx;         /* any byte ever received                    */
 
@@ -33,49 +40,56 @@ static uint8_t  s_any_rx;         /* any byte ever received                    *
 static qTask_t s_task;
 
 /*---------------------------------------------------------------------------*/
-/* KMP prefix (failure) function                                              */
+/* KMP: build the prefix (failure) function for one matcher                   */
 /*---------------------------------------------------------------------------*/
-static void sdm845_kmp_build( void )
+static void sdm845_matcher_init( Sdm845_Matcher_t *m, const char *pattern )
 {
     uint32_t len = 0u;
     uint32_t i = 1u;
 
-    s_fail[ 0 ] = 0u;
-    while ( i < SDM845_BOOT_BANNER_LEN ) {
-        if ( s_pattern[ i ] == s_pattern[ len ] ) {
+    m->pattern = pattern;
+    m->len     = 0u;
+    while ( pattern[ m->len ] != '\0' ) {
+        m->len++;
+    }
+
+    m->fail[ 0 ] = 0u;
+    while ( i < m->len ) {
+        if ( pattern[ i ] == pattern[ len ] ) {
             len++;
-            s_fail[ i ] = (uint8_t)len;
+            m->fail[ i ] = (uint8_t)len;
             i++;
         } else {
             if ( len != 0u ) {
-                len = s_fail[ len - 1u ];
+                len = m->fail[ len - 1u ];
             } else {
-                s_fail[ i ] = 0u;
+                m->fail[ i ] = 0u;
                 i++;
             }
         }
     }
+
+    m->q    = 0u;
+    m->seen = 0u;
 }
 
-/* Feed one byte; sets s_banner_seen when the banner is matched. */
-static void sdm845_feed( uint8_t c )
+/* Feed one byte into one matcher; latches m->seen on a full match. */
+static void sdm845_matcher_feed( Sdm845_Matcher_t *m, uint8_t c )
 {
-    const uint8_t b = (uint8_t)c;
-
-    while ( s_q > 0u && b != (uint8_t)s_pattern[ s_q ] ) {
-        s_q = s_fail[ s_q - 1u ];
+    while ( ( m->q > 0u ) && ( c != (uint8_t)m->pattern[ m->q ] ) ) {
+        m->q = m->fail[ m->q - 1u ];
     }
-    if ( b == (uint8_t)s_pattern[ s_q ] ) {
-        s_q++;
+    if ( c == (uint8_t)m->pattern[ m->q ] ) {
+        m->q++;
     }
-    if ( s_q == SDM845_BOOT_BANNER_LEN ) {
-        s_banner_seen = 1u;
-        s_q = s_fail[ s_q - 1u ];   /* allow overlapping later matches */
+    if ( m->q == m->len ) {
+        m->seen = 1u;
+        m->q = m->fail[ m->q - 1u ];   /* allow overlapping later matches */
     }
 }
 
 /*---------------------------------------------------------------------------*/
-/* Periodic task: drain the ring, feed the matcher, track idle.               */
+/* Periodic task: drain the ring, feed both matchers, track idle.             */
 /*---------------------------------------------------------------------------*/
 static void sdm845_task_cb( qEvent_t e )
 {
@@ -88,13 +102,14 @@ static void sdm845_task_cb( qEvent_t e )
     n = USART2_DMA_Read( tmp, sizeof( tmp ) );
     if ( n > 0u ) {
         for ( i = 0u ; i < n ; ++i ) {
-            sdm845_feed( tmp[ i ] );
+            sdm845_matcher_feed( &s_stage1, tmp[ i ] );
+            sdm845_matcher_feed( &s_stage2, tmp[ i ] );
         }
         s_last_rx_tick = QOS_Tick_Get();
         s_any_rx       = 1u;
     }
 
-    if ( ( s_banner_seen != 0u ) &&
+    if ( ( s_stage2.seen != 0u ) &&
          ( Sdm845_Detect_GetIdleMs() >= SDM845_BOOT_IDLE_MS ) ) {
         s_booted = 1u;
     }
@@ -105,9 +120,9 @@ static void sdm845_task_cb( qEvent_t e )
 /*---------------------------------------------------------------------------*/
 void Sdm845_Detect_Init( void )
 {
-    sdm845_kmp_build();
-    s_q            = 0u;
-    s_banner_seen  = 0u;
+    sdm845_matcher_init( &s_stage1, SDM845_BOOT_BANNER );
+    sdm845_matcher_init( &s_stage2, SDM845_LOGIN_BANNER );
+
     s_booted       = 0u;
     s_last_rx_tick = 0u;
     s_any_rx       = 0u;
@@ -115,6 +130,16 @@ void Sdm845_Detect_Init( void )
     (void)qOS_Add_Task( &s_task, sdm845_task_cb, qLowest_Priority,
                         (qTime_t)SDM845_DETECT_PERIOD_S, qPeriodic,
                         qEnabled, NULL );
+}
+
+uint8_t Sdm845_Detect_IsStage1Seen( void )
+{
+    return s_stage1.seen;
+}
+
+uint8_t Sdm845_Detect_IsStage2Seen( void )
+{
+    return s_stage2.seen;
 }
 
 uint8_t Sdm845_Detect_IsBooted( void )

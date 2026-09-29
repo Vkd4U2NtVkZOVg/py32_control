@@ -827,43 +827,39 @@ stateDiagram-v2
 stateDiagram-v2
     direction TB
 
-    [*] --> STATE_POWER_ON_WAIT : 上电启动
+    [*] --> POWER_ON_WAIT
 
-    %% 上电即保证释放，并清零重试计数
-    STATE_POWER_ON_WAIT : entry / PWRKEY=1, RST_KEY=1, retry_count=0
-    STATE_POWER_ON_WAIT --> STATE_PWR_PRESS : [Timeout 100ms]
+    POWER_ON_WAIT : entry / release PWRKEY, release RST_KEY, retry=0
+    POWER_ON_WAIT --> PWR_PRESS : [100 ms]
 
-    %% 正常开机：拉低电源键 3 秒
-    STATE_PWR_PRESS : entry / PWRKEY=0, RST_KEY=1
-    STATE_PWR_PRESS --> STATE_BOOT_CHECK : [Timeout 3s]
+    PWR_PRESS : entry / press PWRKEY, release RST_KEY
+    PWR_PRESS --> BOOT_CHECK : [hold 3 s]
 
-    %% 进态即显式释放按键（不依赖上一态的 exit，修复缺陷2）
-    STATE_BOOT_CHECK : entry / PWRKEY=1, RST_KEY=1
-    STATE_BOOT_CHECK : entry / 记录 RCV_COUNT 基线, 启动 W 窗口计时
-    STATE_BOOT_CHECK : do / 比对 RCV_COUNT 增量（窗口 W 内）
-    %% 成功优先于超时判定（每次轮询先判成功，未到 15s 也算成功；修复缺陷3）
-    STATE_BOOT_CHECK --> STATE_BOOT_SUCCESS : [RCV_COUNT≥阈值 且 W 内有增量]
-    %% 超时且未超重试上限 → 强杀（修复缺陷1：计数）
-    STATE_BOOT_CHECK --> STATE_BOOT_RESET : [Timeout 15s 无响应 且 retry_count<MAX]
-    %% 超时且已达上限 → 挂起停机态（修复缺陷1：不再无限循环）
-    STATE_BOOT_CHECK --> STATE_STRAP_FAIL : [Timeout 15s 无响应 且 retry_count≥MAX]
+    state "STAGE 1\nBootloader" as BOOT_CHECK
+    BOOT_CHECK : entry / release both keys
+    BOOT_CHECK : do / match "Loader Build Info"
+    BOOT_CHECK --> STAGE2_WAIT : [stage1 matched]
+    BOOT_CHECK --> BOOT_RESET : [15 s timeout && retry < MAX]
+    BOOT_CHECK --> STRAP_FAIL : [15 s timeout && retry >= MAX]
 
-    %% 成功即一次性结束（缺陷4 刻意设计，保留 [*]）
-    STATE_BOOT_SUCCESS : entry / IDLE 挂起, 移交控制权
-    STATE_BOOT_SUCCESS --> [*]
+    state "STAGE 2\nLinux user space" as STAGE2_WAIT
+    STAGE2_WAIT : entry / keep both keys released
+    STAGE2_WAIT : do / match "login" and wait idle >= 2 s
+    STAGE2_WAIT --> BOOT_SUCCESS : [stage2 matched && idle >= 2 s]
+    STAGE2_WAIT --> BOOT_RESET : [60 s timeout && retry < MAX]
+    STAGE2_WAIT --> STRAP_FAIL : [60 s timeout && retry >= MAX]
 
-    %% 强杀：进态即递增失败计数
-    STATE_BOOT_RESET : entry / retry_count++
-    STATE_BOOT_RESET : entry / PWRKEY=0, RST_KEY=0
-    STATE_BOOT_RESET --> STATE_PMIC_SETTLE : [Timeout 15s]
+    BOOT_SUCCESS : entry / hand over control, stop FSM
+    BOOT_SUCCESS --> [*]
 
-    %% 进态即释放按键（修复缺陷2：不依赖 BOOT_RESET 的 exit）
-    STATE_PMIC_SETTLE : entry / PWRKEY=1, RST_KEY=1
-    STATE_PMIC_SETTLE --> STATE_PWR_PRESS : [Timeout 3s]
+    BOOT_RESET : entry / retry++, press PWRKEY + RST_KEY
+    BOOT_RESET --> PMIC_SETTLE : [hold 15 s]
 
-    %% 失败挂起态：全部释放, 停机等待人工/上位机（修复缺陷1）
-    STATE_STRAP_FAIL : entry / PWRKEY=1, RST_KEY=1
-    STATE_STRAP_FAIL : do / 无动作, 停留等待
+    PMIC_SETTLE : entry / release PWRKEY + RST_KEY
+    PMIC_SETTLE --> PWR_PRESS : [settle 3 s]
+
+    STRAP_FAIL : entry / release PWRKEY + RST_KEY
+    STRAP_FAIL : do / halt and wait for external recovery
 ```
 
 ### 修复点
@@ -1206,5 +1202,40 @@ ll_rcc.c 编译时看到 HSE_VALUE=24M
 1. **vendor 库的时钟常量默认值必须与本板晶振核对**——`HSE_VALUE` 错误不报错、不崩溃，只让所有"按计算配置"的外设静默错配。
 2. **仿真器读 BRR 是串口乱码的一线诊断**：BRR×目标波特率 ≈ LL 假想的时钟频率，直接暴露假设与实际的偏差。
 3. `#if !defined` 守卫的宏定义作用域是**编译单元**，头文件默认值只有全局编译定义能可靠覆盖。
+
+---
+
+## 2026-09-29 — SDM845 两级启动检测（stage1=Loader, stage2=login）
+
+### 需求
+
+单一 banner（"Loader Build Info"）只能证明 bootloader 活着；把 **stage1 = `"Loader Build Info"`（bootloader 横幅）** 与 **stage2 = `"login"`（getty 提示符）** 分开检测，可实现更精确的启动判定：loader 出了但 login 超时 = 卡在内核/init 阶段 → 有针对性的强杀重试，而不是笼统的"没等到 banner"。
+
+### 探测层重构（`sdm845_detect`）
+
+单匹配器泛化为**双目标独立 KMP 自动机**：`Sdm845_Matcher_t`（pattern/fail[]/状态 q/seen 锁存）两个实例，`sdm845_matcher_init/feed()` 参数化，同一字节流并行喂给两个自动机（无共享状态、互不干扰）。
+
+- 新 API：`Sdm845_Detect_IsStage1Seen()` / `IsStage2Seen()`；
+- `IsBooted()` 语义升级：**stage2 seen + 空闲 ≥ 2s**（两级齐备才叫 boot 成功）；
+- 逻辑验证（Python 复刻）：完整流双命中；仅 login 无 loader → stage1 不误报；`xxloginxx` 连续子串命中；CRLF 风暴无误报。
+
+### 状态机扩展（`sdm845_boot`）
+
+新增 `SDM845_STAGE2_WAIT` 态（枚举插在 BOOT_CHECK 之后）：
+
+```
+BOOT_CHECK   --stage1 "Loader Build Info"-->  STAGE2_WAIT
+BOOT_CHECK   --15s 无响应-->                  BOOT_RESET / STRAP_FAIL (按 retry)
+STAGE2_WAIT  --stage2 "login" + idle 2s-->    BOOT_SUCCESS (terminal)
+STAGE2_WAIT  --t_login(60s) 无响应-->          BOOT_RESET / STRAP_FAIL (按 retry)
+```
+
+- `BOOT_CHECK` 成功条件改判 `IsStage1Seen()`（15s 超时不变）；
+- `STAGE2_WAIT` 独立超时 `SDM845_T_LOGIN_S`（60s 初值，Linux 内核+init+getty 启动较慢）；
+- 成功判定优先于超时的约束保持；8 回调全部 switch 风格。
+
+### 状态号变更说明
+
+`Sdm845_State_t` 插入 `SDM845_STAGE2_WAIT=3`，`BOOT_SUCCESS` 及其后顺延为 4~7。状态号仅内部诊断用（无主机协议依赖），无兼容问题。
 
 ---

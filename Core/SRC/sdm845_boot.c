@@ -2,25 +2,30 @@
  * @file sdm845_boot.c
  * @brief SDM845 boot/reset/strap state machine (QuarkTS).
  *
- * State machine (polled every 10 ms):
+ * State machine (polled every 10 ms), two-stage boot detection:
  *
  *     [*] --> POWER_ON_WAIT --t_pwup(100ms)--> PWR_PRESS
  *     PWR_PRESS --t_hold(3s)--> BOOT_CHECK
- *     BOOT_CHECK --booted--> BOOT_SUCCESS (done, terminal)
+ *     BOOT_CHECK --stage1 "Loader Build Info"--> STAGE2_WAIT
  *     BOOT_CHECK --15s 无响应 & retry<MAX--> BOOT_RESET
  *     BOOT_CHECK --15s 无响应 & retry>=MAX--> STRAP_FAIL (terminal)
+ *     STAGE2_WAIT --stage2 "login" + idle--> BOOT_SUCCESS (done, terminal)
+ *     STAGE2_WAIT --t_login(60s) & retry<MAX--> BOOT_RESET
+ *     STAGE2_WAIT --t_login(60s) & retry>=MAX--> STRAP_FAIL (terminal)
  *     BOOT_RESET --t_kill(15s)--> PMIC_SETTLE
  *     PMIC_SETTLE --t_settle(3s)--> PWR_PRESS (retry loop)
  *
  * GPIO: PWRKEY = MIX3_BOOTKEY (PB7), RST_KEY = MIX3_RST (PB8), low = pressed.
- * Success is decided by sdm845_detect (banner "Loader Build Info" + idle).
+ * Stage 1 ("Loader Build Info") proves the bootloader is alive; stage 2
+ * ("login") proves Linux user space came up and gates BOOT_SUCCESS.
+ * A loader without a login points at a kernel/init hang -> targeted retry.
  *
  * Key constraints honored:
  *   - Never set h->NextState in a QSM_SIGNAL_ENTRY handler (engine ignores it).
- *   - Decision states (BOOT_CHECK) read the detector in the periodic-poll
- *     (QSM_SIGNAL_NONE) branch and set NextState there; fixed delays use const
- *     timeout tables. Boot success is checked BEFORE the 15 s timeout, so a
- *     late-arriving banner is not spuriously treated as a failure.
+ *   - Decision states (BOOT_CHECK, STAGE2_WAIT) read the detector in the
+ *     periodic-poll (QSM_SIGNAL_NONE) branch and set NextState there; fixed
+ *     delays use const timeout tables. Success is checked BEFORE the stage
+ *     timeout, so a late-arriving banner is not spuriously treated as failure.
  */
 #include "main.h"
 #include "QuarkTS.h"
@@ -38,7 +43,8 @@
 /*============================================================================*/
 #define SDM845_T_PWUP_S     (0.100f)   /* power-up: hold keys released   */
 #define SDM845_T_HOLD_S     (3.0f)     /* hold PWRKEY low to power on    */
-#define SDM845_T_BOOTCHK_S  (15.0f)    /* wait for shell banner          */
+#define SDM845_T_BOOTCHK_S  (15.0f)    /* stage 1: wait for loader banner */
+#define SDM845_T_LOGIN_S    (60.0f)    /* stage 2: wait for login prompt  */
 #define SDM845_T_KILL_S     (15.0f)    /* hard-kill (PWR+RST low) pulse  */
 #define SDM845_T_SETTLE_S   (3.0f)     /* PMIC power-cycle settle        */
 #define SDM845_BOOT_MAX_RETRIES  (3u)
@@ -59,7 +65,7 @@ typedef struct {
 
 static Sdm845_Boot_t s_boot;
 
-static qSM_State_t stPowerOnWait, stPwrPress, stBootCheck,
+static qSM_State_t stPowerOnWait, stPwrPress, stBootCheck, stStage2Wait,
                    stBootSuccess, stBootReset, stPmicSettle, stStrapFail;
 
 /*============================================================================*/
@@ -136,7 +142,35 @@ static qSM_Status_t st_BootCheck_Cb( qSM_Handler_t h )
             }
             return qSM_STATUS_SIGNAL_HANDLED;
         default:
-            /* Periodic poll: boot success takes priority over the timeout. */
+            /* Periodic poll: stage 1 (loader banner) takes priority over the
+             * 15 s timeout; stage 2 (login) is handled by STAGE2_WAIT. */
+            if ( Sdm845_Detect_IsStage1Seen() != 0u ) {
+                h->NextState = &stStage2Wait;
+                return qSM_STATUS_SIGNAL_HANDLED;
+            }
+            break;
+    }
+    return qSM_STATUS_EXIT_SUCCESS;
+}
+
+/* STAGE2_WAIT: loader proved stage 1; now wait for the "login" prompt.
+ * Boot completes only when stage 2 is seen and the line goes idle. */
+static qSM_Status_t st_Stage2Wait_Cb( qSM_Handler_t h )
+{
+    switch ( h->Signal ) {
+        case QSM_SIGNAL_ENTRY:
+            s_boot.stateId = (uint8_t)SDM845_STAGE2_WAIT;
+            break;
+        case SDM845_TIMEOUT:
+            /* Loader up but no login: kernel/init hang -> targeted retry. */
+            if ( s_boot.retryCount < SDM845_BOOT_MAX_RETRIES ) {
+                h->NextState = &stBootReset;
+            } else {
+                h->NextState = &stStrapFail;
+            }
+            return qSM_STATUS_SIGNAL_HANDLED;
+        default:
+            /* Periodic poll: full boot success takes priority over timeout. */
             if ( Sdm845_Detect_IsBooted() != 0u ) {
                 h->NextState = &stBootSuccess;
                 return qSM_STATUS_SIGNAL_HANDLED;
@@ -227,6 +261,10 @@ static const qSM_TimeoutStateDefinition_t s_toBootChk[] = {
     { (qTime_t)SDM845_T_BOOTCHK_S,
       QSM_TSOPT_INDEX(0) | QSM_TSOPT_SET_ENTRY | QSM_TSOPT_RST_EXIT },
 };
+static const qSM_TimeoutStateDefinition_t s_toLogin[] = {
+    { (qTime_t)SDM845_T_LOGIN_S,
+      QSM_TSOPT_INDEX(0) | QSM_TSOPT_SET_ENTRY | QSM_TSOPT_RST_EXIT },
+};
 static const qSM_TimeoutStateDefinition_t s_toKill[] = {
     { (qTime_t)SDM845_T_KILL_S,
       QSM_TSOPT_INDEX(0) | QSM_TSOPT_SET_ENTRY | QSM_TSOPT_RST_EXIT },
@@ -250,6 +288,7 @@ void Sdm845_Boot_Init( void )
     qStateMachine_StateSubscribe( &s_boot.machine, &stPowerOnWait, NULL, st_PowerOnWait_Cb, NULL, NULL );
     qStateMachine_StateSubscribe( &s_boot.machine, &stPwrPress,    NULL, st_PwrPress_Cb,    NULL, NULL );
     qStateMachine_StateSubscribe( &s_boot.machine, &stBootCheck,   NULL, st_BootCheck_Cb,   NULL, NULL );
+    qStateMachine_StateSubscribe( &s_boot.machine, &stStage2Wait,  NULL, st_Stage2Wait_Cb,  NULL, NULL );
     qStateMachine_StateSubscribe( &s_boot.machine, &stBootSuccess, NULL, st_BootSuccess_Cb, NULL, NULL );
     qStateMachine_StateSubscribe( &s_boot.machine, &stBootReset,   NULL, st_BootReset_Cb,   NULL, NULL );
     qStateMachine_StateSubscribe( &s_boot.machine, &stPmicSettle,  NULL, st_PmicSettle_Cb,  NULL, NULL );
@@ -264,6 +303,7 @@ void Sdm845_Boot_Init( void )
     qStateMachine_Set_StateTimeouts( &stPowerOnWait, (qSM_TimeoutStateDefinition_t *)s_toPwup,     qFLM_ArraySize( s_toPwup ) );
     qStateMachine_Set_StateTimeouts( &stPwrPress,    (qSM_TimeoutStateDefinition_t *)s_toHold,      qFLM_ArraySize( s_toHold ) );
     qStateMachine_Set_StateTimeouts( &stBootCheck,   (qSM_TimeoutStateDefinition_t *)s_toBootChk,   qFLM_ArraySize( s_toBootChk ) );
+    qStateMachine_Set_StateTimeouts( &stStage2Wait,  (qSM_TimeoutStateDefinition_t *)s_toLogin,     qFLM_ArraySize( s_toLogin ) );
     qStateMachine_Set_StateTimeouts( &stBootReset,   (qSM_TimeoutStateDefinition_t *)s_toKill,      qFLM_ArraySize( s_toKill ) );
     qStateMachine_Set_StateTimeouts( &stPmicSettle,  (qSM_TimeoutStateDefinition_t *)s_toSettle,    qFLM_ArraySize( s_toSettle ) );
 
