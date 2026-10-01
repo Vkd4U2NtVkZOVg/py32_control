@@ -1364,3 +1364,33 @@ USART2 因并接 CH343 当前必须 RX-only（PA0 推挽会与桥的 TX 驱动�
 - 切换原理：GPIO 模式重配 PA0 + CR1 的 TE/RE 位切换（`LL_USART_SetTransferDirection` 即 `MODIFY_REG(CR1, RE|TE, dir)`）；TE 0→1 / 1→0 在 UE=1 下均安全（发送器在当前帧边界生效）。
 - 与 DMA 接收无冲突：`USART2_DMA_Start()` 的 RX 通道独立于拓扑，两种模式下持续有效。
 - 发送路径本次未实现：切到双线后可用轮询 `LL_USART_TransmitData8`，或后续按 TRES_CMD 命令邮箱模式加 TX DMA——等发送需求成形再做。
+
+---
+
+## 2026-09-28 — I2C 寄存器文件新增 SDM845 温度写窗口（0x20）
+
+### 需求
+
+主机（Linux）通过 I2C 把 SDM845 的温度写入 PY32，供后续 TEC 控制层读取。I2C 寄存器文件原来只有 `CMD`(0x00) 一个可写口，新增一个**可写数据窗口**。
+
+### 寄存器定义
+
+| 地址 | 名称 | R/W | 内容 |
+|---|---|---|---|
+| 0x20 | `SDM845_TEMP` | R/W | **4 字节窗口**：SDM845 温度，`int32` **milli-°C**（与 `AHT20_*MilliCelsius` 单位惯例一致），**MSB first（大端）**传输 |
+
+### 实现方式（`tres_i2c_slave.h/.c`）
+
+- **写路径**（ISR RXNE）：寄存器指针落在 `0x20..0x23` 时，字节按偏移存入暂存 `s_tempBuf[4]`；**第 4 字节到达时**组装大端值并发布到 `s_temp_raw`（对齐 32 位 store，Cortex-M0+ 上原子），置 `s_temp_valid`。读者永远看不到半新半旧的撕裂值。
+- **读路径**（`Reg_Read`）：窗口内按偏移右移出对应字节（0x20 = MSB），主机可整窗回读校验。
+- **getter**：`TRES_I2C_Slave_GetSdm845TempMilliC()`（int32 milli-°C）+ `TRES_I2C_Slave_GetSdm845TempValid()`（首次完整写之前为 0，读到 0 mC 无歧义）。
+- 半写保护：窗口外字节被忽略；要更新必须完整写 4 字节（标准 I2C 随机写每次先发指针，天然满足）。
+
+### 验证
+
+Python 复刻写路径/读路径往返：{-5500, 0, 25500, -40000, 85000} mC 全部 OK（含负数补码 `0xFFFFEA84`），读回字节序与写入一致；getter 头/实现一致。
+
+### 遗留
+
+- 温度消费者的接线（TEC 控制层读 `GetSdm845TempMilliC` 算 duty）待控制任务实现时接入。
+- 主机侧写协议：`i2cset` 或驱动按"写 0x20 + 连续 4 字节"即可；新鲜度由主机侧决定（PY32 不做超时失效，按需可加）。

@@ -25,6 +25,14 @@ static uint8_t  s_tx;                /* 1: serving a master read (TRA)       */
 static uint8_t  s_cmdIdx;
 static uint8_t  s_cmdBuf[ CMD_WRITE_LEN ];
 
+/* SDM845 temperature write window (TRES_REG_SDM845_TEMP, 4 bytes, big endian).
+ * Bytes accumulate in s_tempBuf; the 4th byte publishes the assembled value
+ * into s_temp_raw -- an aligned 32-bit store, atomic on Cortex-M0+, so the
+ * reader never sees a torn half-updated temperature. */
+static uint8_t  s_tempBuf[ TRES_REG_SDM845_TEMP_LEN ];
+static volatile uint32_t s_temp_raw;
+static volatile uint8_t  s_temp_valid;
+
 /* Private function prototypes -----------------------------------------------*/
 static uint8_t Reg_Read(uint8_t addr);
 
@@ -33,6 +41,13 @@ static uint8_t Reg_Read(uint8_t addr);
 /*============================================================================*/
 static uint8_t Reg_Read(uint8_t addr)
 {
+    /* SDM845 temperature window: big-endian byte order (0x20 = MSB). */
+    if ( ( addr >= TRES_REG_SDM845_TEMP ) &&
+         ( addr < ( TRES_REG_SDM845_TEMP + TRES_REG_SDM845_TEMP_LEN ) ) ) {
+        uint32_t off = (uint32_t)( addr - TRES_REG_SDM845_TEMP );
+        return (uint8_t)( s_temp_raw >> ( 24u - ( 8u * off ) ) );
+    }
+
     switch ( addr ) {
         case TRES_REG_STATUS:  return TRES_Cmd_StatusByte();
         case TRES_REG_RETRIES: return TRES_Cmd_Retries();
@@ -61,6 +76,19 @@ void TRES_I2C_Slave_Init(void)
     LL_I2C_EnableIT_BUF( I2C1 );
     LL_I2C_EnableIT_ERR( I2C1 );
     LL_I2C_Enable( I2C1 );
+}
+
+/*---------------------------------------------------------------------------*/
+/* SDM845 temperature (host-written, see TRES_REG_SDM845_TEMP)                */
+/*---------------------------------------------------------------------------*/
+int32_t TRES_I2C_Slave_GetSdm845TempMilliC( void )
+{
+    return (int32_t)s_temp_raw;
+}
+
+uint8_t TRES_I2C_Slave_GetSdm845TempValid( void )
+{
+    return s_temp_valid;
 }
 
 /*============================================================================*/
@@ -112,6 +140,21 @@ void I2C1_IRQHandler(void)
                             TRES_Cmd_PostBadMagicFromISR();
                         }
                     }
+                }
+            } else if ( ( s_regPtr >= TRES_REG_SDM845_TEMP ) &&
+                        ( s_regPtr < ( TRES_REG_SDM845_TEMP +
+                                       TRES_REG_SDM845_TEMP_LEN ) ) ) {
+                /* SDM845 temperature window: 4 bytes MSB first. Bytes land in
+                 * the staging buffer; the 4th publishes atomically.            */
+                uint32_t off = (uint32_t)( s_regPtr - TRES_REG_SDM845_TEMP );
+
+                s_tempBuf[ off ] = b;
+                if ( off == ( TRES_REG_SDM845_TEMP_LEN - 1u ) ) {
+                    s_temp_raw = ( (uint32_t)s_tempBuf[ 0 ] << 24 ) |
+                                 ( (uint32_t)s_tempBuf[ 1 ] << 16 ) |
+                                 ( (uint32_t)s_tempBuf[ 2 ] << 8  ) |
+                                 ( (uint32_t)s_tempBuf[ 3 ]       );
+                    s_temp_valid = 1u;
                 }
             }
             /* writes to read-only registers are ignored                      */
