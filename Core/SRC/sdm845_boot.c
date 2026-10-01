@@ -86,7 +86,9 @@ static void Pin_RstKey( uint8_t pressed )
 /*============================================================================*/
 /* State callbacks                                                             */
 /*============================================================================*/
-/* POWER_ON_WAIT: keys released, retries cleared. */
+/* POWER_ON_WAIT: keys released, retries cleared. If the SoC is already
+ * running (SOM_BOOTED high, e.g. this MCU rebooted alone), skip straight to
+ * BOOT_SUCCESS instead of re-powering it. */
 static qSM_Status_t st_PowerOnWait_Cb( qSM_Handler_t h )
 {
     switch ( h->Signal ) {
@@ -100,6 +102,11 @@ static qSM_Status_t st_PowerOnWait_Cb( qSM_Handler_t h )
             h->NextState = &stPwrPress;
             return qSM_STATUS_SIGNAL_HANDLED;
         default:
+            /* Periodic poll: SoC already alive takes priority over timeout. */
+            if ( LL_GPIO_IsInputPinSet( GPIOB, SOM_BOOTED_Pin ) != 0u ) {
+                h->NextState = &stBootSuccess;
+                return qSM_STATUS_SIGNAL_HANDLED;
+            }
             break;
     }
     return qSM_STATUS_EXIT_SUCCESS;
