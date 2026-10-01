@@ -45,13 +45,27 @@ extern "C" {
 /* USER CODE END Includes */
 
 /* USER CODE BEGIN defines */
+/* USART2 line topology is switched at RUNTIME by USART2_SetLineMode():
+ *   rx_only = 1 : PA0 released to high-impedance floating input and the USART
+ *                 runs receiver-only. Use while a CH343 USB-UART bridge is
+ *                 wired in parallel (a push-pull drive would fight its TX).
+ *   rx_only = 0 : PA0 muxed as USART2_TX (push-pull), TX+RX enabled, for
+ *                 sending commands to the SoC.
+ * Studio_USART2_Init() starts in RX-only; call USART2_SetLineMode() any time
+ * to switch. PA1 (RX) is untouched: it is always muxed as USART2_RX. */
 /* USER CODE END defines */
 
 void Studio_USART2_Init(void);
 void Studio_USART1_Init(void);
 
 /* USER CODE BEGIN Prototypes */
-
+/**
+ * @brief Switch the USART2 line topology at runtime.
+ * @param rx_only 1 = RX-only (PA0 high-Z, receiver only, CH343 shared);
+ *                0 = TX+RX (PA0 muxed as USART2_TX push-pull).
+ * PA1 (RX) is always left muxed to USART2. Safe to call repeatedly.
+ */
+void USART2_SetLineMode(uint8_t rx_only);
 /* USER CODE END Prototypes */
 
 #ifdef __cplusplus

@@ -131,7 +131,11 @@ void Studio_USART2_Init(void)
 
   LL_IOP_GRP1_EnableClock(LL_IOP_GRP1_PERIPH_GPIOA);
   /**USART2 GPIO Configuration
-   *PA0     ------> USART2_TX
+   * Both pins are muxed here (generator-native); the actual line topology is
+   * applied by USART2_SetLineMode() at the end of this init (starts RX-only
+   * because a CH343 USB-UART bridge is wired in parallel: driving PA0
+   * push-pull would fight the bridge's TX driver).
+   *PA0     ------> USART2_TX (dual-line mode) / high-Z input (RX-only mode)
    *PA1     ------> USART2_RX
    */
   GPIO_InitStruct.Pin = LL_GPIO_PIN_0|LL_GPIO_PIN_1;
@@ -141,6 +145,7 @@ void Studio_USART2_Init(void)
   GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
   GPIO_InitStruct.Alternate = LL_GPIO_AF9_USART2;
   LL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
 
   LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_USART2);
 
@@ -160,7 +165,7 @@ void Studio_USART2_Init(void)
   LL_USART_Enable(USART2);
 
   /* USER CODE BEGIN Studio_USART2_Init 1 */
-
+  USART2_SetLineMode( 1u );   /* start RX-only: CH343 shares the PA0 line */
   /* USER CODE END Studio_USART2_Init 1 */
 }
 
@@ -173,5 +178,33 @@ void Studio_USART2_Init(void)
 /* USER CODE END 0 */
 
 /* USER CODE BEGIN 1 */
+/**
+  * @brief  Switch the USART2 line topology at runtime.
+  *         rx_only = 1: PA0 released to a high-impedance floating input and
+  *                      the USART runs receiver-only (CH343 shares the line).
+  *         rx_only = 0: PA0 muxed as USART2_TX push-pull, TX+RX enabled.
+  *         PA1 is untouched: it is always muxed as USART2_RX.
+  * @param  rx_only 1 = RX-only, 0 = TX+RX. Safe to call repeatedly.
+  * @retval None
+  */
+void USART2_SetLineMode( uint8_t rx_only )
+{
+  LL_GPIO_InitTypeDef GPIO_InitStruct;
 
+  /* PA0 only; PA1 stays muxed as USART2_RX in both topologies. */
+  LL_GPIO_StructInit( &GPIO_InitStruct );
+  GPIO_InitStruct.Pin        = LL_GPIO_PIN_0;
+  GPIO_InitStruct.Mode       = ( rx_only != 0u ) ? LL_GPIO_MODE_INPUT
+                                                 : LL_GPIO_MODE_ALTERNATE;
+  GPIO_InitStruct.Pull       = ( rx_only != 0u ) ? LL_GPIO_PULL_NO
+                                                 : LL_GPIO_PULL_UP;
+  GPIO_InitStruct.Speed      = LL_GPIO_SPEED_FREQ_VERY_HIGH;
+  GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
+  GPIO_InitStruct.Alternate  = LL_GPIO_AF9_USART2;
+  LL_GPIO_Init( GPIOA, &GPIO_InitStruct );
+
+  /* Receiver-only or TX+RX: TE/RE bits in CR1 (RE is set in both). */
+  LL_USART_SetTransferDirection( USART2,
+      ( rx_only != 0u ) ? LL_USART_DIRECTION_RX : LL_USART_DIRECTION_TX_RX );
+}
 /* USER CODE END 1 */
