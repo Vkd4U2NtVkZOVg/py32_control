@@ -269,8 +269,9 @@ static qSM_Status_t st_BootCheck_Cb( qSM_Handler_t h )
     return qSM_STATUS_EXIT_SUCCESS;
 }
 
-/* STAGE2_WAIT: loader proved stage 1; now wait for the "login" prompt.
- * Boot completes only when stage 2 is seen and the line goes idle. */
+/* STAGE2_WAIT: loader proved stage 1; now wait for the "login" prompt and a
+ * quiet line. Stage 2 + idle gates entry into the login command chain
+ * (STAGE3..5); it no longer completes the boot by itself. */
 static qSM_Status_t st_Stage2Wait_Cb( qSM_Handler_t h )
 {
     switch ( h->Signal ) {
@@ -286,9 +287,11 @@ static qSM_Status_t st_Stage2Wait_Cb( qSM_Handler_t h )
             }
             return qSM_STATUS_SIGNAL_HANDLED;
         default:
-            /* Periodic poll: full boot success takes priority over timeout. */
+            /* Periodic poll: stage2+idle (stable login prompt) takes priority
+             * over the 60 s timeout; BOOT_SUCCESS now comes only from
+             * STAGE5_WAIT (amixer answer). */
             if ( Sdm845_Detect_IsBooted() != 0u ) {
-                h->NextState = &stBootSuccess;
+                h->NextState = &stStage3Wait;
                 return qSM_STATUS_SIGNAL_HANDLED;
             }
             break;
