@@ -1814,72 +1814,64 @@ stateDiagram-v2
 
     [*] --> THERMAL_PRECHECK
 
-    state "THERMAL_PRECHECK" as TP
-    TP : entry / keys released, cooling=0
-    TP : do / poll AHT20 every 1s
-    TP --> TP : [ambient > 70°C] / fan 100%, cooling=1
-    TP --> POWER_ON_WAIT : [ambient <= 70°C && !cooling]
-    TP --> POWER_ON_WAIT : [cooling && ambient <= 60°C]
-    TP --> POWER_ON_WAIT : [polls ≥ 300] / fail open
+    state "THERMAL\nPRECHECK" as THERMAL_PRECHECK
+    THERMAL_PRECHECK : entry / keys released, cooling=0
+    THERMAL_PRECHECK : do / poll AHT20 every 1s
+    THERMAL_PRECHECK --> THERMAL_PRECHECK : [ambient > 70°C] / fan 100%, cooling=1
+    THERMAL_PRECHECK --> POWER_ON_WAIT : [ambient <= 70°C && !cooling]
+    THERMAL_PRECHECK --> POWER_ON_WAIT : [cooling && ambient <= 60°C]
+    THERMAL_PRECHECK --> POWER_ON_WAIT : [polls ≥ 300] / fail open
 
-    state "POWER_ON_WAIT" as PON
-    PON : entry / keys released, retry=0
-    PON --> BOOT_SUCCESS : [SOM_BOOTED == HIGH]
-    PON --> PWR_PRESS : [100 ms]
+    POWER_ON_WAIT : entry / keys released, retry=0
+    POWER_ON_WAIT --> BOOT_SUCCESS : [SOM_BOOTED == HIGH]
+    POWER_ON_WAIT --> PWR_PRESS : [100 ms]
 
-    state "PWR_PRESS" as PP
-    PP : entry / PWRKEY low, RST released
-    PP --> BOOT_CHECK : [hold 3 s]
+    PWR_PRESS : entry / PWRKEY low, RST released
+    PWR_PRESS --> BOOT_CHECK : [hold 3 s]
 
-    state "BOOT_CHECK (STAGE1)" as BC
-    BC : entry / keys released
-    BC : do / match "Loader Build Info"
-    BC --> STAGE2_WAIT : [stage1 matched]
-    BC --> BOOT_RESET : [15 s timeout && retry < 3]
-    BC --> STRAP_FAIL : [15 s timeout && retry ≥ 3]
+    state "BOOT_CHECK\n(STAGE1)" as BOOT_CHECK
+    BOOT_CHECK : entry / keys released
+    BOOT_CHECK : do / match "Loader Build Info"
+    BOOT_CHECK --> STAGE2_WAIT : [stage1 matched]
+    BOOT_CHECK --> BOOT_RESET : [15 s timeout && retry < 3]
+    BOOT_CHECK --> STRAP_FAIL : [15 s timeout && retry ≥ 3]
 
-    state "STAGE2_WAIT" as S2
-    S2 : do / match "login" && idle ≥ 2 s
-    S2 --> STAGE3_WAIT : [stage2 matched && idle ≥ 2 s]
-    S2 --> BOOT_RESET : [60 s timeout && retry < 3]
-    S2 --> STRAP_FAIL : [60 s timeout && retry ≥ 3]
+    STAGE2_WAIT : do / match "login" && idle ≥ 2 s
+    STAGE2_WAIT --> STAGE3_WAIT : [stage2 matched && idle ≥ 2 s]
+    STAGE2_WAIT --> BOOT_RESET : [60 s timeout && retry < 3]
+    STAGE2_WAIT --> STRAP_FAIL : [60 s timeout && retry ≥ 3]
 
-    state "STAGE3_WAIT" as S3
-    S3 : entry / duplex, reset matchers, TX DMA "comma\r\n"
-    S3 : do / match echo "comma"
-    S3 --> STAGE4_WAIT : [stage3 matched]
-    S3 --> BOOT_RESET : [15 s timeout && retry < 3]
-    S3 --> STRAP_FAIL : [15 s timeout && retry ≥ 3]
+    STAGE3_WAIT : entry / duplex, reset matchers, TX DMA "comma\r\n"
+    STAGE3_WAIT : do / match echo "comma"
+    STAGE3_WAIT --> STAGE4_WAIT : [stage3 matched]
+    STAGE3_WAIT --> BOOT_RESET : [15 s timeout && retry < 3]
+    STAGE3_WAIT --> STRAP_FAIL : [15 s timeout && retry ≥ 3]
 
-    state "STAGE4_WAIT" as S4
-    S4 : entry / TX DMA "comma\r\n" (password)
-    S4 : do / match "Welcome to AGNOS"
-    S4 --> STAGE5_WAIT : [stage4 matched]
-    S4 --> BOOT_RESET : [15 s timeout && retry < 3]
-    S4 --> STRAP_FAIL : [15 s timeout && retry ≥ 3]
+    STAGE4_WAIT : entry / TX DMA "comma\r\n" (password)
+    STAGE4_WAIT : do / match "Welcome to AGNOS"
+    STAGE4_WAIT --> STAGE5_WAIT : [stage4 matched]
+    STAGE4_WAIT --> BOOT_RESET : [15 s timeout && retry < 3]
+    STAGE4_WAIT --> STRAP_FAIL : [15 s timeout && retry ≥ 3]
 
-    state "STAGE5_WAIT" as S5
-    S5 : entry / TX DMA "amixer set PCM 100%\r\n"
-    S5 : do / match "Front Left: Playback"
-    S5 --> BOOT_SUCCESS : [stage5 matched]
-    S5 --> BOOT_RESET : [15 s timeout && retry < 3]
-    S5 --> STRAP_FAIL : [15 s timeout && retry ≥ 3]
+    STAGE5_WAIT : entry / TX DMA "amixer set PCM 100%\r\n"
+    STAGE5_WAIT : do / match "Front Left: Playback"
+    STAGE5_WAIT --> BOOT_SUCCESS : [stage5 matched]
+    STAGE5_WAIT --> BOOT_RESET : [15 s timeout && retry < 3]
+    STAGE5_WAIT --> STRAP_FAIL : [15 s timeout && retry ≥ 3]
 
-    state "BOOT_SUCCESS" as BS
-    BS : entry / RX-only (CH343 owns PA0), booted=1
-    BS --> [*]
+    BOOT_SUCCESS : entry / RX-only (CH343 owns PA0), booted=1
+    BOOT_SUCCESS --> [*]
 
-    state "BOOT_RESET" as BR
-    BR : entry / retry++, RX-only, PWRKEY+RST low
-    BR --> PMIC_SETTLE : [hold 15 s]
+    BOOT_RESET : entry / retry++, RX-only, PWRKEY+RST low
+    BOOT_RESET --> PMIC_SETTLE : [hold 15 s]
 
-    state "PMIC_SETTLE" as PS
-    PS : entry / keys released
-    PS --> PWR_PRESS : [settle 3 s]
+    PMIC_SETTLE : entry / keys released
+    PMIC_SETTLE --> PWR_PRESS : [settle 3 s]
 
-    state "STRAP_FAIL" as SF
-    SF : entry / keys released, halt
+    STRAP_FAIL : entry / keys released, halt
 ```
+
+> 绘图注记：初版把 `state "X" as TP` 短别名与全名连线混用，`THERMAL_PRECHECK`/`POWER_ON_WAIT` 等全名未定义为 ID，mermaid 为其另建了重复的空状态，图被拆成多个不连通片段，TB 布局下水平排开（看起来像 `direction` 失效）。本版统一用状态全名作 ID，别名仅用于框内换行显示。
 
 ### 文件改动清单
 
