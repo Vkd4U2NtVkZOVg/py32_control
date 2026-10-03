@@ -41,6 +41,11 @@ TRES_REG_RETRIES = 0x11
 TRES_REG_PINS = 0x12
 TRES_REG_LASTERR = 0x13
 TRES_REG_VERSION = 0x14
+TRES_REG_BOOTSTATE = 0x30
+TRES_REG_BOOTRETRY = 0x31
+TRES_REG_TECFLAGS = 0x32
+TRES_REG_AHTSTAT = 0x33
+TRES_REG_FANDUTY = 0x34
 
 TRES_CMD_MAGIC = 0xA5
 TRES_CMD_RESET = 1
@@ -53,6 +58,19 @@ TRES_STATE_NAMES = {
     3: "PULSE_RESET_NORMAL", 4: "PULSE_RESET_DFU",
     5: "BOOT_WAIT_DFU", 6: "DFU_ACTIVE",
 }
+SDM845_STATE_NAMES = {
+    0: "THERMAL_PRECHECK", 1: "POWER_ON_WAIT", 2: "PWR_PRESS",
+    3: "BOOT_CHECK", 4: "STAGE2_WAIT", 5: "STAGE3_WAIT",
+    6: "STAGE4_WAIT", 7: "STAGE5_WAIT", 8: "BOOT_SUCCESS",
+    9: "BOOT_RESET", 10: "PMIC_SETTLE", 11: "STRAP_FAIL",
+}
+TEC_FLAG_NAMES = (
+    (0x01, "OVERTEMP"),
+    (0x02, "HOT_WARNING"),
+    (0x04, "OVERCURRENT"),
+    (0x08, "FAN_FAULT"),
+    (0x10, "THERMAL_WAIT"),
+)
 
 
 class Tres:
@@ -151,7 +169,18 @@ a command path fails, or a real command is rejected by the TRES policy.
     if version != 0x02:
         sys.exit("    VERSION mismatch - slave not responding as expected")
 
-    print("[2] command path: CMD_REPORT_FAIL x2, RETRIES must go up by 2")
+    print("[2] machine-state block: read 0x30..0x34 (auto-increment)")
+    bootstate, bootretry, tecflags, ahtstat, fanduty = \
+        t.read_reg(TRES_REG_BOOTSTATE, 5)
+    print("    SDM845: {}({}) retry={}  FAN={}{}".format(
+        SDM845_STATE_NAMES.get(bootstate, "?"), bootstate, bootretry,
+        fanduty, "%"))
+    flags = "|".join(name for mask, name in TEC_FLAG_NAMES
+                     if tecflags & mask) or "NONE"
+    print("    TEC alarms: {}(0x{:02X})  AHT20 status: {}".format(
+        flags, tecflags, ahtstat))
+
+    print("[3] command path: CMD_REPORT_FAIL x2, RETRIES must go up by 2")
     before = t.read_reg(TRES_REG_RETRIES)[0]
     for _ in range(2):
         t.write_cmd(TRES_CMD_MAGIC, TRES_CMD_REPORT_FAIL)
@@ -177,7 +206,7 @@ a command path fails, or a real command is rejected by the TRES policy.
             sys.exit(2)
 
         err_before = t.read_reg(TRES_REG_LASTERR)[0]
-        print("[3] real command 0x{:02X} -> then watch STATUS".format(cmd))
+        print("[4] real command 0x{:02X} -> then watch STATUS".format(cmd))
         t.write_cmd(TRES_CMD_MAGIC, cmd)
         last_status = status
         for _ in range(10):
@@ -198,7 +227,7 @@ a command path fails, or a real command is rejected by the TRES policy.
                   file=sys.stderr)
             sys.exit(2)
     else:
-        print("[3] skipped real power commands "
+        print("[4] skipped real power commands "
               "(pass --reset / --dfu to exercise them)")
 
     print("OK")

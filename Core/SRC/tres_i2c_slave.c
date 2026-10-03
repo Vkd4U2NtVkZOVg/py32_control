@@ -14,6 +14,10 @@
 #include "tres_i2c_slave.h"
 #include "tres_cmd.h"
 #include "tres_seq.h"
+#include "sdm845_boot.h"
+#include "tec_control.h"
+#include "aht20_task.h"
+#include "fan.h"
 
 /* Private define ------------------------------------------------------------*/
 #define CMD_WRITE_LEN   3u      /* [magic][cmd][param]                        */
@@ -46,6 +50,17 @@ static uint8_t Reg_Read(uint8_t addr)
          ( addr < ( TRES_REG_SDM845_TEMP + TRES_REG_SDM845_TEMP_LEN ) ) ) {
         uint32_t off = (uint32_t)( addr - TRES_REG_SDM845_TEMP );
         return (uint8_t)( s_temp_raw >> ( 24u - ( 8u * off ) ) );
+    }
+
+    /* Machine-state block: every state machine / actuator, one byte each,
+     * composed live so the host always sees the current value. */
+    switch ( addr ) {
+        case TRES_REG_BOOTSTATE: return Sdm845_Boot_GetState();
+        case TRES_REG_BOOTRETRY: return Sdm845_Boot_GetRetries();
+        case TRES_REG_TECFLAGS:  return TecControl_GetAlarm();
+        case TRES_REG_AHTSTAT:   return (uint8_t)AHT20_Get_LastStatus();
+        case TRES_REG_FANDUTY:   return Fan_GetDutyPercent();
+        default: break;
     }
 
     switch ( addr ) {

@@ -27,6 +27,11 @@
  *                    milli-degrees Celsius, written MSB first (big endian).
  *                    The value publishes atomically once all 4 bytes have
  *                    arrived; readers use TRES_I2C_Slave_GetSdm845Temp*().
+ *   0x30 BOOTSTATE R  SDM845 boot FSM state (Sdm845_State_t, sdm845_boot.h)
+ *   0x31 BOOTRETRY R  SDM845 boot retry counter (Sdm845_Boot_GetRetries)
+ *   0x32 TECFLAGS  R  TEC control alarms (TEC_ALARM_* bitmask, tec_control.h)
+ *   0x33 AHTSTAT   R  last AHT20 driver result code (0 OK, negative = error)
+ *   0x34 FANDUTY   R  last fan duty commanded by any writer, percent
  ******************************************************************************
   */
 #ifndef __TRES_I2C_SLAVE_H__
@@ -52,6 +57,15 @@ extern "C" {
  * 4th byte lands. */
 #define TRES_REG_SDM845_TEMP      0x20u
 #define TRES_REG_SDM845_TEMP_LEN  4u
+
+/* Machine-state block (0x30..0x34, all read-only, one byte each): the live
+ * state/health of every state machine and actuator on the MCU, so the host
+ * can diagnose the whole board from one 5-byte burst read at 0x30. */
+#define TRES_REG_BOOTSTATE  0x30u   /**< Sdm845_State_t (sdm845_boot.h)       */
+#define TRES_REG_BOOTRETRY  0x31u   /**< SDM845 boot retry counter            */
+#define TRES_REG_TECFLAGS   0x32u   /**< TEC_ALARM_* bitmask (tec_control.h)  */
+#define TRES_REG_AHTSTAT    0x33u   /**< last AHT20 driver status (int8)      */
+#define TRES_REG_FANDUTY    0x34u   /**< last commanded fan duty, percent     */
 
 /* Exported functions --------------------------------------------------------*/
 /** Enable I2C1 slave interrupts (call after TRES_Cmd_Init). */
