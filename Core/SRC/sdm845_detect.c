@@ -1,12 +1,13 @@
 /**
  * @file sdm845_detect.c
- * @brief Two-stage SDM845 boot detection from the Linux shell over USART2 DMA.
+ * @brief Five-stage SDM845 boot detection from the Linux shell over USART2 DMA.
  *
- * Two independent streaming KMP matchers run side by side over the same byte
- * stream (stage 1: "Loader Build Info", stage 2: "login"). Each matcher keeps
- * its own fail table and automaton state, so matching survives across poll
- * calls and neither target can shadow the other. Boot latches only when
- * stage 2 has matched AND the line has been idle for SDM845_BOOT_IDLE_MS.
+ * Five independent streaming KMP matchers run side by side over the same byte
+ * stream (stage 1 "Loader Build Info", stage 2 "login", stage 3 "comma",
+ * stage 4 "Welcome to AGNOS", stage 5 "Front Left: Playback"). Each matcher
+ * keeps its own fail table and automaton state, so matching survives across
+ * poll calls and no target can shadow another. Boot latches only when stage 2
+ * has matched AND the line has been idle for SDM845_BOOT_IDLE_MS.
  */
 #include "sdm845_detect.h"
 #include "usart2_dma.h"
@@ -26,6 +27,9 @@ typedef struct {
 
 static Sdm845_Matcher_t s_stage1;           /* "Loader Build Info"             */
 static Sdm845_Matcher_t s_stage2;           /* "login"                         */
+static Sdm845_Matcher_t s_stage3;           /* "comma" (echoed account)        */
+static Sdm845_Matcher_t s_stage4;           /* "Welcome to AGNOS"              */
+static Sdm845_Matcher_t s_stage5;           /* "Front Left: Playback"          */
 
 /*---------------------------------------------------------------------------*/
 /* Detection results + idle timer                                             */
@@ -88,8 +92,15 @@ static void sdm845_matcher_feed( Sdm845_Matcher_t *m, uint8_t c )
     }
 }
 
+/* Rewind one matcher to its initial automaton state without latching. */
+static void sdm845_matcher_reset( Sdm845_Matcher_t *m )
+{
+    m->q    = 0u;
+    m->seen = 0u;
+}
+
 /*---------------------------------------------------------------------------*/
-/* Periodic task: drain the ring, feed both matchers, track idle.             */
+/* Periodic task: drain the ring, feed all matchers, track idle.              */
 /*---------------------------------------------------------------------------*/
 static void sdm845_task_cb( qEvent_t e )
 {
@@ -104,6 +115,9 @@ static void sdm845_task_cb( qEvent_t e )
         for ( i = 0u ; i < n ; ++i ) {
             sdm845_matcher_feed( &s_stage1, tmp[ i ] );
             sdm845_matcher_feed( &s_stage2, tmp[ i ] );
+            sdm845_matcher_feed( &s_stage3, tmp[ i ] );
+            sdm845_matcher_feed( &s_stage4, tmp[ i ] );
+            sdm845_matcher_feed( &s_stage5, tmp[ i ] );
         }
         s_last_rx_tick = QOS_Tick_Get();
         s_any_rx       = 1u;
@@ -122,6 +136,9 @@ void Sdm845_Detect_Init( void )
 {
     sdm845_matcher_init( &s_stage1, SDM845_BOOT_BANNER );
     sdm845_matcher_init( &s_stage2, SDM845_LOGIN_BANNER );
+    sdm845_matcher_init( &s_stage3, SDM845_STAGE3_BANNER );
+    sdm845_matcher_init( &s_stage4, SDM845_STAGE4_BANNER );
+    sdm845_matcher_init( &s_stage5, SDM845_STAGE5_BANNER );
 
     s_booted       = 0u;
     s_last_rx_tick = 0u;
@@ -140,6 +157,28 @@ uint8_t Sdm845_Detect_IsStage1Seen( void )
 uint8_t Sdm845_Detect_IsStage2Seen( void )
 {
     return s_stage2.seen;
+}
+
+uint8_t Sdm845_Detect_IsStage3Seen( void )
+{
+    return s_stage3.seen;
+}
+
+uint8_t Sdm845_Detect_IsStage4Seen( void )
+{
+    return s_stage4.seen;
+}
+
+uint8_t Sdm845_Detect_IsStage5Seen( void )
+{
+    return s_stage5.seen;
+}
+
+void Sdm845_Detect_ResetStage345( void )
+{
+    sdm845_matcher_reset( &s_stage3 );
+    sdm845_matcher_reset( &s_stage4 );
+    sdm845_matcher_reset( &s_stage5 );
 }
 
 uint8_t Sdm845_Detect_IsBooted( void )
