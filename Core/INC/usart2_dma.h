@@ -1,10 +1,15 @@
 /**
  * @file usart2_dma.h
- * @brief USART2 (PA0=TX, PA1=RX) DMA receive ring buffer using DMA1_Channel1.
+ * @brief USART2 (PA0=TX, PA1=RX) DMA receive ring + non-blocking TX using DMA1.
  *
  * RX path: DMA1_Channel1 runs in circular mode and continuously fills a fixed
  * RAM buffer directly from USART2->DR. The SYSCFG_CFGR3 DMA1_MAP field routes
  * the channel to the USART2_RX request (mapping code 0b01000).
+ *
+ * TX path: DMA1_Channel2 is routed through the independent SYSCFG_CFGR3
+ * DMA2_MAP field to the USART2_TX request (mapping code 0b00111) and moved in
+ * one non-circular shot per USART2_DMA_Send() call, so the scheduler never
+ * blocks on transmission.
  *
  * Unlike a simple IDLE-interrupt scheme, this module does NOT decide frame
  * boundaries. It just exposes the newest received bytes via USART2_DMA_Read().
@@ -14,7 +19,7 @@
  * \r\n output never lets the line go idle.
  *
  * Reference: PY32F030 Reference Manual V1.6, SYSCFG_CFGR3 (10.1.3),
- * DMA request mapping (Table 11-3), USART_CR3.DMAR (26.5.6).
+ * DMA request mapping (Table 11-3), USART_CR3.DMAR/DMAT (26.5.6).
  */
 #ifndef __USART2_DMA_H__
 #define __USART2_DMA_H__
@@ -52,6 +57,30 @@ void USART2_DMA_Stop(void);
  * @return Number of bytes actually copied (0 if nothing new since last call).
  */
 size_t USART2_DMA_Read(uint8_t *out, size_t max_len);
+
+/**
+ * @brief Queue one non-blocking transmission on DMA1_Channel2 (USART2_TX).
+ *
+ * Starts a mem->periph, non-circular DMA move of `len` bytes from `data` and
+ * returns immediately: the caller polls USART2_DMA_TxBusy() (or simply waits
+ * for the next task run) instead of spinning. `data` must stay valid until
+ * the transfer completes, so pass a static/string-literal buffer.
+ *
+ * Prerequisites: PA0 must already be muxed as USART2_TX push-pull, i.e. call
+ * USART2_SetLineMode(0) first when the line is in RX-only topology.
+ *
+ * @param data  Bytes to send (literal/static storage; not copied).
+ * @param len   Number of bytes (clamped to 0xFFFF, the DMA_NbData limit).
+ * @return 0 on success, 1 if a transfer is still in progress (call later).
+ */
+uint8_t USART2_DMA_Send(const uint8_t *data, size_t len);
+
+/**
+ * @brief Non-zero while the TX DMA transfer started by USART2_DMA_Send() is
+ *        still running. Concurrent sends are rejected (returns busy) instead
+ *        of queued: at most one transfer is ever in flight.
+ */
+uint8_t USART2_DMA_TxBusy(void);
 
 #ifdef __cplusplus
 }

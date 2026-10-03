@@ -1,6 +1,7 @@
 /**
  * @file usart2_dma.c
- * @brief USART2 (PA0/PA1) DMA receive ring buffer using DMA1_Channel1.
+ * @brief USART2 (PA0/PA1) DMA receive ring (DMA1_Channel1) + non-blocking TX
+ *        (DMA1_Channel2). See usart2_dma.h for the request-mapping codes.
  */
 #include "usart2_dma.h"
 #include "usart.h"
@@ -93,4 +94,46 @@ size_t USART2_DMA_Read( uint8_t *out, size_t max_len )
         s_mark = ( s_mark + 1u ) % USART2_DMA_RX_BUF_LEN;
     }
     return (size_t)available;
+}
+
+/*---------------------------------------------------------------------------*/
+/* TX: DMA1_Channel2 -> USART2_TX, one non-circular shot per Send() call.     */
+/* DMA1_MAP/DMA2_MAP are independent 5-bit fields in SYSCFG_CFGR3, so         */
+/* re-routing CH2 to USART2_TX (00111) leaves the RX route (01000) intact.    */
+/*---------------------------------------------------------------------------*/
+uint8_t USART2_DMA_Send( const uint8_t *data, size_t len )
+{
+    if ( ( data == NULL ) || ( len == 0u ) ) {
+        return 0u;                       /* nothing to send: not an error   */
+    }
+    if ( USART2_DMA_TxBusy() != 0u ) {
+        return 1u;                       /* previous transfer still running */
+    }
+    if ( len > 0xFFFFu ) {
+        len = 0xFFFFu;                   /* DMA_NbData register limit       */
+    }
+
+    LL_DMA_SetDataTransferDirection( DMA1, LL_DMA_CHANNEL_2,
+                                     LL_DMA_DIRECTION_MEMORY_TO_PERIPH );
+    LL_DMA_SetMode( DMA1, LL_DMA_CHANNEL_2, LL_DMA_MODE_NORMAL );
+    LL_DMA_SetPeriphIncMode( DMA1, LL_DMA_CHANNEL_2, LL_DMA_PERIPH_NOINCREMENT );
+    LL_DMA_SetMemoryIncMode( DMA1, LL_DMA_CHANNEL_2, LL_DMA_MEMORY_INCREMENT );
+    LL_DMA_SetPeriphSize( DMA1, LL_DMA_CHANNEL_2, LL_DMA_PDATAALIGN_BYTE );
+    LL_DMA_SetMemorySize( DMA1, LL_DMA_CHANNEL_2, LL_DMA_MDATAALIGN_BYTE );
+    LL_DMA_SetChannelPriorityLevel( DMA1, LL_DMA_CHANNEL_2,
+                                    LL_DMA_PRIORITY_MEDIUM );
+
+    LL_DMA_SetPeriphAddress( DMA1, LL_DMA_CHANNEL_2,
+                             (uint32_t)LL_USART_DMA_GetRegAddr( USART2 ) );
+    LL_DMA_SetMemoryAddress( DMA1, LL_DMA_CHANNEL_2, (uint32_t)data );
+    LL_DMA_SetDataLength( DMA1, LL_DMA_CHANNEL_2, (uint32_t)len );
+
+    LL_USART_EnableDMAReq_TX( USART2 );
+    LL_DMA_EnableChannel( DMA1, LL_DMA_CHANNEL_2 );
+    return 0u;
+}
+
+uint8_t USART2_DMA_TxBusy( void )
+{
+    return ( LL_DMA_IsEnabledChannel( DMA1, LL_DMA_CHANNEL_2 ) != 0u ) ? 1u : 0u;
 }
