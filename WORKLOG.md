@@ -828,7 +828,6 @@ stateDiagram-v2
     direction TB
 
     [*] --> THERMAL_PRECHECK
-
     state "THERMAL\nPRECHECK" as THERMAL_PRECHECK
     THERMAL_PRECHECK : entry / read AHT20 ambient, cooling=0
     THERMAL_PRECHECK : do / poll every 1s
@@ -851,16 +850,16 @@ stateDiagram-v2
     BOOT_CHECK --> BOOT_RESET : [15 s timeout && retry < MAX]
     BOOT_CHECK --> STRAP_FAIL : [15 s timeout && retry >= MAX]
 
-    state "STAGE2_WAIT FOR Login" as STAGE2_WAIT
+    state "STAGE2\nWait for login" as STAGE2_WAIT
     STAGE2_WAIT : entry / keep both keys released
-    STAGE2_WAIT : do / match "login" and wait idle >= 2 s
+    STAGE2_WAIT : do / match "login:" and wait idle >= 2 s
     STAGE2_WAIT --> STAGE3_WAIT : [stage2 matched && idle >= 2 s]
     STAGE2_WAIT --> BOOT_RESET : [60 s timeout && retry < MAX]
     STAGE2_WAIT --> STRAP_FAIL : [60 s timeout && retry >= MAX]
 
     state "STAGE3\nLogin account" as STAGE3_WAIT
     STAGE3_WAIT : entry / usart2_SetLineMode(TX_RX)
-    STAGE3_WAIT : entry / usart2_send("comma\n")
+    STAGE3_WAIT : entry / usart2_send("user account\n")
     STAGE3_WAIT : do / match "password:"
     STAGE3_WAIT --> STAGE4_WAIT : [password prompt seen]
     STAGE3_WAIT --> BOOT_RESET : [15 s timeout && retry < MAX]
@@ -868,15 +867,15 @@ stateDiagram-v2
 
     state "STAGE4\nPassword" as STAGE4_WAIT
     STAGE4_WAIT : entry / usart2_send("password\n")
-    STAGE4_WAIT : do / match "Welcome to AGNOS"
-    STAGE4_WAIT --> STAGE5_WAIT : [AGNOS banner seen]
+    STAGE4_WAIT : do / match shell prompt "#"
+    STAGE4_WAIT --> STAGE5_WAIT : [prompt seen]
     STAGE4_WAIT --> BOOT_RESET : [15 s timeout && retry < MAX]
     STAGE4_WAIT --> STRAP_FAIL : [15 s timeout && retry >= MAX]
 
     state "STAGE5\nCMD1 amixer" as STAGE5_WAIT
     STAGE5_WAIT : entry / usart2_send("amixer set PCM 100%\n")
-    STAGE5_WAIT : do / match "Front Left: Playback" (amixer output)
-    STAGE5_WAIT --> BOOT_SUCCESS : [amixer output seen]
+    STAGE5_WAIT : do / match command echo
+    STAGE5_WAIT --> BOOT_SUCCESS : [echo seen]
     STAGE5_WAIT --> BOOT_RESET : [15 s timeout && retry < MAX]
     STAGE5_WAIT --> STRAP_FAIL : [15 s timeout && retry >= MAX]
 
@@ -1754,3 +1753,151 @@ stateDiagram-v2
   - `SDM845_PRECHECK_TEMP_MILLIC`(70 °C) / `CLEAR`(60 °C) / `MAX_S`(300 s) 为初值，需按机箱热特性标定。
   - AHT20 采样周期 10 s，预检轮询 1 s 但受采样率限制，实际响应粒度约 10 s。
   - 预检只读 AHT20 环境温度；是否需同时参考 TEC 热端/SoC 温度再决定启动，待实测评估。
+
+---
+
+## 2026-10-03 — STAGE3/4/5 落地：登录 + amixer 指令链 + 非阻塞 TX DMA
+
+### 需求
+
+把 WORKLOG「SDM845 启动控制状态机（修订版）」中的 STAGE3/4/5（登录账号、密码、amixer 指令）真正落到代码，并解决"发送怎么实现"的问题。经确认：账号/密码均为 `comma`；STAGE5 命中串用 `Front Left: Playback`（amixer 实际回显行），不用 shell 提示符 `#`（comma 设备提示符是 `comma@...$`，且裸 `#` 会被内核横幅 `#1 SMP` 误命中）。
+
+### 发送方式选型（USART2_TX）
+
+| 方式 | 评估 | 结论 |
+|---|---|---|
+| 阻塞轮询 | 21 B ≈ 1.9 ms @115200，期间调度器停摆 | 否 |
+| **TX DMA** | DMA1_CH2 映射 USART2_TX（0x07），装填即返回，任务里轮询 `TxBusy`，调度器零阻塞；约 60 行代码 | **采用** |
+| TX 中断环形缓冲 | 适合高频日志重定向，3 条指令场景过重 | 否 |
+
+关键硬件事实（PY32F030 RM V1.6 §10.1.3，p.101-102）：`SYSCFG_CFGR3` 里 **`DMA1_MAP`/`DMA2_MAP` 是相互独立的 5 位字段**，把 CH2 重映射到 USART2_TX（`00111`=0x07）不影响 CH1 已有的 USART2_RX（`01000`=0x08）路由，RX/TX 通道可并存。
+
+### 发送 API（`usart2_dma.h/.c` 扩展）
+
+- `USART2_DMA_Send(const uint8_t *data, size_t len)`：配置 DMA1_CH2（mem→periph、非循环、字节宽度、中优先级），装填源/目的/长度后使能 DMAT+CH2，**立即返回**。并发第二次发送被拒（返回 busy）不排队；`data` 必须在传输期间保持有效（本设计全部用静态字符串常量，无风险）。
+- `USART2_DMA_TxBusy()`：查 CH2 EN 位（-Os 下被内联进 Send）。发送期间 RX 完全不受影响（CH1 独立收包）。
+- 前置条件：PA0 必须已切到 TX 推挽（`USART2_SetLineMode(0)`），由 STAGE3 entry 保证。
+
+### 探测层（`sdm845_detect.h/.c`）：双匹配器 → 五匹配器
+
+| 级 | 目标串 | 证明 |
+|---|---|---|
+| 1 | `Loader Build Info` | bootloader 活着 |
+| 2 | `login` | Linux 用户空间起来了 |
+| 3 | `comma` | getty 回显账号（**靠 tty 回显**，不依赖 `#`） |
+| 4 | `Welcome to AGNOS` | 密码通过、登录成功横幅 |
+| 5 | `Front Left: Playback` | amixer 回显，SoC shell 真正受控 |
+
+- 每级独立 KMP 自动机（fail[] + q + seen 锁存），同流并行喂，互不干扰；
+- 新 API：`Sdm845_Detect_IsStage3Seen/IsStage4Seen/IsStage5Seen`；
+- **`Sdm845_Detect_ResetStage345()`**：仅复位 3/4/5 的锁存与自动机状态，供 STAGE3 entry 每次（含重试）进入时清干净；stage1/2 是本次上电的既成事实，**永不清除**；
+- `IsBooted()`（stage2+idle≥2s）保留，仍由 STAGE2_WAIT 使用（stage2 命中后不再空等 idle 才进 STAGE3——见下方状态机）。
+
+### 状态机（`sdm845_boot.h/.c`）：9 态 → 12 态
+
+新增 `SDM845_STAGE3_WAIT / STAGE4_WAIT / STAGE5_WAIT`（`BOOT_SUCCESS` 及之后顺延为 8~11）。三个新回调全部 switch 风格，共用私有 `sdm845_stage_timeout()`（15 s 超时 → retry<MAX 强杀 / 否则 STRAP_FAIL）：
+
+- **STAGE3 entry**：`USART2_SetLineMode(0)` 切双工（PA0 变 TX 推挽，此时 CH343 不驱动，自身启动窗口结束即切回）→ `ResetStage345()` → TX DMA 发 `"comma\r\n"`；NONE 轮询回显命中 → STAGE4。
+- **STAGE4 entry**：TX DMA 发 `"comma\r\n"`（密码；getty 不回显密码，命中靠 AGNOS 登录横幅）；命中 → STAGE5。
+- **STAGE5 entry**：TX DMA 发 `"amixer set PCM 100%\r\n"`；命中 `Front Left: Playback` → BOOT_SUCCESS。
+- **BOOT_SUCCESS entry**（原有）：`USART2_SetLineMode(1)` 切回 RX-only。
+- **BOOT_RESET entry（补充）**：同样先 `USART2_SetLineMode(1)`——把"双工窗口"精确限定在 stage3..5，强杀/等待期间 PY32 的 TX 推挽绝不与 CH343 争线。
+- 每级命令 ≤21 B，TX DMA 在下一个 10 ms 轮询前就传完，`Send` 的 busy 拒绝路径实际不会触发。
+
+超时：STAGE3/4/5 各 15 s（`SDM845_T_STAGE345_S` 初值，待实测）；成功判定优先于超时的约束保持。
+
+### 最终状态图（代码实际行为）
+
+```mermaid
+stateDiagram-v2
+    direction TB
+
+    [*] --> THERMAL_PRECHECK
+
+    state "THERMAL_PRECHECK" as TP
+    TP : entry / keys released, cooling=0
+    TP : do / poll AHT20 every 1s
+    TP --> TP : [ambient > 70°C] / fan 100%, cooling=1
+    TP --> POWER_ON_WAIT : [ambient <= 70°C && !cooling]
+    TP --> POWER_ON_WAIT : [cooling && ambient <= 60°C]
+    TP --> POWER_ON_WAIT : [polls ≥ 300] / fail open
+
+    state "POWER_ON_WAIT" as PON
+    PON : entry / keys released, retry=0
+    PON --> BOOT_SUCCESS : [SOM_BOOTED == HIGH]
+    PON --> PWR_PRESS : [100 ms]
+
+    state "PWR_PRESS" as PP
+    PP : entry / PWRKEY low, RST released
+    PP --> BOOT_CHECK : [hold 3 s]
+
+    state "BOOT_CHECK (STAGE1)" as BC
+    BC : entry / keys released
+    BC : do / match "Loader Build Info"
+    BC --> STAGE2_WAIT : [stage1 matched]
+    BC --> BOOT_RESET : [15 s timeout && retry < 3]
+    BC --> STRAP_FAIL : [15 s timeout && retry ≥ 3]
+
+    state "STAGE2_WAIT" as S2
+    S2 : do / match "login" && idle ≥ 2 s
+    S2 --> STAGE3_WAIT : [stage2 matched && idle ≥ 2 s]
+    S2 --> BOOT_RESET : [60 s timeout && retry < 3]
+    S2 --> STRAP_FAIL : [60 s timeout && retry ≥ 3]
+
+    state "STAGE3_WAIT" as S3
+    S3 : entry / duplex, reset matchers, TX DMA "comma\r\n"
+    S3 : do / match echo "comma"
+    S3 --> STAGE4_WAIT : [stage3 matched]
+    S3 --> BOOT_RESET : [15 s timeout && retry < 3]
+    S3 --> STRAP_FAIL : [15 s timeout && retry ≥ 3]
+
+    state "STAGE4_WAIT" as S4
+    S4 : entry / TX DMA "comma\r\n" (password)
+    S4 : do / match "Welcome to AGNOS"
+    S4 --> STAGE5_WAIT : [stage4 matched]
+    S4 --> BOOT_RESET : [15 s timeout && retry < 3]
+    S4 --> STRAP_FAIL : [15 s timeout && retry ≥ 3]
+
+    state "STAGE5_WAIT" as S5
+    S5 : entry / TX DMA "amixer set PCM 100%\r\n"
+    S5 : do / match "Front Left: Playback"
+    S5 --> BOOT_SUCCESS : [stage5 matched]
+    S5 --> BOOT_RESET : [15 s timeout && retry < 3]
+    S5 --> STRAP_FAIL : [15 s timeout && retry ≥ 3]
+
+    state "BOOT_SUCCESS" as BS
+    BS : entry / RX-only (CH343 owns PA0), booted=1
+    BS --> [*]
+
+    state "BOOT_RESET" as BR
+    BR : entry / retry++, RX-only, PWRKEY+RST low
+    BR --> PMIC_SETTLE : [hold 15 s]
+
+    state "PMIC_SETTLE" as PS
+    PS : entry / keys released
+    PS --> PWR_PRESS : [settle 3 s]
+
+    state "STRAP_FAIL" as SF
+    SF : entry / keys released, halt
+```
+
+### 文件改动清单
+
+| 文件 | 改动 |
+|---|---|
+| `Core/INC/usart2_dma.h` / `Core/SRC/usart2_dma.c` | TX 路径：`USART2_DMA_Send/TxBusy`（DMA1_CH2，映射 0x07） |
+| `Core/INC/sdm845_detect.h` / `Core/SRC/sdm845_detect.c` | 5 匹配器 + `IsStage3/4/5Seen` + `ResetStage345` |
+| `Core/INC/sdm845_boot.h` | 枚举插 STAGE3/4/5_WAIT（9→12 态）+ 头注释 |
+| `Core/SRC/sdm845_boot.c` | 3 新回调 + `sdm845_stage_timeout` + 3 超时表 + 注册 + BOOT_RESET 恢复 RX-only |
+| `WORKLOG.md` | 本节 |
+
+### 验证
+
+- **KMP 逻辑模拟**（Python 复刻 5 自动机）：完整启动流 5 级全命中；逐字节分片命中；`AGN0S`（数字 0）/截断 `Playbac`/`comm` 不误锁存；CRLF 风暴零误报；`ResetStage345` 只清 3/4/5、stage1/2 锁存保持。
+- **编译链接**：4 个改动文件以 EIDE 同等参数（GCC 10.2.1，`-mcpu=cortex-m0plus -Os`）重编 0 错；全图链接成功：RAM 4344/8 KB（53%）、FLASH 28824/60 KB（47%）。
+
+### 遗留
+
+- STAGE3/4/5 的 15 s 超时、以及 `comma`/密码/`amixer set PCM 100%` 三条命令字面量为初值，待真机标定（改 `SDM845_CMD_*` 常量即可）。
+- STAGE2→STAGE3 之间保留了 `idle ≥ 2 s` 判据（`IsBooted`），确保 login 提示符稳定后才打字；若实测 login 后还有横幅刷屏，可放宽。
+- `Sdm845_Detect_GetIdleMs` 在 PY32 开始发送后会把自家回显/回复也算进"线忙"，对当前 12 态无影响（3/4/5 不用 idle 判定），如后续复用需注意。
