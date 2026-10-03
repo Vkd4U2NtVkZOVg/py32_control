@@ -2,16 +2,20 @@
  * @file sdm845_boot.c
  * @brief SDM845 boot/reset/strap state machine (QuarkTS).
  *
- * State machine (polled every 10 ms), two-stage boot detection:
+ * State machine (polled every 10 ms), five-stage boot detection:
  *
  *     [*] --> THERMAL_PRECHECK --ambient ok--> POWER_ON_WAIT --t_pwup(100ms)--> PWR_PRESS
  *     PWR_PRESS --t_hold(3s)--> BOOT_CHECK
  *     BOOT_CHECK --stage1 "Loader Build Info"--> STAGE2_WAIT
  *     BOOT_CHECK --15s 无响应 & retry<MAX--> BOOT_RESET
  *     BOOT_CHECK --15s 无响应 & retry>=MAX--> STRAP_FAIL (terminal)
- *     STAGE2_WAIT --stage2 "login" + idle--> BOOT_SUCCESS (done, terminal)
+ *     STAGE2_WAIT --stage2 "login" + idle--> STAGE3_WAIT
  *     STAGE2_WAIT --t_login(60s) & retry<MAX--> BOOT_RESET
  *     STAGE2_WAIT --t_login(60s) & retry>=MAX--> STRAP_FAIL (terminal)
+ *     STAGE3_WAIT --entry: duplex + TX DMA "comma\r\n", echo "comma"--> STAGE4_WAIT
+ *     STAGE4_WAIT --entry: TX DMA "comma\r\n", "Welcome to AGNOS"--> STAGE5_WAIT
+ *     STAGE5_WAIT --entry: TX DMA "amixer set PCM 100%\r\n", "Front Left: Playback"--> BOOT_SUCCESS
+ *     STAGE3/4/5_WAIT --15s 无响应--> BOOT_RESET / STRAP_FAIL (按 retry)
  *     BOOT_RESET --t_kill(15s)--> PMIC_SETTLE
  *     PMIC_SETTLE --t_settle(3s)--> PWR_PRESS (retry loop)
  *
@@ -23,18 +27,29 @@
  * stuck sensor cannot permanently block boot. Passing it latches thermalReady,
  * which gates the TEC control task (TecControl).
  *
+ * STAGE3/4/5_WAIT drive the post-login command chain: entry switches USART2 to
+ * duplex (USART2_SetLineMode(0); stage 3 only), re-arms the stage 3/4/5
+ * matchers (Sdm845_Detect_ResetStage345, stage 3 only) and queues the command
+ * over non-blocking TX DMA (USART2_DMA_Send). Each stage advances on its own
+ * RX banner (account echo / "Welcome to AGNOS" / "Front Left: Playback").
+ * BOOT_SUCCESS switches the line back to RX-only so the parallel CH343 bridge
+ * owns PA0 again.
+ *
  * GPIO: PWRKEY = MIX3_BOOTKEY (PB7), RST_KEY = MIX3_RST (PB8), low = pressed.
  * Stage 1 ("Loader Build Info") proves the bootloader is alive; stage 2
- * ("login") proves Linux user space came up and gates BOOT_SUCCESS.
- * A loader without a login points at a kernel/init hang -> targeted retry.
+ * ("login") proves Linux user space came up; stages 3-5 prove the PY32 can
+ * actually drive the SoC shell. A loader without a login points at a
+ * kernel/init hang -> targeted retry.
  *
  * Key constraints honored:
  *   - Never set h->NextState in a QSM_SIGNAL_ENTRY handler (engine ignores it).
- *   - Decision states (BOOT_CHECK, STAGE2_WAIT, THERMAL_PRECHECK) read the
- *     detector/sensor in the periodic-poll (QSM_SIGNAL_NONE) branch and set
- *     NextState there; fixed delays use const timeout tables. Success is
+ *   - Decision states (BOOT_CHECK, STAGE2/3/4/5_WAIT, THERMAL_PRECHECK) read
+ *     the detector/sensor in the periodic-poll (QSM_SIGNAL_NONE) branch and
+ *     set NextState there; fixed delays use const timeout tables. Success is
  *     checked BEFORE the stage timeout, so a late-arriving banner is not
  *     spuriously treated as failure.
+ *   - USART2_DMA_Send is non-blocking and rejects a second concurrent send;
+ *     the <20 B commands finish in <2 ms, far below the 10 ms poll period.
  */
 #include "main.h"
 #include "QuarkTS.h"
@@ -44,6 +59,7 @@
 #include "fan.h"
 #include "aht20_task.h"
 #include "usart.h"
+#include "usart2_dma.h"
 
 /*============================================================================*/
 /* Internal signal / timeout                                                  */
@@ -57,9 +73,15 @@
 #define SDM845_T_HOLD_S     (3.0f)     /* hold PWRKEY low to power on    */
 #define SDM845_T_BOOTCHK_S  (15.0f)    /* stage 1: wait for loader banner */
 #define SDM845_T_LOGIN_S    (60.0f)    /* stage 2: wait for login prompt  */
+#define SDM845_T_STAGE345_S (15.0f)    /* stage 3/4/5: command echo wait */
 #define SDM845_T_KILL_S     (15.0f)    /* hard-kill (PWR+RST low) pulse  */
 #define SDM845_T_SETTLE_S   (3.0f)     /* PMIC power-cycle settle        */
 #define SDM845_BOOT_MAX_RETRIES  (3u)
+
+/* Post-login command chain (sent once per STAGE entry over TX DMA). */
+static const char SDM845_CMD_ACCOUNT[] = "comma\r\n";                 /* stage 3 */
+static const char SDM845_CMD_PASSWORD[] = "comma\r\n";                /* stage 4 */
+static const char SDM845_CMD_AMIXER[] = "amixer set PCM 100%\r\n";    /* stage 5 */
 
 /* Thermal precheck: before powering the SoC/TEC, cool the enclosure if the
  * AHT20 ambient temperature is too high. Fan runs full speed until the temp
@@ -91,6 +113,7 @@ typedef struct {
 static Sdm845_Boot_t s_boot;
 
 static qSM_State_t stThermalPrecheck, stPowerOnWait, stPwrPress, stBootCheck, stStage2Wait,
+                   stStage3Wait, stStage4Wait, stStage5Wait,
                    stBootSuccess, stBootReset, stPmicSettle, stStrapFail;
 
 /*============================================================================*/
@@ -273,6 +296,95 @@ static qSM_Status_t st_Stage2Wait_Cb( qSM_Handler_t h )
     return qSM_STATUS_EXIT_SUCCESS;
 }
 
+/* Shared stage-3/4/5 timeout decision: retry or halt, same policy as the
+ * earlier stages. */
+static void sdm845_stage_timeout( qSM_Handler_t h )
+{
+    if ( s_boot.retryCount < SDM845_BOOT_MAX_RETRIES ) {
+        h->NextState = &stBootReset;
+    } else {
+        h->NextState = &stStrapFail;
+    }
+}
+
+/* STAGE3_WAIT: login prompt answered. Entry switches the line to duplex
+ * (PA0 becomes TX push-pull; the CH343 is not driving during our own boot
+ * sequence), re-arms the stage 3/4/5 matchers so each retry pass starts
+ * clean, and queues the account over non-blocking TX DMA. The stage advances
+ * on the getty echo "comma" (the typed characters come back on RX). */
+static qSM_Status_t st_Stage3Wait_Cb( qSM_Handler_t h )
+{
+    switch ( h->Signal ) {
+        case QSM_SIGNAL_ENTRY:
+            s_boot.stateId = (uint8_t)SDM845_STAGE3_WAIT;
+            USART2_SetLineMode( 0u );             /* duplex: PA0 becomes TX */
+            Sdm845_Detect_ResetStage345();        /* fresh matchers per pass */
+            (void)USART2_DMA_Send(
+                (const uint8_t *)SDM845_CMD_ACCOUNT,
+                sizeof( SDM845_CMD_ACCOUNT ) - 1u );
+            break;
+        case SDM845_TIMEOUT:
+            sdm845_stage_timeout( h );
+            return qSM_STATUS_SIGNAL_HANDLED;
+        default:
+            /* Periodic poll: echo takes priority over the 15 s timeout. */
+            if ( Sdm845_Detect_IsStage3Seen() != 0u ) {
+                h->NextState = &stStage4Wait;
+                return qSM_STATUS_SIGNAL_HANDLED;
+            }
+            break;
+    }
+    return qSM_STATUS_EXIT_SUCCESS;
+}
+
+/* STAGE4_WAIT: password prompt. Entry queues the password over TX DMA; the
+ * stage advances on the post-login banner "Welcome to AGNOS". */
+static qSM_Status_t st_Stage4Wait_Cb( qSM_Handler_t h )
+{
+    switch ( h->Signal ) {
+        case QSM_SIGNAL_ENTRY:
+            s_boot.stateId = (uint8_t)SDM845_STAGE4_WAIT;
+            (void)USART2_DMA_Send(
+                (const uint8_t *)SDM845_CMD_PASSWORD,
+                sizeof( SDM845_CMD_PASSWORD ) - 1u );
+            break;
+        case SDM845_TIMEOUT:
+            sdm845_stage_timeout( h );
+            return qSM_STATUS_SIGNAL_HANDLED;
+        default:
+            if ( Sdm845_Detect_IsStage4Seen() != 0u ) {
+                h->NextState = &stStage5Wait;
+                return qSM_STATUS_SIGNAL_HANDLED;
+            }
+            break;
+    }
+    return qSM_STATUS_EXIT_SUCCESS;
+}
+
+/* STAGE5_WAIT: first real command. Entry queues "amixer set PCM 100%" over
+ * TX DMA; the stage advances on the mixer reply "Front Left: Playback". */
+static qSM_Status_t st_Stage5Wait_Cb( qSM_Handler_t h )
+{
+    switch ( h->Signal ) {
+        case QSM_SIGNAL_ENTRY:
+            s_boot.stateId = (uint8_t)SDM845_STAGE5_WAIT;
+            (void)USART2_DMA_Send(
+                (const uint8_t *)SDM845_CMD_AMIXER,
+                sizeof( SDM845_CMD_AMIXER ) - 1u );
+            break;
+        case SDM845_TIMEOUT:
+            sdm845_stage_timeout( h );
+            return qSM_STATUS_SIGNAL_HANDLED;
+        default:
+            if ( Sdm845_Detect_IsStage5Seen() != 0u ) {
+                h->NextState = &stBootSuccess;
+                return qSM_STATUS_SIGNAL_HANDLED;
+            }
+            break;
+    }
+    return qSM_STATUS_EXIT_SUCCESS;
+}
+
 /* BOOT_SUCCESS: done; terminal. Entry switches USART2 back to RX-only so the
  * PY32 TX driver never fights the parallel CH343 bridge after boot. */
 static qSM_Status_t st_BootSuccess_Cb( qSM_Handler_t h )
@@ -289,13 +401,16 @@ static qSM_Status_t st_BootSuccess_Cb( qSM_Handler_t h )
     return qSM_STATUS_EXIT_SUCCESS;
 }
 
-/* BOOT_RESET: count + hard-kill (PWRKEY & RST_KEY both low). */
+/* BOOT_RESET: count + hard-kill (PWRKEY & RST_KEY both low). Entry also puts
+ * USART2 back to RX-only so the duplex window is exactly stage3..5: during
+ * the kill/reboot wait our PA0 TX driver must never fight the CH343. */
 static qSM_Status_t st_BootReset_Cb( qSM_Handler_t h )
 {
     switch ( h->Signal ) {
         case QSM_SIGNAL_ENTRY:
             s_boot.stateId = (uint8_t)SDM845_BOOT_RESET;
             s_boot.retryCount++;
+            USART2_SetLineMode( 1u );     /* RX-only: end the TX window */
             Pin_PwrKey( 1u );             /* pressed (low) */
             Pin_RstKey( 1u );             /* pressed (low) */
             break;
@@ -364,6 +479,18 @@ static const qSM_TimeoutStateDefinition_t s_toLogin[] = {
     { (qTime_t)SDM845_T_LOGIN_S,
       QSM_TSOPT_INDEX(0) | QSM_TSOPT_SET_ENTRY | QSM_TSOPT_RST_EXIT },
 };
+static const qSM_TimeoutStateDefinition_t s_toStage3[] = {
+    { (qTime_t)SDM845_T_STAGE345_S,
+      QSM_TSOPT_INDEX(0) | QSM_TSOPT_SET_ENTRY | QSM_TSOPT_RST_EXIT },
+};
+static const qSM_TimeoutStateDefinition_t s_toStage4[] = {
+    { (qTime_t)SDM845_T_STAGE345_S,
+      QSM_TSOPT_INDEX(0) | QSM_TSOPT_SET_ENTRY | QSM_TSOPT_RST_EXIT },
+};
+static const qSM_TimeoutStateDefinition_t s_toStage5[] = {
+    { (qTime_t)SDM845_T_STAGE345_S,
+      QSM_TSOPT_INDEX(0) | QSM_TSOPT_SET_ENTRY | QSM_TSOPT_RST_EXIT },
+};
 static const qSM_TimeoutStateDefinition_t s_toKill[] = {
     { (qTime_t)SDM845_T_KILL_S,
       QSM_TSOPT_INDEX(0) | QSM_TSOPT_SET_ENTRY | QSM_TSOPT_RST_EXIT },
@@ -390,6 +517,9 @@ void Sdm845_Boot_Init( void )
     qStateMachine_StateSubscribe( &s_boot.machine, &stPwrPress,    NULL, st_PwrPress_Cb,    NULL, NULL );
     qStateMachine_StateSubscribe( &s_boot.machine, &stBootCheck,   NULL, st_BootCheck_Cb,   NULL, NULL );
     qStateMachine_StateSubscribe( &s_boot.machine, &stStage2Wait,  NULL, st_Stage2Wait_Cb,  NULL, NULL );
+    qStateMachine_StateSubscribe( &s_boot.machine, &stStage3Wait,  NULL, st_Stage3Wait_Cb,  NULL, NULL );
+    qStateMachine_StateSubscribe( &s_boot.machine, &stStage4Wait,  NULL, st_Stage4Wait_Cb,  NULL, NULL );
+    qStateMachine_StateSubscribe( &s_boot.machine, &stStage5Wait,  NULL, st_Stage5Wait_Cb,  NULL, NULL );
     qStateMachine_StateSubscribe( &s_boot.machine, &stBootSuccess, NULL, st_BootSuccess_Cb, NULL, NULL );
     qStateMachine_StateSubscribe( &s_boot.machine, &stBootReset,   NULL, st_BootReset_Cb,   NULL, NULL );
     qStateMachine_StateSubscribe( &s_boot.machine, &stPmicSettle,  NULL, st_PmicSettle_Cb,  NULL, NULL );
@@ -400,12 +530,16 @@ void Sdm845_Boot_Init( void )
     qStateMachine_InstallSignalQueue( &s_boot.machine, &s_boot.sigQueue );
     qStateMachine_InstallTimeoutSpec( &s_boot.machine, &s_boot.timeoutSpec );
 
-    /* Only states holding a fixed delay get a timeout table. */
+    /* Only states holding a fixed delay get a timeout table. (12 states are
+     * subscribed; the 7 delay-gated ones are wired below.) */
     qStateMachine_Set_StateTimeouts( &stThermalPrecheck, (qSM_TimeoutStateDefinition_t *)s_toThermalPrecheck, qFLM_ArraySize( s_toThermalPrecheck ) );
     qStateMachine_Set_StateTimeouts( &stPowerOnWait, (qSM_TimeoutStateDefinition_t *)s_toPwup,     qFLM_ArraySize( s_toPwup ) );
     qStateMachine_Set_StateTimeouts( &stPwrPress,    (qSM_TimeoutStateDefinition_t *)s_toHold,      qFLM_ArraySize( s_toHold ) );
     qStateMachine_Set_StateTimeouts( &stBootCheck,   (qSM_TimeoutStateDefinition_t *)s_toBootChk,   qFLM_ArraySize( s_toBootChk ) );
     qStateMachine_Set_StateTimeouts( &stStage2Wait,  (qSM_TimeoutStateDefinition_t *)s_toLogin,     qFLM_ArraySize( s_toLogin ) );
+    qStateMachine_Set_StateTimeouts( &stStage3Wait,  (qSM_TimeoutStateDefinition_t *)s_toStage3,    qFLM_ArraySize( s_toStage3 ) );
+    qStateMachine_Set_StateTimeouts( &stStage4Wait,  (qSM_TimeoutStateDefinition_t *)s_toStage4,    qFLM_ArraySize( s_toStage4 ) );
+    qStateMachine_Set_StateTimeouts( &stStage5Wait,  (qSM_TimeoutStateDefinition_t *)s_toStage5,    qFLM_ArraySize( s_toStage5 ) );
     qStateMachine_Set_StateTimeouts( &stBootReset,   (qSM_TimeoutStateDefinition_t *)s_toKill,      qFLM_ArraySize( s_toKill ) );
     qStateMachine_Set_StateTimeouts( &stPmicSettle,  (qSM_TimeoutStateDefinition_t *)s_toSettle,    qFLM_ArraySize( s_toSettle ) );
 
