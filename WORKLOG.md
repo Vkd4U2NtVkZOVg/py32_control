@@ -1893,3 +1893,36 @@ stateDiagram-v2
 - STAGE3/4/5 的 15 s 超时、以及 `comma`/密码/`amixer set PCM 100%` 三条命令字面量为初值，待真机标定（改 `SDM845_CMD_*` 常量即可）。
 - STAGE2→STAGE3 之间保留了 `idle ≥ 2 s` 判据（`IsBooted`），确保 login 提示符稳定后才打字；若实测 login 后还有横幅刷屏，可放宽。
 - `Sdm845_Detect_GetIdleMs` 在 PY32 开始发送后会把自家回显/回复也算进"线忙"，对当前 12 态无影响（3/4/5 不用 idle 判定），如后续复用需注意。
+
+---
+
+## 2026-10-03 — 全部状态机状态上线 I2C 寄存器（机器状态块 0x30..0x34）
+
+### 需求
+
+把 MCU 上所有状态机的当前状态反映到 I2C 从机寄存器里，主机（SDM845）可以随时诊断整板。TRES 时序器本身早已通过 `STATUS bit[3:0]`（0x10）可见，本次补齐其余各机。
+
+### 寄存器布局（追加在 SDM845_TEMP 之后，全部只读、每字节实时合成）
+
+| 地址 | 名称 | 来源 getter | 含义 |
+|---|---|---|---|
+| 0x30 | BOOTSTATE | `Sdm845_Boot_GetState()` | SDM845 启动 FSM 状态号（`Sdm845_State_t`，0 THERMAL_PRECHECK … 11 STRAP_FAIL） |
+| 0x31 | BOOTRETRY | `Sdm845_Boot_GetRetries()` | 启动重试计数（BOOT_RESET 次数） |
+| 0x32 | TECFLAGS | `TecControl_GetAlarm()` | TEC 报警位图（OVERTEMP/HOT_WARNING/OVERCURRENT/FAN_FAULT/THERMAL_WAIT） |
+| 0x33 | AHTSTAT | `AHT20_Get_LastStatus()` | 最近一次 AHT20 驱动结果码（0 OK，负数为错误，int8） |
+| 0x34 | FANDUTY | `Fan_GetDutyPercent()` | 当前风扇占空比命令值（%，无论哪个写入方） |
+
+实现要点：读路径**实时合成**（不缓存快照），`Reg_Read()` 直接调各模块 getter，主机每次读到的都是当下值；一个 `i2cget` 起始地址 0x30 连读 5 字节即可看到整板机器/执行器健康。AHT20 的 8 态 FSM 状态号与 fan_task 的 RPM 窗口对主机诊断价值低（前者步骤秒级完成，后者已有 RPM 语义），故 AHT20 上报**驱动状态码**、风扇上报**占空比**而非状态号——这是有意选择。
+
+### 文件改动清单
+
+| 文件 | 改动 |
+|---|---|
+| `Core/INC/tres_i2c_slave.h` | 新增 0x30..0x34 寄存器定义 + 头注释 |
+| `Core/SRC/tres_i2c_slave.c` | `Reg_Read()` 增加机器状态块路由（include sdm845_boot/tec_control/aht20_task/fan） |
+| `test/tres_i2c_probe.py` | 新步骤 [2] 读并解码 0x30..0x34（状态名/报警名翻译），原步骤 3 顺延为 [4] |
+
+### 验证
+
+- 编译链接通过：5 个 getter 全部落位（`nm` 确认），RAM 4344/8 KB（53%）、FLASH 28892/60 KB（47%）。
+- `tres_i2c_probe.py` 语法/CLI 检查通过；真机待验证。
