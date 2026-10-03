@@ -4,7 +4,7 @@
  *
  * State machine (polled every 10 ms), two-stage boot detection:
  *
- *     [*] --> POWER_ON_WAIT --t_pwup(100ms)--> PWR_PRESS
+ *     [*] --> THERMAL_PRECHECK --ambient ok--> POWER_ON_WAIT --t_pwup(100ms)--> PWR_PRESS
  *     PWR_PRESS --t_hold(3s)--> BOOT_CHECK
  *     BOOT_CHECK --stage1 "Loader Build Info"--> STAGE2_WAIT
  *     BOOT_CHECK --15s 无响应 & retry<MAX--> BOOT_RESET
@@ -15,6 +15,14 @@
  *     BOOT_RESET --t_kill(15s)--> PMIC_SETTLE
  *     PMIC_SETTLE --t_settle(3s)--> PWR_PRESS (retry loop)
  *
+ * THERMAL_PRECHECK (first state): before powering the SoC/TEC, poll the AHT20
+ * ambient temperature. If it exceeds SDM845_PRECHECK_TEMP_MILLIC (70 °C) run the
+ * fan at full speed until it falls to SDM845_PRECHECK_CLEAR_MILLIC (60 °C), then
+ * boot. An already-cool enclosure (<= 70 °C) boots straight away; an invalid
+ * reading keeps waiting; after SDM845_PRECHECK_MAX_S the check fails open so a
+ * stuck sensor cannot permanently block boot. Passing it latches thermalReady,
+ * which gates the TEC control task (TecControl).
+ *
  * GPIO: PWRKEY = MIX3_BOOTKEY (PB7), RST_KEY = MIX3_RST (PB8), low = pressed.
  * Stage 1 ("Loader Build Info") proves the bootloader is alive; stage 2
  * ("login") proves Linux user space came up and gates BOOT_SUCCESS.
@@ -22,16 +30,20 @@
  *
  * Key constraints honored:
  *   - Never set h->NextState in a QSM_SIGNAL_ENTRY handler (engine ignores it).
- *   - Decision states (BOOT_CHECK, STAGE2_WAIT) read the detector in the
- *     periodic-poll (QSM_SIGNAL_NONE) branch and set NextState there; fixed
- *     delays use const timeout tables. Success is checked BEFORE the stage
- *     timeout, so a late-arriving banner is not spuriously treated as failure.
+ *   - Decision states (BOOT_CHECK, STAGE2_WAIT, THERMAL_PRECHECK) read the
+ *     detector/sensor in the periodic-poll (QSM_SIGNAL_NONE) branch and set
+ *     NextState there; fixed delays use const timeout tables. Success is
+ *     checked BEFORE the stage timeout, so a late-arriving banner is not
+ *     spuriously treated as failure.
  */
 #include "main.h"
 #include "QuarkTS.h"
 #include "gpio.h"
 #include "sdm845_boot.h"
 #include "sdm845_detect.h"
+#include "fan.h"
+#include "aht20_task.h"
+#include "usart.h"
 
 /*============================================================================*/
 /* Internal signal / timeout                                                  */
@@ -49,6 +61,16 @@
 #define SDM845_T_SETTLE_S   (3.0f)     /* PMIC power-cycle settle        */
 #define SDM845_BOOT_MAX_RETRIES  (3u)
 
+/* Thermal precheck: before powering the SoC/TEC, cool the enclosure if the
+ * AHT20 ambient temperature is too high. Fan runs full speed until the temp
+ * falls below the clear threshold, then boot proceeds. */
+#define SDM845_PRECHECK_TEMP_MILLIC   (70000)   /* 70 °C: too hot to boot  */
+#define SDM845_PRECHECK_CLEAR_MILLIC  (60000)   /* 60 °C: cool enough      */
+#define SDM845_PRECHECK_VALID_MIN_MILLIC (-20000)
+#define SDM845_PRECHECK_VALID_MAX_MILLIC (120000)
+#define SDM845_PRECHECK_MAX_S         (300.0f)  /* give up cooling after 5 min */
+#define SDM845_PRECHECK_POLL_MS       (1000u)   /* AHT20 samples every 10 s */
+
 /*============================================================================*/
 /* Runtime data (per-machine singleton)                                        */
 /*============================================================================*/
@@ -61,11 +83,14 @@ typedef struct {
     uint8_t           stateId;
     uint8_t           retryCount;
     uint8_t           booted;
+    uint8_t           thermalReady;     /* THERMAL_PRECHECK passed latch */
+    uint8_t           precheckCooling;  /* 1 = actively cooling (hysteresis) */
+    uint16_t          precheckPolls;    /* THERMAL_PRECHECK poll counter   */
 } Sdm845_Boot_t;
 
 static Sdm845_Boot_t s_boot;
 
-static qSM_State_t stPowerOnWait, stPwrPress, stBootCheck, stStage2Wait,
+static qSM_State_t stThermalPrecheck, stPowerOnWait, stPwrPress, stBootCheck, stStage2Wait,
                    stBootSuccess, stBootReset, stPmicSettle, stStrapFail;
 
 /*============================================================================*/
@@ -86,6 +111,67 @@ static void Pin_RstKey( uint8_t pressed )
 /*============================================================================*/
 /* State callbacks                                                             */
 /*============================================================================*/
+/* THERMAL_PRECHECK: first state, checks AHT20 ambient before powering SoC/TEC.
+ * Ambient > 70°C -> fan full speed and hold until it drops to <= 60°C (hysteresis
+ * via the cooling flag), then boot. Ambient already <= 70°C -> boot straight
+ * away (no need to cool). An invalid reading (AHT20 not measured yet, returns
+ * INT32_MIN) keeps waiting. After SDM845_PRECHECK_MAX_S the check fails open so
+ * a dead sensor cannot brick the device. */
+static qSM_Status_t st_ThermalPrecheck_Cb( qSM_Handler_t h )
+{
+    int32_t ambient_mc;
+    uint8_t valid;
+    uint8_t proceed;
+
+    switch ( h->Signal ) {
+        case QSM_SIGNAL_ENTRY:
+            s_boot.stateId = (uint8_t)SDM845_THERMAL_PRECHECK;
+            s_boot.precheckPolls   = 0u;
+            s_boot.precheckCooling = 0u;
+            Pin_PwrKey( 0u );
+            Pin_RstKey( 0u );
+            break;
+        case SDM845_TIMEOUT:
+            ambient_mc = AHT20_Get_LastTempMilliCelsius();
+            valid = ( ambient_mc >= SDM845_PRECHECK_VALID_MIN_MILLIC ) &&
+                    ( ambient_mc <= SDM845_PRECHECK_VALID_MAX_MILLIC );
+            s_boot.precheckPolls++;
+
+            proceed = 0u;
+            if ( valid && ( ambient_mc > SDM845_PRECHECK_TEMP_MILLIC ) ) {
+                s_boot.precheckCooling = 1u;   /* too hot: begin/keep cooling */
+            }
+            if ( s_boot.precheckCooling != 0u ) {
+                proceed = ( valid &&
+                            ( ambient_mc <= SDM845_PRECHECK_CLEAR_MILLIC ) ) ? 1u : 0u;
+            } else {
+                /* never exceeded the hot threshold: boot when not hot */
+                proceed = ( valid &&
+                            ( ambient_mc <= SDM845_PRECHECK_TEMP_MILLIC ) ) ? 1u : 0u;
+            }
+
+            if ( s_boot.precheckPolls >=
+                 (uint16_t)( SDM845_PRECHECK_MAX_S * 1000.0f /
+                             (float)SDM845_PRECHECK_POLL_MS ) ) {
+                proceed = 1u;   /* fail open: do not block boot on a stuck sensor */
+            }
+
+            if ( proceed != 0u ) {
+                s_boot.thermalReady = 1u;
+                Fan_SetDutyPercent( 0u );     /* cooled: hand fan to TEC loop */
+                h->NextState = &stPowerOnWait;
+                return qSM_STATUS_SIGNAL_HANDLED;
+            }
+            if ( s_boot.precheckCooling != 0u ) {
+                Fan_SetDutyPercent( 100u );   /* still hot: keep cooling */
+            }
+            break;
+        default:
+            break;
+    }
+    return qSM_STATUS_EXIT_SUCCESS;
+}
+
 /* POWER_ON_WAIT: keys released, retries cleared. If the SoC is already
  * running (SOM_BOOTED high, e.g. this MCU rebooted alone), skip straight to
  * BOOT_SUCCESS instead of re-powering it. */
@@ -187,13 +273,15 @@ static qSM_Status_t st_Stage2Wait_Cb( qSM_Handler_t h )
     return qSM_STATUS_EXIT_SUCCESS;
 }
 
-/* BOOT_SUCCESS: done; terminal (no NextState). */
+/* BOOT_SUCCESS: done; terminal. Entry switches USART2 back to RX-only so the
+ * PY32 TX driver never fights the parallel CH343 bridge after boot. */
 static qSM_Status_t st_BootSuccess_Cb( qSM_Handler_t h )
 {
     switch ( h->Signal ) {
         case QSM_SIGNAL_ENTRY:
             s_boot.stateId = (uint8_t)SDM845_BOOT_SUCCESS;
             s_boot.booted  = 1u;
+            USART2_SetLineMode( 1u );   /* back to RX-only (CH343 shares PA0) */
             break;
         default:
             break;
@@ -256,6 +344,10 @@ static qSM_Status_t st_StrapFail_Cb( qSM_Handler_t h )
 /*============================================================================*/
 /* Const timeout specifications (flash-resident)                               */
 /*============================================================================*/
+static const qSM_TimeoutStateDefinition_t s_toThermalPrecheck[] = {
+    { (qTime_t)( (float)SDM845_PRECHECK_POLL_MS / 1000.0f ),
+      QSM_TSOPT_INDEX(0) | QSM_TSOPT_SET_ENTRY | QSM_TSOPT_RST_EXIT },
+};
 static const qSM_TimeoutStateDefinition_t s_toPwup[] = {
     { (qTime_t)SDM845_T_PWUP_S,
       QSM_TSOPT_INDEX(0) | QSM_TSOPT_SET_ENTRY | QSM_TSOPT_RST_EXIT },
@@ -286,12 +378,14 @@ static const qSM_TimeoutStateDefinition_t s_toSettle[] = {
 /*============================================================================*/
 void Sdm845_Boot_Init( void )
 {
-    s_boot.stateId   = (uint8_t)SDM845_POWER_ON_WAIT;
-    s_boot.retryCount = 0u;
-    s_boot.booted    = 0u;
+    s_boot.stateId      = (uint8_t)SDM845_THERMAL_PRECHECK;
+    s_boot.retryCount   = 0u;
+    s_boot.booted       = 0u;
+    s_boot.thermalReady = 0u;
 
-    qStateMachine_Setup( &s_boot.machine, NULL, &stPowerOnWait, NULL, NULL );
+    qStateMachine_Setup( &s_boot.machine, NULL, &stThermalPrecheck, NULL, NULL );
 
+    qStateMachine_StateSubscribe( &s_boot.machine, &stThermalPrecheck, NULL, st_ThermalPrecheck_Cb, NULL, NULL );
     qStateMachine_StateSubscribe( &s_boot.machine, &stPowerOnWait, NULL, st_PowerOnWait_Cb, NULL, NULL );
     qStateMachine_StateSubscribe( &s_boot.machine, &stPwrPress,    NULL, st_PwrPress_Cb,    NULL, NULL );
     qStateMachine_StateSubscribe( &s_boot.machine, &stBootCheck,   NULL, st_BootCheck_Cb,   NULL, NULL );
@@ -307,6 +401,7 @@ void Sdm845_Boot_Init( void )
     qStateMachine_InstallTimeoutSpec( &s_boot.machine, &s_boot.timeoutSpec );
 
     /* Only states holding a fixed delay get a timeout table. */
+    qStateMachine_Set_StateTimeouts( &stThermalPrecheck, (qSM_TimeoutStateDefinition_t *)s_toThermalPrecheck, qFLM_ArraySize( s_toThermalPrecheck ) );
     qStateMachine_Set_StateTimeouts( &stPowerOnWait, (qSM_TimeoutStateDefinition_t *)s_toPwup,     qFLM_ArraySize( s_toPwup ) );
     qStateMachine_Set_StateTimeouts( &stPwrPress,    (qSM_TimeoutStateDefinition_t *)s_toHold,      qFLM_ArraySize( s_toHold ) );
     qStateMachine_Set_StateTimeouts( &stBootCheck,   (qSM_TimeoutStateDefinition_t *)s_toBootChk,   qFLM_ArraySize( s_toBootChk ) );
@@ -322,6 +417,11 @@ void Sdm845_Boot_Init( void )
 uint8_t Sdm845_Boot_IsDone( void )
 {
     return s_boot.booted;
+}
+
+uint8_t Sdm845_Boot_IsThermalReady( void )
+{
+    return s_boot.thermalReady;
 }
 
 uint8_t Sdm845_Boot_GetState( void )

@@ -868,8 +868,8 @@ stateDiagram-v2
 
     state "STAGE4\nPassword" as STAGE4_WAIT
     STAGE4_WAIT : entry / usart2_send("password\n")
-    STAGE4_WAIT : do / match "# " (shell prompt)
-    STAGE4_WAIT --> STAGE5_WAIT : [prompt seen && idle >= 200ms]
+    STAGE4_WAIT : do / match "Welcome to AGNOS"
+    STAGE4_WAIT --> STAGE5_WAIT : [AGNOS banner seen]
     STAGE4_WAIT --> BOOT_RESET : [15 s timeout && retry < MAX]
     STAGE4_WAIT --> STRAP_FAIL : [15 s timeout && retry >= MAX]
 
