@@ -64,6 +64,7 @@ typedef struct {
     qQueue_t          sigQueue;
     qSM_Signal_t      sigStack[8];
     int32_t           latestDewPointC;  /**< cached, read by the getter      */
+    int32_t           latestTempC;      /**< cached ambient temp (milli-°C)  */
     int               lastStatus;       /**< last AHT20_* result code        */
     AHT20_Data_t      lastData;         /**< last successful measurement     */
     uint8_t           statusByte;       /**< raw status from CHECK_STATUS    */
@@ -177,6 +178,7 @@ static qSM_Status_t st_ReadData_Cb( qSM_Handler_t h )
         case QSM_SIGNAL_ENTRY:
             s_aht.lastStatus = AHT20_ReadResult( &s_aht.lastData );
             if ( s_aht.lastStatus == AHT20_OK ) {
+                s_aht.latestTempC      = s_aht.lastData.temperature_milli_celsius;
                 s_aht.latestDewPointC = AHT20_DewPointMilliCelsius(
                     s_aht.lastData.temperature_milli_celsius,
                     s_aht.lastData.humidity_milli_percent );
@@ -232,6 +234,7 @@ static const qSM_TimeoutStateDefinition_t s_toCycle[] = {
 void AHT20_Task_Init( void )
 {
     s_aht.latestDewPointC = INT32_MIN;
+    s_aht.latestTempC     = INT32_MIN;
     s_aht.lastStatus      = AHT20_ERR_NOT_READY;
     s_aht.statusByte      = 0u;
 
@@ -266,6 +269,11 @@ void AHT20_Task_Init( void )
 int32_t AHT20_Get_LastDewPointMilliCelsius( void )
 {
     return s_aht.latestDewPointC;
+}
+
+int32_t AHT20_Get_LastTempMilliCelsius( void )
+{
+    return s_aht.latestTempC;
 }
 
 int AHT20_Get_LastStatus( void )

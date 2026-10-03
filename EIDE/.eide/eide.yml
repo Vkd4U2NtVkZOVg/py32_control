@@ -36,6 +36,7 @@ virtualFolder:
                 - path: ../Core/SRC/aht20.c
                 - path: ../Core/SRC/nv_params.c
                 - path: ../Core/SRC/tec_pid.c
+                - path: ../Core/SRC/tec_control.c
                 - path: ../Core/SRC/usart2_dma.c
                 - path: ../Core/SRC/sdm845_detect.c
                 - path: ../Core/SRC/sdm845_boot.c
@@ -97,10 +98,6 @@ targets:
       defineList:
         - PY32F030x8
         - USE_FULL_LL_DRIVER
-        # Board crystal is 16 MHz. The LL library defaults HSE_VALUE to 24 MHz
-        # (py32f0xx_ll_rcc.h), which silently corrupts every runtime clock
-        # computation (USART BRR = 48M/115200 = 0x1A1 instead of 0x116).
-        # Define it globally BEFORE ll_rcc.h so all translation units agree.
         - HSE_VALUE=16000000U
       incList:
         - .

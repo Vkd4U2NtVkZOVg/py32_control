@@ -29,6 +29,13 @@ void AHT20_Task_Init(void);
 int32_t AHT20_Get_LastDewPointMilliCelsius(void);
 
 /**
+ * @brief Latest ambient temperature produced by the periodic measurement task.
+ * @return Temperature in milli-degrees Celsius, or INT32_MIN if no successful
+ *         measurement has completed yet. Used by the SDM845 thermal precheck.
+ */
+int32_t AHT20_Get_LastTempMilliCelsius(void);
+
+/**
  * @brief Result code of the most recent measurement step (AHT20_OK on success,
  *        otherwise one of the AHT20_ERR_* codes). Initially AHT20_ERR_NOT_READY.
  */

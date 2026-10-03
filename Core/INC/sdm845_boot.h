@@ -4,10 +4,14 @@
  *
  * Implements the revised SDM845 boot state machine from WORKLOG:
  *
- *     [*] --> POWER_ON_WAIT --t_pwup--> PWR_PRESS --t_hold--> BOOT_CHECK
- *     BOOT_CHECK --booted--> BOOT_SUCCESS (done)
- *     BOOT_CHECK --15s 无响应--> BOOT_RESET --t_kill--> PMIC_SETTLE --t_settle--> PWR_PRESS (retry)
- *     BOOT_CHECK --15s 且 retry>=MAX--> STRAP_FAIL (halt)
+ *     [*] --> THERMAL_PRECHECK --ambient ok--> POWER_ON_WAIT --t_pwup--> PWR_PRESS
+ *     PWR_PRESS --t_hold--> BOOT_CHECK --stage1--> STAGE2_WAIT --stage2--> BOOT_SUCCESS
+ *     (any wait timeout) --> BOOT_RESET --t_kill--> PMIC_SETTLE --t_settle--> PWR_PRESS
+ *     (timeout & retry>=MAX) --> STRAP_FAIL (halt)
+ *
+ * THERMAL_PRECHECK reads the AHT20 ambient temperature before powering anything:
+ * if it exceeds SDM845_PRECHECK_TEMP_MILLIC the fan is run at full speed until
+ * the temperature falls below SDM845_PRECHECK_CLEAR_MILLIC, then boot proceeds.
  *
  * GPIO mapping (gpio.h): PWRKEY = MIX3_BOOTKEY (PB7), RST_KEY = MIX3_RST (PB8).
  * Boot success is decided by sdm845_detect (banner "Loader Build Info" matched
@@ -24,7 +28,8 @@ extern "C" {
 
 /** State numbers (exposed for host STATUS / diagnostics). */
 typedef enum {
-    SDM845_POWER_ON_WAIT = 0,
+    SDM845_THERMAL_PRECHECK = 0,  /**< first: AHT20 temp check, fan cooldown if hot */
+    SDM845_POWER_ON_WAIT,
     SDM845_PWR_PRESS,
     SDM845_BOOT_CHECK,      /**< stage 1: wait for "Loader Build Info"         */
     SDM845_STAGE2_WAIT,     /**< stage 2: wait for "login" (Linux user space)  */
@@ -44,6 +49,14 @@ void Sdm845_Boot_Init(void);
 
 /** @return Non-zero once boot has been declared successful (latched). */
 uint8_t Sdm845_Boot_IsDone(void);
+
+/**
+ * @brief Non-zero once the thermal precheck passed (ambient temperature below
+ *        the boot threshold, fan spun up to cool if needed). The TEC control
+ *        task gates TEC enable on this so the SoC/TEC are only started into a
+ *        thermally safe enclosure.
+ */
+uint8_t Sdm845_Boot_IsThermalReady(void);
 
 /** @return Current state number (Sdm845_State_t). */
 uint8_t Sdm845_Boot_GetState(void);

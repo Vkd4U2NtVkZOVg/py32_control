@@ -61,6 +61,7 @@
 #include "usart2_dma.h"
 #include "sdm845_detect.h"
 #include "sdm845_boot.h"
+#include "tec_control.h"
 #include "stdio.h"
 /* USER CODE END Includes */
 
@@ -157,6 +158,7 @@ int main(void)
   Fan_Task_Init();          /* 2 s periodic fan RPM measurement */
   Sdm845_Detect_Init();     /* SDM845 boot-success detect (USART2 DMA shell) */
   Sdm845_Boot_Init();       /* SDM845 boot/reset/strap state machine */
+  TecControl_Init();        /* 1 s TEC cooling-fan control (PID + protection) */
   /* USER CODE END 2 */
 
   /* Infinite loop */
