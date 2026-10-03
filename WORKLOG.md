@@ -827,7 +827,15 @@ stateDiagram-v2
 stateDiagram-v2
     direction TB
 
-    [*] --> POWER_ON_WAIT
+    [*] --> THERMAL_PRECHECK
+
+    state "THERMAL\nPRECHECK" as THERMAL_PRECHECK
+    THERMAL_PRECHECK : entry / read AHT20 ambient, cooling=0
+    THERMAL_PRECHECK : do / poll every 1s
+    THERMAL_PRECHECK --> POWER_ON_WAIT : [ambient <= 70°C && !cooling]
+    THERMAL_PRECHECK --> POWER_ON_WAIT : [ambient <= 60°C && cooling]
+    THERMAL_PRECHECK --> POWER_ON_WAIT : [timeout 300s, fail open]
+    THERMAL_PRECHECK --> THERMAL_PRECHECK : [ambient > 70°C, fan 100%, cooling=1]
 
     POWER_ON_WAIT : entry / release PWRKEY, release RST_KEY, retry=0
     POWER_ON_WAIT --> BOOT_SUCCESS: if SOM_BOOTED == HIGH
@@ -843,14 +851,36 @@ stateDiagram-v2
     BOOT_CHECK --> BOOT_RESET : [15 s timeout && retry < MAX]
     BOOT_CHECK --> STRAP_FAIL : [15 s timeout && retry >= MAX]
 
-    state "STAGE 2\nLinux user space" as STAGE2_WAIT
+    state "STAGE2_WAIT FOR Login" as STAGE2_WAIT
     STAGE2_WAIT : entry / keep both keys released
     STAGE2_WAIT : do / match "login" and wait idle >= 2 s
-    STAGE2_WAIT --> BOOT_SUCCESS : [stage2 matched && idle >= 2 s]
+    STAGE2_WAIT --> STAGE3_WAIT : [stage2 matched && idle >= 2 s]
     STAGE2_WAIT --> BOOT_RESET : [60 s timeout && retry < MAX]
     STAGE2_WAIT --> STRAP_FAIL : [60 s timeout && retry >= MAX]
 
-    BOOT_SUCCESS : entry / hand over control, stop FSM
+    state "STAGE3\nLogin account" as STAGE3_WAIT
+    STAGE3_WAIT : entry / usart2_SetLineMode(TX_RX)
+    STAGE3_WAIT : entry / usart2_send("comma\n")
+    STAGE3_WAIT : do / match "password:"
+    STAGE3_WAIT --> STAGE4_WAIT : [password prompt seen]
+    STAGE3_WAIT --> BOOT_RESET : [15 s timeout && retry < MAX]
+    STAGE3_WAIT --> STRAP_FAIL : [15 s timeout && retry >= MAX]
+
+    state "STAGE4\nPassword" as STAGE4_WAIT
+    STAGE4_WAIT : entry / usart2_send("password\n")
+    STAGE4_WAIT : do / match "# " (shell prompt)
+    STAGE4_WAIT --> STAGE5_WAIT : [prompt seen && idle >= 200ms]
+    STAGE4_WAIT --> BOOT_RESET : [15 s timeout && retry < MAX]
+    STAGE4_WAIT --> STRAP_FAIL : [15 s timeout && retry >= MAX]
+
+    state "STAGE5\nCMD1 amixer" as STAGE5_WAIT
+    STAGE5_WAIT : entry / usart2_send("amixer set PCM 100%\n")
+    STAGE5_WAIT : do / match "Front Left: Playback" (amixer output)
+    STAGE5_WAIT --> BOOT_SUCCESS : [amixer output seen]
+    STAGE5_WAIT --> BOOT_RESET : [15 s timeout && retry < MAX]
+    STAGE5_WAIT --> STRAP_FAIL : [15 s timeout && retry >= MAX]
+
+    BOOT_SUCCESS : entry / usart2_SetLineMode(RX_ONLY), stop FSM
     BOOT_SUCCESS --> [*]
 
     BOOT_RESET : entry / retry++, press PWRKEY + RST_KEY
@@ -1394,3 +1424,333 @@ Python 复刻写路径/读路径往返：{-5500, 0, 25500, -40000, 85000} mC 全
 
 - 温度消费者的接线（TEC 控制层读 `GetSdm845TempMilliC` 算 duty）待控制任务实现时接入。
 - 主机侧写协议：`i2cset` 或驱动按"写 0x20 + 连续 4 字节"即可；新鲜度由主机侧决定（PY32 不做超时失效，按需可加）。
+
+---
+
+## 2026-10-02 — TEC 散热风扇控制逻辑设计（计划书 + 实现）
+
+### 背景与目标
+
+TEC（半导体制冷片）散热风扇需根据多个温度源动态调速，平衡**散热效率、噪音、功耗**。项目已具备完整采集层（AHT20 环境温湿度、NTC 冷/热端温度、TEC 电流、风扇 RPM、SDM845 SoC 温度）与 PID 库（`TecPid_*`），本次补齐把它们串起来的**控制层**。
+
+**设计目标**（经确认）：多目标平衡 · PID 控制为主 · 故障保护（温度过高全速/停机、电流过高前馈、风扇故障报警）。
+
+### 控制架构
+
+```
+采集层（已就位，缓存 getter 单向通信）
+  AHT20 环境温湿度 → AHT20_Get_LastDewPointMilliCelsius()   [注：当前仅暴露露点]
+  NTC 热端温度     → Studio_ADC1_ReadHotMilliCelsius()
+  TEC 电流         → Studio_ADC1_ReadCurrentMilliamp()
+  风扇 RPM         → Fan_Get_LastRPM()
+  SDM845 SoC 温度  → TRES_I2C_Slave_GetSdm845TempMilliC()
+          │
+          ▼
+控制层（本次实现）tec_control.c — QuarkTS 周期任务（1 s，qLowest_Priority）
+  1. 读各 getter      2. 温度融合（hot*0.5 + sdm*0.3 + env*0.2）
+  3. 动态目标温度      4. PID 主回路（方向反转，见下）
+  5. 电流前馈补偿      6. 故障保护
+  7. 输出 → Fan_SetDutyPercent()
+          │
+          ▼
+执行层（已就位）Fan_SetDutyPercent() → TIM3_CH2 PWM ; TEC_VEN(PA12) → TEC 使能
+```
+
+### 控制逻辑
+
+1. **温度融合**：`composite = hot*0.5 + sdm*0.3 + env*0.2`（热端权重最高，直接反映散热效果）。
+2. **动态目标**：基础 45 °C；环境 >35 °C 时每高 1 °C 目标 +0.5 °C（避免过度制冷）；SoC >70 °C 时目标 −5 °C。
+3. **PID 主回路**：`TecPid_*`，输入=融合温度，目标=动态目标，输出限幅 0~100 %、I 项限幅 ±50、D 项 IIR 滤波（a=0.3）。
+4. **前馈补偿**：TEC 电流 >2 A 时，每 10 mA 加 1 % duty。
+5. **故障保护**（优先级从高到低）：
+   | 条件 | 动作 |
+   |---|---|
+   | 热端 >70 °C | 关闭 `TEC_VEN`，风扇全速，置 `OVERTEMP` |
+   | 热端 >60 °C | 风扇全速，置 `HOT_WARNING` |
+   | 电流 >3 A | 前馈 +50 %，置 `OVERCURRENT` |
+   | RPM <500 且 duty >30 % | 置 `FAN_FAULT` |
+
+### 参数配置表（初值，需实测标定）
+
+| 参数 | 初值 | 说明 |
+|---|---|---|
+| `TEC_PID_KP/KI/KD` | 2.0 / 0.1 / 0.5 | PID 增益 |
+| `TEC_TARGET_BASE_MILLIC` | 45000 | 基础目标 45 °C |
+| `TEC_HOT_OVERTEMP_MILLIC` | 60000 | 热端过热阈值 |
+| `TEC_HOT_DANGER_MILLIC` | 70000 | 热端危险阈值 |
+| `TEC_CURRENT_FEEDFORWARD_MA` | 2000 | 电流前馈起始 |
+| `TEC_CURRENT_DANGER_MA` | 3000 | 电流危险阈值 |
+| `FAN_MIN_RPM` | 500 | 风扇故障阈值 |
+| `TEC_CONTROL_PERIOD_S` | 1.0 | 控制周期 |
+
+### 关键设计决策（实现中发现，务必记录）
+
+1. **PID 方向反转（重要）**：EPID 是**加热语义**——误差 `e = SP − x`，温度低于目标时输出增大。而风扇是**制冷执行器**——温度越高越要加大 duty，方向相反。若直接用，过热时输出反而下降（风扇停转）→ 反向失控。解决：调用时对 setpoint 和 measure **同时取负**，使等效误差变为 `x − SP`（制冷语义）：
+   ```c
+   TecPid_SetSetpoint( &s_pid, -(float)target_mc );
+   TecPid_Update( &s_pid, -(float)composite_mc );
+   ```
+2. **NTC 无错误哨兵 → 用合理性窗口判有效**：`ntc3950.c` 对超量程输入钳到表两端（返回 0 或极值），**不返回 INT32_MIN**；AHT20 未就绪才返回 `INT32_MIN`。因此统一用**物理窗口**（−20~120 °C）判定温度有效性，越界视为无效并回退到标称环境值，避免把钳位极值喂进 PID。
+3. **温度源可用性**：AHT20 当前只暴露**露点**（无环境温度 getter），暂用露点作为环境代表值；若后续需要真实环境温度，应给 `aht20_task` 增加温度 getter（列为遗留）。
+4. **TEC 默认使能**：`TecControl_Init` 中置高 `TEC_VEN`；仅危险超温时才关闭，恢复正常后自动重新使能。
+5. **非阻塞**：普通周期任务（1 s），run-to-completion，无忙等，符合 QuarkTS 协作式约束。
+
+### 文件改动清单
+
+| 文件 | 改动 |
+|---|---|
+| `Core/INC/tec_control.h`（新） | 报警位定义 + 参数宏 + `TecControl_Init/GetAlarm/ClearAlarm` |
+| `Core/SRC/tec_control.c`（新） | 控制任务实现（融合/PID/前馈/保护/输出） |
+| `Core/SRC/main.c` | include + 注册 `TecControl_Init()` |
+| `EIDE/.eide/eide.yml` | 登记 `tec_control.c` |
+
+### 验证与遗留
+
+- **静态校验**：所有引用 getter/引脚/QuarkTS 符号均存在；`TecPid_Init` 10 参数与签名一致；头/实现 API 一致；eide 登记完成。
+- **待实测**：PID 增益标定、温度阈值验证、前馈系数调整、故障保护响应时间；风扇 duty 与 RPM 闭环。
+- **遗留**：
+  - PID 参数/融合权重/前馈系数均为初值，需按实际散热系统标定。
+  - AHT20 需增加环境温度 getter（当前用露点替代）。
+  - 报警输出方式（GPIO/LED/主机通知）未定义——目前仅内部标志 + getter。
+  - 多模式（节能/性能/静音）状态机待需求明确后扩展。
+
+---
+
+## 2026-10-02 — TEC 控制架构图（Mermaid）
+
+### 分层架构
+
+```mermaid
+flowchart TB
+    subgraph ACQ["采集层（已就位 · 缓存 getter 单向通信）"]
+        A1["AHT20 环境温湿度<br/>aht20_task 10s 周期"]
+        A2["NTC 热端/冷端<br/>ADC1 IN5/IN4"]
+        A3["TEC 电流<br/>ADC1 IN6 INA181A2"]
+        A4["风扇 RPM<br/>fan_task 2s 周期"]
+        A5["SDM845 SoC 温度<br/>I2C 0x20 host write"]
+    end
+
+    subgraph CTRL["控制层 tec_control.c · QuarkTS 周期任务 1s"]
+        C1["读 getter + 有效性窗口检查<br/>-20~120 °C"]
+        C2["温度融合<br/>hot*0.5 + sdm*0.3 + env*0.2"]
+        C3["动态目标温度<br/>45°C + env补偿 − SoC补偿"]
+        C4["PID 主回路<br/>TecPid 方向反转"]
+        C5["电流前馈<br/>>2A 每10mA +1%"]
+        C6["故障保护<br/>优先级判定"]
+        C7["合并限幅<br/>0~100% duty"]
+    end
+
+    subgraph ACT["执行层（已就位）"]
+        D1["Fan_SetDutyPercent<br/>TIM3_CH2 PWM 25kHz"]
+        D2["TEC_VEN PA12<br/>TEC 使能"]
+    end
+
+    A1 --> C1
+    A2 --> C1
+    A3 --> C1
+    A4 --> C6
+    A5 --> C1
+    C1 --> C2 --> C3 --> C4 --> C7
+    C1 --> C5 --> C7
+    C1 --> C6
+    C6 -.->|危险超温| D2
+    C6 --> C7
+    C7 --> D1
+```
+
+### 控制任务数据流
+
+```mermaid
+flowchart LR
+    A["读 getter"] --> B["有效性检查<br/>-20~120°C"]
+    B --> C["温度融合<br/>hot*0.5 + sdm*0.3 + env*0.2"]
+    C --> D["动态目标<br/>45°C + env补偿"]
+    D --> E["PID 计算<br/>TecPid_Update"]
+    E --> F["前馈补偿<br/>电流 >2A"]
+    F --> G["故障检测<br/>温度/电流/RPM"]
+    G --> H["合并限幅<br/>0~100%"]
+    H --> I["Fan_SetDutyPercent"]
+```
+
+### 故障保护决策树
+
+```mermaid
+flowchart TD
+    START["故障检测开始"] --> T1{"热端 >70°C?"}
+    T1 -->|是| A1["关闭 TEC_VEN<br/>风扇全速<br/>置 OVERTEMP"]
+    T1 -->|否| T2{"热端 >60°C?"}
+    T2 -->|是| A2["风扇全速<br/>置 HOT_WARNING"]
+    T2 -->|否| T3{"电流 >3A?"}
+    T3 -->|是| A3["前馈 +50%<br/>置 OVERCURRENT"]
+    T3 -->|否| T4{"RPM <500 且 duty >30%?"}
+    T4 -->|是| A4["置 FAN_FAULT"]
+    T4 -->|否| A5["无故障"]
+    A1 --> END["继续控制循环"]
+    A2 --> END
+    A3 --> END
+    A4 --> END
+    A5 --> END
+```
+
+### 代码最终形成的状态图
+
+虽然 `tec_control.c` 实现为普通周期任务而非显式状态机，但其运行逻辑可抽象为以下状态图，反映系统在不同条件下的实际运行状态：
+
+```mermaid
+stateDiagram-v2
+    [*] --> START : 初始化完成
+    
+    START --> READ_SENSORS : 1s 周期触发
+    READ_SENSORS --> CHECK_FAULTS : 读取所有 getter
+    
+    CHECK_FAULTS --> DANGER_EXIT : 热端 >70°C
+    CHECK_FAULTS --> THERMAL_GATE : 热端 <=70°C
+    
+    DANGER_EXIT --> OUTPUT_FULL : 关闭 TEC_VEN<br/>风扇 100%
+    OUTPUT_FULL --> START : return 提前退出
+    
+    THERMAL_GATE --> HOLD_OFF : 热预检未通过
+    THERMAL_GATE --> PID_CALC : 热预检通过
+    
+    HOLD_OFF --> START : return 提前退出<br/>TEC 关闭，不抢风扇
+    
+    PID_CALC --> FEEDFORWARD : PID 计算完成
+    FEEDFORWARD --> OUTPUT : 合并限幅 0~100%
+    OUTPUT --> START : 1s 周期结束
+    
+    state READ_SENSORS {
+        [*] --> READ_AHT20
+        READ_AHT20 --> READ_NTC
+        READ_NTC --> READ_CURRENT
+        READ_CURRENT --> READ_RPM
+        READ_RPM --> READ_SDM845
+        READ_SDM845 --> [*]
+    }
+    
+    state CHECK_FAULTS {
+        [*] --> CHECK_OVERTEMP
+        CHECK_OVERTEMP --> CHECK_OVERCURRENT : 热端 <=70°C
+        CHECK_OVERCURRENT --> CHECK_FAN_FAULT : 电流 <=3A
+        CHECK_FAN_FAULT --> [*]
+    }
+    
+    state PID_CALC {
+        [*] --> FUSE_TEMP : 温度融合
+        FUSE_TEMP --> DYNAMIC_TARGET : 动态目标
+        DYNAMIC_TARGET --> PID_UPDATE : TecPid_Update
+        PID_UPDATE --> [*]
+    }
+    
+    state OUTPUT {
+        [*] --> SET_DUTY : Fan_SetDutyPercent
+        SET_DUTY --> [*]
+    }
+    
+    note right of DANGER_EXIT
+        危险超温提前退出
+        跳过 PID 和后续计算
+        风扇强制全速
+    end note
+    
+    note right of THERMAL_GATE
+        检查 Sdm845_Boot_IsThermalReady()
+        未通过时 TEC 保持关闭
+        不抢占风扇控制权
+    end note
+    
+    note right of CHECK_FAULTS
+        并发标志位（非互斥）：
+        - HOT_WARNING: 热端 >60°C
+        - OVERCURRENT: 电流 >3A
+        - FAN_FAULT: RPM <500 且 duty >30%
+        - THERMAL_WAIT: 热预检未通过
+        这些标志位可同时置位
+    end note
+```
+
+**状态说明**：
+
+| 状态 | 触发条件 | 动作 | 持续时间 |
+|------|----------|------|----------|
+| **START** | 周期开始 | 清零 alarm 标志 | 瞬时 |
+| **READ_SENSORS** | 1s 周期触发 | 读取 5 个 getter | ~10ms |
+| **CHECK_FAULTS** | 读取完成 | 按优先级检测故障 | ~1ms |
+| **DANGER_EXIT** | 热端 >70°C | 关闭 TEC，风扇全速 | 瞬时 |
+| **THERMAL_GATE** | 热端 <=70°C | 检查热预检状态 | ~1ms |
+| **HOLD_OFF** | 热预检未通过 | TEC 关闭，不抢风扇 | 瞬时 |
+| **PID_CALC** | 热预检通过 | 融合→目标→PID | ~5ms |
+| **FEEDFORWARD** | PID 完成 | 电流前馈补偿 | ~1ms |
+| **OUTPUT** | 计算完成 | 输出 duty 到风扇 | ~1ms |
+
+**关键特性**：
+1. **周期任务**：1s 固定周期，非事件驱动
+2. **危险超温提前退出**：>70°C 时 `return` 跳过 PID，避免积分饱和
+3. **热预检门控**：SDM845 启动前需通过热预检（AHT20 温度 <60°C），未通过时 TEC 保持关闭且不抢占风扇控制权
+4. **并发标志位**：HOT_WARNING/OVERCURRENT/FAN_FAULT/THERMAL_WAIT 可同时置位，非互斥
+5. **无显式状态存储**：每个周期重新评估，无历史状态依赖
+
+### 关键数据流说明
+
+1. **采集层**：各传感器任务周期性更新缓存，控制任务通过 getter 读取，无阻塞
+2. **控制层**：1s 周期执行，融合多源温度 → 动态目标 → PID 计算 → 前馈补偿 → 故障保护 → 输出 duty
+3. **执行层**：`Fan_SetDutyPercent` 驱动 PWM，`TEC_VEN` 控制 TEC 使能（仅危险超温时关闭）
+4. **反馈路径**：风扇 RPM 用于故障检测，TEC 电流用于前馈补偿，形成闭环
+
+
+---
+
+## 2026-10-02 — 热预检门控：启动 SoC/TEC 前先检测 AHT20 环境温度
+
+### 需求
+
+在 PY32 控制 SDM845 与 TEC 开机**之前**，先检测 AHT20 环境温度；若过高（>70 °C），先把风扇开到最大，将温度降到合适值（≤60 °C）后再启动 TEC 和 845。同时 AHT20 需要一个返回**温度**（而非仅露点）的 API。
+
+### 1. AHT20 温度 API（`aht20_task.h/.c`）
+
+- 新增 `int32_t AHT20_Get_LastTempMilliCelsius(void)`，返回最近一次测量的环境温度（milli-°C）；未完成测量时返回 `INT32_MIN`（与露点 getter 一致）。
+- `READ_DATA` 状态在成功测量时缓存 `lastData.temperature_milli_celsius` 到新增字段 `latestTempC`（初始化 `INT32_MIN`）。
+- **原设计缺口**：之前只缓存露点，`tec_control.c` 曾用露点当环境温度；本次已把 TEC 控制的环境输入改为真实温度 getter。
+
+### 2. SDM845 热预检状态（`sdm845_boot.c`）
+
+新增**首态 `SDM845_THERMAL_PRECHECK`**（`[*]` 入口），在 `POWER_ON_WAIT` 之前：
+
+- 1 s 轮询 AHT20 温度，带**迟滞**：
+  - 温度 >70 °C → 风扇 100%，置 `cooling=1`，持续降温直到 ≤60 °C 才放行（避免在阈值附近抖动）。
+  - 从未超过 70 °C（即 ≤70 °C）→ **直接放行**，不空等（修正了"60~70 °C 空等 5 分钟"的逻辑缺陷）。
+- **有效性检查**：AHT20 未就绪（`INT32_MIN`）或越界（超出 −20~120 °C）视为无效，继续等待，避免把无效值当"凉快"放行。
+- **fail-open 保护**：降温超过 `SDM845_PRECHECK_MAX_S`（300 s）仍不达标则放行启动，避免死传感器永久阻塞启动。
+- 通过后置 `thermalReady=1`、风扇交还控制层（duty=0），进入 `POWER_ON_WAIT`。
+
+新增 getter：`Sdm845_Boot_IsThermalReady()`。
+
+### 3. TEC 门控（`tec_control.c`）
+
+- 在危险超温检查之后、使能 TEC 之前，插入热预检门控：`Sdm845_Boot_IsThermalReady()==0` 时**保持 TEC 关闭**、置 `TEC_ALARM_THERMAL_WAIT`、**不驱动风扇**（预检阶段风扇由 boot 状态机全速控制，避免争抢）、提前返回。
+- 预检通过后才使能 TEC，进入正常 PID 控制。
+- `TecControl_Init` 不再默认使能 TEC（改为 `tec_set_enabled(0)`），由门控决定。
+
+### 状态图更新
+
+- **SDM845 启动状态机**：`[*] --> THERMAL_PRECHECK`（含降温迟滞、fail-open 分支）→ `POWER_ON_WAIT` → …
+- **TEC 控制状态图**：新增 `THERMAL_GATE` / `HOLD_OFF` 分支与 `THERMAL_WAIT` 标志说明。
+
+### 文件改动清单
+
+| 文件 | 改动 |
+|---|---|
+| `Core/INC/aht20_task.h` / `Core/SRC/aht20_task.c` | 新增 `AHT20_Get_LastTempMilliCelsius()` + `latestTempC` 缓存 |
+| `Core/INC/sdm845_boot.h` / `Core/SRC/sdm845_boot.c` | 新增 `THERMAL_PRECHECK` 首态、`IsThermalReady()`、迟滞+fail-open |
+| `Core/SRC/tec_control.c` | 热预检门控 + 环境温度源改用温度 getter + 默认不使能 TEC |
+| `Core/INC/tec_control.h` | 新增 `TEC_ALARM_THERMAL_WAIT` 标志 |
+| `EIDE/.eide/eide.yml` | 重新登记 `tec_control.c`（EIDE 重生成时曾丢失） |
+| `WORKLOG.md` | 状态图更新 + 本节 |
+
+### 验证与遗留
+
+- **逻辑模拟**：6 个场景（凉启动立即放行 / 65 °C 直接放行 / 75 °C 降到 58 °C 放行 / 持续过热 fail-open / 传感器无效 fail-open / 65→75→58 迟滞）全部符合预期。
+- **静态校验**：新增 getter 头/实现一致；boot 9 回调/9 注册/7 超时表；eide 登记完成。
+- **遗留**：
+  - `SDM845_PRECHECK_TEMP_MILLIC`(70 °C) / `CLEAR`(60 °C) / `MAX_S`(300 s) 为初值，需按机箱热特性标定。
+  - AHT20 采样周期 10 s，预检轮询 1 s 但受采样率限制，实际响应粒度约 10 s。
+  - 预检只读 AHT20 环境温度；是否需同时参考 TEC 热端/SoC 温度再决定启动，待实测评估。
