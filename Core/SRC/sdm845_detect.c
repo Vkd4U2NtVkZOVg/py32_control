@@ -27,7 +27,7 @@ typedef struct {
 
 static Sdm845_Matcher_t s_stage1;           /* "Loader Build Info"             */
 static Sdm845_Matcher_t s_stage2;           /* "login"                         */
-static Sdm845_Matcher_t s_stage3;           /* "comma" (echoed account)        */
+static Sdm845_Matcher_t s_stage3;           /* "Password:" (account accepted)  */
 static Sdm845_Matcher_t s_stage4;           /* "Welcome to AGNOS"              */
 static Sdm845_Matcher_t s_stage5;           /* "Front Left: Playback"          */
 

@@ -1842,12 +1842,12 @@ stateDiagram-v2
     STAGE2_WAIT --> STRAP_FAIL : [60 s timeout && retry ≥ 3]
 
     STAGE3_WAIT : entry / TX→PY32 (PF3 TX-SW), reset matchers, TX DMA "comma\r\n"
-    STAGE3_WAIT : do / match echo "comma"
+    STAGE3_WAIT : do / match "Password:"
     STAGE3_WAIT --> STAGE4_WAIT : [stage3 matched]
     STAGE3_WAIT --> BOOT_RESET : [15 s timeout && retry < 3]
     STAGE3_WAIT --> STRAP_FAIL : [15 s timeout && retry ≥ 3]
 
-    STAGE4_WAIT : entry / settle 500ms, TX DMA "comma\r\n" (password)
+    STAGE4_WAIT : entry / TX DMA "comma\r\n" (password, prompt-gated)
     STAGE4_WAIT : do / match "Welcome to AGNOS"
     STAGE4_WAIT --> STAGE5_WAIT : [stage4 matched]
     STAGE4_WAIT --> BOOT_RESET : [15 s timeout && retry < 3]
@@ -2153,3 +2153,33 @@ Password:
 - 全仓重编 + 链接 0 错：RAM 4360/8 KB（53.2%）、FLASH 29072/60 KB（47.3%）。
 - WORKLOG 12 态图 STAGE4/5 行补 "settle 500ms"。
 - 500ms 为初值；若真机仍有偶发失败，可加大到 1s 或改为匹配 `Password:` 提示符后再发（原设计备选项）。
+
+---
+
+## 2026-10-03（设计修正）— STAGE3 门控改回 `Password:` 提示符（与 mermaid 设计一致）
+
+### 问题
+
+用户指出：STAGE3→STAGE4 的门控应该是 **`Password:` 提示符**（WORKLOG 修订版图 864 行原文 `[password prompt seen]`），而实现用了"匹配账号回显 `comma`"，与图不符。回显方案有两个天生缺陷：
+
+1. **歧义**：getty 提示符本身就是 `comma-740b6d1f login:`，主机名前缀含 `comma`，任何提示符重打都会假命中（第三次真机 5→6 假通过就是这么来的）；
+2. **无同步语义**：回显只能证明"字节到了 SoC"，不能证明 login 已切到密码模式——上一轮的密码被 flush 正是这个窗口问题，当时用 500ms 静默期去赌时间，属于治标。
+
+`Password:` 提示符是唯一的强证据：它出现 = 账号被接受 **且** login 已完成 关回显 + flush 输入队列 + 打印提示符 的全部准备。此后发密码不可能再落进 flush 窗口。真机截图同时确认设备提示符就是大写 `Password:`（KMP 大小写敏感，精确匹配安全；若未来遇到小写变体，把目标串放宽为 `assword:` 即可）。
+
+### 修改
+
+| 文件 | 改动 |
+|---|---|
+| `Core/INC/sdm845_detect.h` | `SDM845_STAGE3_BANNER`：`"comma"` → `"Password:"`，注释同步 |
+| `Core/SRC/sdm845_boot.c` | STAGE4 的发送静默期移除（`Password:` 门控本身就是同步点，settle 纯属延迟）；STAGE5 保留 500ms（motd→shell 提示符无门控，防御性保留）；文件头 ASCII 同步 |
+| `WORKLOG.md` | 12 态图 STAGE3 `do / match "Password:"`、STAGE4 entry 去 settle |
+
+### 修复后预期时序
+
+`login: ` → 发 `comma\r\n` → 回显 + `Password: `（=stage3 命中）→ STAGE4 立即发密码（无回显）→ `Welcome to AGNOS`（=stage4 命中）→ STAGE5 → 500ms → amixer → `Front Left: Playback` → BOOT_SUCCESS(8)。
+
+### 验证与遗留
+
+- 全仓重编 + 链接 0 错（告警仅厂商头文件）。
+- 遗留：上一轮的 settle 机制保留但 STAGE4 归零、仅 STAGE5 使用；若真机 STAGE5 偶发失败再评估是否改为匹配 shell 提示符。

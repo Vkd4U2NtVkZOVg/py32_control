@@ -7,14 +7,16 @@
  *
  *   stage 1: "Loader Build Info"    - the bootloader banner (SoC is alive)
  *   stage 2: "login"                - a getty prompt (Linux user space is up)
- *   stage 3: "comma"                - echo of the account typed at the prompt
+ *   stage 3: "Password:"            - account accepted, password read armed
  *   stage 4: "Welcome to AGNOS"     - post-login banner (authentication passed)
  *   stage 5: "Front Left: Playback" - amixer reply (the SoC accepts commands)
  *
  * Matching state survives across poll calls (robust to a continuous stream of
  * \r\n shell output), and a stage only latches when its exact string appears
- * as a contiguous byte run. Stage 3 relies on the getty/tty echoing the typed
- * account, not on any shell prompt character.
+ * as a contiguous byte run. Stage 3 gates on the "Password:" prompt rather
+ * than on the account echo: the echo is ambiguous (the hostname prefix
+ * contains it) and the prompt is the only proof that login is ready to read
+ * the password.
  *
  * "Boot complete" means stage 2 has been seen AND the line has been quiet for
  * >= SDM845_BOOT_IDLE_MS; Sdm845_Detect_IsBooted() reports exactly that (kept
@@ -39,8 +41,10 @@ extern "C" {
 /** Stage 2 target: getty login prompt (Linux user space is up). */
 #define SDM845_LOGIN_BANNER     "login"
 
-/** Stage 3 target: echoed account sent at the login prompt. */
-#define SDM845_STAGE3_BANNER    "comma"
+/** Stage 3 target: getty "Password:" prompt. Its appearance proves the
+ *  account was accepted AND login has finished switching the tty to
+ *  password-noecho (flush included) - only then may the password be sent. */
+#define SDM845_STAGE3_BANNER    "Password:"
 
 /** Stage 4 target: post-login AGNOS banner (password accepted). */
 #define SDM845_STAGE4_BANNER    "Welcome to AGNOS"
@@ -91,7 +95,8 @@ uint8_t Sdm845_Detect_IsStage1Seen(void);
 uint8_t Sdm845_Detect_IsStage2Seen(void);
 
 /**
- * @brief Stage 3 latch: echoed account "comma" seen (getty accepted input).
+ * @brief Stage 3 latch: "Password:" prompt seen (account accepted, the
+ *        password read is armed).
  */
 uint8_t Sdm845_Detect_IsStage3Seen(void);
 

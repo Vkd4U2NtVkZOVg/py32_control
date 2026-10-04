@@ -6,7 +6,7 @@
  *
  *     [*] --> THERMAL_PRECHECK --ambient ok--> POWER_ON_WAIT --t_pwup--> PWR_PRESS
  *     PWR_PRESS --t_hold--> BOOT_CHECK --stage1--> STAGE2_WAIT --stage2+idle--> STAGE3_WAIT
- *     STAGE3_WAIT --send "comma" + echo--> STAGE4_WAIT --send "comma" + "Welcome to AGNOS"--> STAGE5_WAIT
+ *     STAGE3_WAIT --send "comma" + "Password:"--> STAGE4_WAIT --send "comma" + "Welcome to AGNOS"--> STAGE5_WAIT
  *     STAGE5_WAIT --send "amixer set PCM 100%" + "Front Left: Playback"--> BOOT_SUCCESS
  *     (any stage timeout) --> BOOT_RESET --t_kill--> PMIC_SETTLE --t_settle--> PWR_PRESS
  *     (timeout & retry>=MAX) --> STRAP_FAIL (halt)
@@ -42,7 +42,7 @@ typedef enum {
     SDM845_PWR_PRESS = 2,
     SDM845_BOOT_CHECK = 3,      /**< stage 1: wait for "Loader Build Info"         */
     SDM845_STAGE2_WAIT = 4,     /**< stage 2: wait for "login" (Linux user space)  */
-    SDM845_STAGE3_WAIT = 5,     /**< stage 3: send account "comma", wait echo      */
+    SDM845_STAGE3_WAIT = 5,     /**< stage 3: send account, wait "Password:" prompt */
     SDM845_STAGE4_WAIT = 6,     /**< stage 4: send password, wait "Welcome to AGNOS" */
     SDM845_STAGE5_WAIT = 7,     /**< stage 5: send amixer, wait "Front Left: Playback" */
     SDM845_BOOT_SUCCESS = 8,

@@ -12,9 +12,9 @@
  *     STAGE2_WAIT --stage2 "login" + idle--> STAGE3_WAIT
  *     STAGE2_WAIT --t_login(60s) & retry<MAX--> BOOT_RESET
  *     STAGE2_WAIT --t_login(60s) & retry>=MAX--> STRAP_FAIL (terminal)
- *     STAGE3_WAIT --entry: TX->PY32 (PF3 TX-SW) + TX DMA "comma\r\n", echo "comma"--> STAGE4_WAIT
- *     STAGE4_WAIT --entry: settle 500ms, TX DMA "comma\r\n", "Welcome to AGNOS"--> STAGE5_WAIT
- *     STAGE5_WAIT --entry: settle 500ms, TX DMA "amixer set PCM 100%\r\n", "Front Left: Playback"--> BOOT_SUCCESS
+ *     STAGE3_WAIT --entry: TX->PY32 (PF3 TX-SW) + TX DMA "comma\r\n", "Password:"--> STAGE4_WAIT
+ *     STAGE4_WAIT --entry: TX DMA "comma\r\n" (password), "Welcome to AGNOS"--> STAGE5_WAIT
+ *     STAGE5_WAIT --entry: settle 500ms + TX DMA "amixer set PCM 100%\r\n", "Front Left: Playback"--> BOOT_SUCCESS
  *     STAGE3/4/5_WAIT --15s 无响应--> BOOT_RESET / STRAP_FAIL (按 retry)
  *     BOOT_RESET --t_kill(15s)--> PMIC_SETTLE
  *     PMIC_SETTLE --t_settle(3s)--> PWR_PRESS (retry loop)
@@ -75,10 +75,10 @@
 #define SDM845_T_BOOTCHK_S  (15.0f)    /* stage 1: wait for loader banner */
 #define SDM845_T_LOGIN_S    (60.0f)    /* stage 2: wait for login prompt  */
 #define SDM845_T_STAGE345_S (15.0f)    /* stage 3/4/5: command echo wait */
-#define SDM845_T_TXSETTLE_MS (500u)    /* stage 4/5: let login/shell finish tty
-                                        * setup first - login(1) flushes pending
-                                        * input when it prints Password:, so a
-                                        * password sent too early is discarded */
+#define SDM845_T_TXSETTLE_MS (500u)    /* stage 5 only: give the shell time to
+                                        * finish motd/prompt setup before the
+                                        * first command (stage 3/4 are gated
+                                        * by the getty prompts themselves)  */
 #define SDM845_T_KILL_S     (15.0f)    /* hard-kill (PWR+RST low) pulse  */
 #define SDM845_T_SETTLE_S   (3.0f)     /* PMIC power-cycle settle        */
 #define SDM845_BOOT_MAX_RETRIES  (3u)
@@ -354,10 +354,11 @@ static void sdm845_stage_timeout( qSM_Handler_t h )
 }
 
 /* STAGE3_WAIT: login prompt answered. Entry routes the SoC RX to the PY32 TX
- * via the PF3 TX switch (the CH343 stops driving the line), re-arms the
- * stage 3/4/5 matchers so each retry pass starts clean, and queues the
- * account over non-blocking TX DMA. The stage advances on the getty echo
- * "comma" (the typed characters come back on RX). */
+ * via the PF3 TX switch, re-arms the stage 3/4/5 matchers so each retry pass
+ * starts clean, and queues the account over non-blocking TX DMA. The stage
+ * advances on the getty "Password:" prompt - proof that the account was
+ * accepted AND login has switched the tty to password-noecho, so sending the
+ * password next can never land in the username->password input flush. */
 static qSM_Status_t st_Stage3Wait_Cb( qSM_Handler_t h )
 {
     switch ( h->Signal ) {
@@ -373,7 +374,7 @@ static qSM_Status_t st_Stage3Wait_Cb( qSM_Handler_t h )
             return qSM_STATUS_SIGNAL_HANDLED;
         default:
             sdm845_stage_send_retry();    /* re-send if the queue was busy   */
-            /* Periodic poll: echo takes priority over the 15 s timeout. */
+            /* Periodic poll: prompt takes priority over the 15 s timeout. */
             if ( Sdm845_Detect_IsStage3Seen() != 0u ) {
                 h->NextState = &stStage4Wait;
                 return qSM_STATUS_SIGNAL_HANDLED;
@@ -383,16 +384,17 @@ static qSM_Status_t st_Stage3Wait_Cb( qSM_Handler_t h )
     return qSM_STATUS_EXIT_SUCCESS;
 }
 
-/* STAGE4_WAIT: password prompt. Entry queues the password over TX DMA; the
- * stage advances on the post-login banner "Welcome to AGNOS". */
+/* STAGE4_WAIT: password prompt was seen (stage 3 gate), so login is already
+ * in the noecho password read - the password goes out immediately on entry
+ * with no settle delay. The stage advances on the post-login banner
+ * "Welcome to AGNOS". */
 static qSM_Status_t st_Stage4Wait_Cb( qSM_Handler_t h )
 {
     switch ( h->Signal ) {
         case QSM_SIGNAL_ENTRY:
             s_boot.stateId = (uint8_t)SDM845_STAGE4_WAIT;
             sdm845_stage_send( SDM845_CMD_PASSWORD,
-                               sizeof( SDM845_CMD_PASSWORD ) - 1u,
-                               SDM845_T_TXSETTLE_MS );
+                               sizeof( SDM845_CMD_PASSWORD ) - 1u, 0u );
             break;
         case SDM845_TIMEOUT:
             sdm845_stage_timeout( h );
