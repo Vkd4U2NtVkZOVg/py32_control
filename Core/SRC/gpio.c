@@ -128,9 +128,12 @@ void Studio_GPIO_Init(void)
   GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
   LL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  GPIO_InitStruct.Pin = KEY1_Pin;
-  GPIO_InitStruct.Mode = LL_GPIO_MODE_INPUT;
+  LL_GPIO_SetOutputPin(GPIOF, UART2_TX_SW);
+  GPIO_InitStruct.Pin = UART2_TX_SW;
+  GPIO_InitStruct.Mode = LL_GPIO_MODE_OUTPUT;
   GPIO_InitStruct.Pull = LL_GPIO_PULL_UP;
+  GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_LOW;
+  GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
   LL_GPIO_Init(GPIOF, &GPIO_InitStruct);
 
   EXTI_InitStruct.Line = LL_EXTI_LINE_3;

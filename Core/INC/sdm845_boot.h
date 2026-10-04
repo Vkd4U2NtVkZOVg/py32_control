@@ -15,10 +15,12 @@
  * if it exceeds SDM845_PRECHECK_TEMP_MILLIC the fan is run at full speed until
  * the temperature falls below SDM845_PRECHECK_CLEAR_MILLIC, then boot proceeds.
  *
- * STAGE3/4/5 switch USART2 to duplex (USART2_SetLineMode(0)) and drive the
- * login + amixer command chain over TX DMA (usart2_dma.h); each stage advances
- * on its echoed/answered banner (sdm845_detect.h). BOOT_SUCCESS restores the
- * RX-only topology so the parallel CH343 bridge owns the line again.
+ * STAGE3/4/5 drive the login + amixer command chain over TX DMA
+ * (usart2_dma.h); STAGE3 entry routes the SoC RX line to the PY32 TX via the
+ * PF3 SPDT switch (USART2_SetTxSource(USART2_TXSRC_PY32)), and each stage
+ * advances on its echoed/answered banner (sdm845_detect.h). BOOT_SUCCESS,
+ * BOOT_RESET and STRAP_FAIL hand the line back to the CH343
+ * (USART2_SetTxSource(USART2_TXSRC_CH343)).
  *
  * GPIO mapping (gpio.h): PWRKEY = MIX3_BOOTKEY (PB7), RST_KEY = MIX3_RST (PB8).
  * Boot success is decided by sdm845_detect (banner "Loader Build Info" matched
@@ -36,17 +38,17 @@ extern "C" {
 /** State numbers (exposed for host STATUS / diagnostics). */
 typedef enum {
     SDM845_THERMAL_PRECHECK = 0,  /**< first: AHT20 temp check, fan cooldown if hot */
-    SDM845_POWER_ON_WAIT,
-    SDM845_PWR_PRESS,
-    SDM845_BOOT_CHECK,      /**< stage 1: wait for "Loader Build Info"         */
-    SDM845_STAGE2_WAIT,     /**< stage 2: wait for "login" (Linux user space)  */
-    SDM845_STAGE3_WAIT,     /**< stage 3: send account "comma", wait echo      */
-    SDM845_STAGE4_WAIT,     /**< stage 4: send password, wait "Welcome to AGNOS" */
-    SDM845_STAGE5_WAIT,     /**< stage 5: send amixer, wait "Front Left: Playback" */
-    SDM845_BOOT_SUCCESS,
-    SDM845_BOOT_RESET,
-    SDM845_PMIC_SETTLE,
-    SDM845_STRAP_FAIL
+    SDM845_POWER_ON_WAIT = 1,
+    SDM845_PWR_PRESS = 2,
+    SDM845_BOOT_CHECK = 3,      /**< stage 1: wait for "Loader Build Info"         */
+    SDM845_STAGE2_WAIT = 4,     /**< stage 2: wait for "login" (Linux user space)  */
+    SDM845_STAGE3_WAIT = 5,     /**< stage 3: send account "comma", wait echo      */
+    SDM845_STAGE4_WAIT = 6,     /**< stage 4: send password, wait "Welcome to AGNOS" */
+    SDM845_STAGE5_WAIT = 7,     /**< stage 5: send amixer, wait "Front Left: Playback" */
+    SDM845_BOOT_SUCCESS = 8,
+    SDM845_BOOT_RESET = 9,
+    SDM845_PMIC_SETTLE = 10,
+    SDM845_STRAP_FAIL = 11
 } Sdm845_State_t;
 
 /**

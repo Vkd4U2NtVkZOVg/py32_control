@@ -74,8 +74,9 @@ extern "C" {
 #define MIX3_BOOTKEY_Port GPIOB
 #define MIX3_RST_Pin LL_GPIO_PIN_8
 #define MIX3_RST_Port GPIOB
-#define KEY1_Pin LL_GPIO_PIN_3
-#define KEY1_Port GPIOF
+/* GPIOF3 is used for USART2 TX switching 1: CH343 -> SOM845, 0: USART2_TX -> CH343 */
+#define UART2_TX_SW LL_GPIO_PIN_3
+#define UART2_TX_SW_Port GPIOF
 
 void Studio_GPIO_Init(void);
 
