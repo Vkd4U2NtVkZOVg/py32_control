@@ -1841,7 +1841,7 @@ stateDiagram-v2
     STAGE2_WAIT --> BOOT_RESET : [60 s timeout && retry < 3]
     STAGE2_WAIT --> STRAP_FAIL : [60 s timeout && retry ≥ 3]
 
-    STAGE3_WAIT : entry / duplex, reset matchers, TX DMA "comma\r\n"
+    STAGE3_WAIT : entry / TX→PY32 (PF3 SPDT), reset matchers, TX DMA "comma\r\n"
     STAGE3_WAIT : do / match echo "comma"
     STAGE3_WAIT --> STAGE4_WAIT : [stage3 matched]
     STAGE3_WAIT --> BOOT_RESET : [15 s timeout && retry < 3]
@@ -1859,10 +1859,10 @@ stateDiagram-v2
     STAGE5_WAIT --> BOOT_RESET : [15 s timeout && retry < 3]
     STAGE5_WAIT --> STRAP_FAIL : [15 s timeout && retry ≥ 3]
 
-    BOOT_SUCCESS : entry / RX-only (CH343 owns PA0), booted=1
+    BOOT_SUCCESS : entry / TX→CH343 (PF3 SPDT), booted=1
     BOOT_SUCCESS --> [*]
 
-    BOOT_RESET : entry / retry++, RX-only, PWRKEY+RST low
+    BOOT_RESET : entry / retry++, TX→CH343 (PF3 SPDT), PWRKEY+RST low
     BOOT_RESET --> PMIC_SETTLE : [hold 15 s]
 
     PMIC_SETTLE : entry / keys released
@@ -1926,3 +1926,54 @@ stateDiagram-v2
 
 - 编译链接通过：5 个 getter 全部落位（`nm` 确认），RAM 4344/8 KB（53%）、FLASH 28892/60 KB（47%）。
 - `tres_i2c_probe.py` 语法/CLI 检查通过；真机待验证。
+
+---
+
+## 2026-10-03 — USART2 发送改由硬件 SPDT 切换：删除单/双工软件切换（PF3 UART2_TX_SW）
+
+### 硬件变更
+
+新增一路 IO 控制的 **SPDT 模拟开关**，把"SoC RX 接谁的 TX"从软件问题变成硬件问题：
+
+- 切换脚：**PF3 = `UART2_TX_SW`**（推挽输出，`Studio_GPIO_Init` 默认置高；原 KEY1 按键脚让出）。
+- 电平语义（gpio.h 注释）：**1 = CH343 TX → SoC RX**（默认，主机拥有控制台）；**0 = USART2_TX(PA0) → SoC RX**（PY32 发命令）。
+- 由此 PA0/PA1 **永久保持** USART2 AF9 推挽 TX+RX 配置：两个 TX 驱动被开关物理隔离，不再存在抢占；EXTI3 仍归属 PORTB 风扇测速（PF3 边沿不会误触发）。
+
+### 软件变更
+
+1. **删除 `USART2_SetLineMode()`** 及其全部调用点——PA0 高阻/RX-only 那套补丁不再需要（它本来就是"PA0 与 CH343 并接"的软件规避）。
+2. **新 API `USART2_SetTxSource(uint8_t src)`**（usart.c，原 SetLineMode 位置）：
+   - `USART2_TXSRC_CH343 (1)`：PF3 置高，主机拥有 SoC RX；
+   - `USART2_TXSRC_PY32 (0)`：PF3 置低，PY32 发送。
+   - 约束：**`USART2_DMA_TxBusy()` 时不得切离 PY32**（在途字节会落到错误掷段）；boot FSM 只在状态 entry 切换，此时 DMA 必然空闲。
+3. **调用点**（窗口与原双工完全一致）：
+   - `STAGE3_WAIT` entry：`USART2_SetTxSource(USART2_TXSRC_PY32)` → 发账号；
+   - `BOOT_SUCCESS` / `BOOT_RESET` / `STRAP_FAIL` entry：`USART2_SetTxSource(USART2_TXSRC_CH343)` 归还线路。
+   - `Studio_USART2_Init` 结束处默认 `TXSRC_CH343`（上电即主机拥有控制台）。
+4. TX DMA 路径（`USART2_DMA_Send`）本身不变，仅前置条件注释从 "SetLineMode(0)" 改为 "SetTxSource(PY32)"。
+
+### 状态图同步
+
+- WORKLOG 12 态 mermaid：STAGE3_WAIT 的 `entry / duplex` → `entry / TX→PY32 (PF3 SPDT)`；BOOT_SUCCESS 的 `entry / RX-only` → `entry / TX→CH343 (PF3 SPDT)`；BOOT_RESET 同步改为 `TX→CH343 (PF3 SPDT)`。
+- `sdm845_boot.c/.h` 文件头 ASCII 与文字说明同步（"duplex/RX-only" 措辞全部替换为 SPDT 归属）。
+
+### 文件改动清单
+
+| 文件 | 改动 |
+|---|---|
+| `Core/INC/gpio.h` / `Core/SRC/gpio.c` | KEY1 → `UART2_TX_SW`（PF3 推挽输出，默认高） |
+| `Core/INC/usart.h` / `Core/SRC/usart.c` | 删 `USART2_SetLineMode`；新增 `USART2_SetTxSource` + `USART2_TXSRC_*`；init 注释重写 |
+| `Core/SRC/sdm845_boot.c` / `Core/INC/sdm845_boot.h` | 4 个调用点换 TxSource；头注释同步 |
+| `Core/INC/usart2_dma.h` | `USART2_DMA_Send` 前置条件注释更新 |
+| `WORKLOG.md` | 本节 + 12 态图措辞同步 |
+
+### 验证
+
+- 全仓重编 + 全图链接：RAM 4344/8 KB（53%）、FLASH 28576/60 KB（46.5%）；`USART2_SetTxSource` 落位，`SetLineMode` 符号消失。
+- `grep` 确认 `SetLineMode`/`KEY1` 无残留引用。
+- 附带落地：本轮顺手提交了探测层排空修复（`sdm845_detect.c` 读块 64→256 字节，全速输出不再溢出环形缓冲）。
+
+### 遗留
+
+- 上电默认 PF3=1（CH343 拥有线路）；若硬件上希望"上电即 PY32 拥有"，改 `Studio_GPIO_Init` 的初始电平即可。
+- STAGE3→CH343 的切换时机与 SPDT 开关建立时间（ns 级）相比无影响；若未来把切换放到 DMA 传输中途需加 TxBusy 保护。
