@@ -13,8 +13,8 @@
  *     STAGE2_WAIT --t_login(60s) & retry<MAX--> BOOT_RESET
  *     STAGE2_WAIT --t_login(60s) & retry>=MAX--> STRAP_FAIL (terminal)
  *     STAGE3_WAIT --entry: TX->PY32 (PF3 TX-SW) + TX DMA "comma\r\n", echo "comma"--> STAGE4_WAIT
- *     STAGE4_WAIT --entry: TX DMA "comma\r\n", "Welcome to AGNOS"--> STAGE5_WAIT
- *     STAGE5_WAIT --entry: TX DMA "amixer set PCM 100%\r\n", "Front Left: Playback"--> BOOT_SUCCESS
+ *     STAGE4_WAIT --entry: settle 500ms, TX DMA "comma\r\n", "Welcome to AGNOS"--> STAGE5_WAIT
+ *     STAGE5_WAIT --entry: settle 500ms, TX DMA "amixer set PCM 100%\r\n", "Front Left: Playback"--> BOOT_SUCCESS
  *     STAGE3/4/5_WAIT --15s 无响应--> BOOT_RESET / STRAP_FAIL (按 retry)
  *     BOOT_RESET --t_kill(15s)--> PMIC_SETTLE
  *     PMIC_SETTLE --t_settle(3s)--> PWR_PRESS (retry loop)
@@ -60,6 +60,7 @@
 #include "aht20_task.h"
 #include "usart.h"
 #include "usart2_dma.h"
+#include "qport_py32.h"
 
 /*============================================================================*/
 /* Internal signal / timeout                                                  */
@@ -74,6 +75,10 @@
 #define SDM845_T_BOOTCHK_S  (15.0f)    /* stage 1: wait for loader banner */
 #define SDM845_T_LOGIN_S    (60.0f)    /* stage 2: wait for login prompt  */
 #define SDM845_T_STAGE345_S (15.0f)    /* stage 3/4/5: command echo wait */
+#define SDM845_T_TXSETTLE_MS (500u)    /* stage 4/5: let login/shell finish tty
+                                        * setup first - login(1) flushes pending
+                                        * input when it prints Password:, so a
+                                        * password sent too early is discarded */
 #define SDM845_T_KILL_S     (15.0f)    /* hard-kill (PWR+RST low) pulse  */
 #define SDM845_T_SETTLE_S   (3.0f)     /* PMIC power-cycle settle        */
 #define SDM845_BOOT_MAX_RETRIES  (3u)
@@ -86,27 +91,35 @@ static const char SDM845_CMD_AMIXER[] = "amixer set PCM 100%\r\n";    /* stage 5
 /*============================================================================*/
 /* TX queue: one command pending at a time. A send rejected by TxBusy() is    */
 /* retried from the poll branch instead of being dropped (a dropped command   */
-/* would hang the stage until its 15 s timeout for nothing).                  */
+/* would hang the stage until its 15 s timeout for nothing). A pending        */
+/* command also waits out its settle time before the FIRST transmit: the      */
+/* password must not land while login(1) is still switching the tty from      */
+/* username-echo to password-noecho (it flushes the input queue on the way).  */
 /*============================================================================*/
 static const char *s_txPending;
 static uint32_t    s_txPendingLen;
+static uint32_t    s_txArmTick;     /* QOS_Tick_Get() when the cmd was queued */
+static uint32_t    s_txSettleMs;    /* delay before the first transmit        */
 
-static void sdm845_stage_send( const char *cmd, uint32_t len )
+static void sdm845_stage_send( const char *cmd, uint32_t len, uint32_t settle_ms )
 {
     s_txPending    = cmd;
     s_txPendingLen = len;
-    if ( USART2_DMA_Send( (const uint8_t *)cmd, len ) == 0u ) {
+    s_txSettleMs   = settle_ms;
+    s_txArmTick    = QOS_Tick_Get();
+    if ( ( settle_ms == 0u ) &&
+         ( USART2_DMA_Send( (const uint8_t *)cmd, len ) == 0u ) ) {
         s_txPending = NULL;              /* accepted: DMA owns it now        */
     }
 }
 
 static void sdm845_stage_send_retry( void )
 {
-    if ( s_txPending != NULL ) {
-        if ( USART2_DMA_Send( (const uint8_t *)s_txPending,
-                              s_txPendingLen ) == 0u ) {
-            s_txPending = NULL;          /* went through on a later poll     */
-        }
+    if ( ( s_txPending != NULL ) &&
+         ( ( QOS_Tick_Get() - s_txArmTick ) >= s_txSettleMs ) &&
+         ( USART2_DMA_Send( (const uint8_t *)s_txPending,
+                            s_txPendingLen ) == 0u ) ) {
+        s_txPending = NULL;              /* went out on this poll            */
     }
 }
 
@@ -353,7 +366,7 @@ static qSM_Status_t st_Stage3Wait_Cb( qSM_Handler_t h )
             USART2_SetTxSource( USART2_TXSRC_PY32 );  /* isolate CH343, PA0 sends */
             Sdm845_Detect_ResetStage345();        /* fresh matchers per pass */
             sdm845_stage_send( SDM845_CMD_ACCOUNT,
-                               sizeof( SDM845_CMD_ACCOUNT ) - 1u );
+                               sizeof( SDM845_CMD_ACCOUNT ) - 1u, 0u );
             break;
         case SDM845_TIMEOUT:
             sdm845_stage_timeout( h );
@@ -378,7 +391,8 @@ static qSM_Status_t st_Stage4Wait_Cb( qSM_Handler_t h )
         case QSM_SIGNAL_ENTRY:
             s_boot.stateId = (uint8_t)SDM845_STAGE4_WAIT;
             sdm845_stage_send( SDM845_CMD_PASSWORD,
-                               sizeof( SDM845_CMD_PASSWORD ) - 1u );
+                               sizeof( SDM845_CMD_PASSWORD ) - 1u,
+                               SDM845_T_TXSETTLE_MS );
             break;
         case SDM845_TIMEOUT:
             sdm845_stage_timeout( h );
@@ -402,7 +416,8 @@ static qSM_Status_t st_Stage5Wait_Cb( qSM_Handler_t h )
         case QSM_SIGNAL_ENTRY:
             s_boot.stateId = (uint8_t)SDM845_STAGE5_WAIT;
             sdm845_stage_send( SDM845_CMD_AMIXER,
-                               sizeof( SDM845_CMD_AMIXER ) - 1u );
+                               sizeof( SDM845_CMD_AMIXER ) - 1u,
+                               SDM845_T_TXSETTLE_MS );
             break;
         case SDM845_TIMEOUT:
             sdm845_stage_timeout( h );

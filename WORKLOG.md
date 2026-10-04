@@ -1847,13 +1847,13 @@ stateDiagram-v2
     STAGE3_WAIT --> BOOT_RESET : [15 s timeout && retry < 3]
     STAGE3_WAIT --> STRAP_FAIL : [15 s timeout && retry ≥ 3]
 
-    STAGE4_WAIT : entry / TX DMA "comma\r\n" (password)
+    STAGE4_WAIT : entry / settle 500ms, TX DMA "comma\r\n" (password)
     STAGE4_WAIT : do / match "Welcome to AGNOS"
     STAGE4_WAIT --> STAGE5_WAIT : [stage4 matched]
     STAGE4_WAIT --> BOOT_RESET : [15 s timeout && retry < 3]
     STAGE4_WAIT --> STRAP_FAIL : [15 s timeout && retry ≥ 3]
 
-    STAGE5_WAIT : entry / TX DMA "amixer set PCM 100%\r\n"
+    STAGE5_WAIT : entry / settle 500ms, TX DMA "amixer set PCM 100%\r\n"
     STAGE5_WAIT : do / match "Front Left: Playback"
     STAGE5_WAIT --> BOOT_SUCCESS : [stage5 matched]
     STAGE5_WAIT --> BOOT_RESET : [15 s timeout && retry < 3]
@@ -2116,3 +2116,40 @@ S3 entry 的 `ResetStage345()` 保持不变（只清 3/4/5，不碰 stage1/2）�
 - 全仓重编 + 链接 0 错：RAM 4352/8 KB（53%）、FLASH 29008/60 KB（47.2%）。
 - 预期真机行为：每次发送后 CNDTR 归 0 → busy 解除 → 下一次 Send 正常重配重发；密码框应能收到回车，登录链 5→6→7→8 走通。
 - 若仍有异常，下一步在主机侧抓 STAGE4 窗口的原始字节（区分"发了但 SoC 没收到"与"没发"）。
+
+---
+
+## 2026-10-03（第四次真机）— 账号进去了、密码被 login 吞掉：STAGE4/5 加 500ms 发送静默期
+
+### 现象（主机侧 ttyMSM0 原文）
+
+```
+Ubuntu 24.04.4 LTS comma-740b6d1f ttyMSM0
+
+comma-740b6d1f login: comma
+comma
+
+Password:
+```
+
+账号进入了（`Password:` 出现），但密码框一直没有内容。关键证据：**`comma` 出现了两次**——第 1 行内联的是账号回显，第 2 行独立成行的是**密码的回显**。即：密码其实发出去了，而且发得太早。
+
+### 根因：密码撞在 login 的"用户名→密码"切换窗口里
+
+时序：STAGE3 的账号回显 ~1-2ms 就回来，FSM 下个 10ms 轮询即切 STAGE4 并立刻发密码。此时 `login(1)` 正在处理用户名行：终端**回显还开着**（所以密码被回显成第 2 行 `comma`），而 login 切换到密码模式（关回显 + 打印 `Password:`）时会 **flush 终端输入队列**——我们那 7 个字节正好被冲掉。等 `Password:` 真正就位时密码早没了，STAGE4 等 `Welcome to AGNOS` 15s 超时。
+
+原稿状态图里 STAGE3→4 的 `[200ms]` 与 "wait idle ≥ 0.5s" 的呼吸间隔就是防这个的，上一版实现被我优化没了。
+
+### 修复：`SDM845_T_TXSETTLE_MS = 500`，STAGE4/5 的发送先静默 500ms
+
+- TX pending 结构扩展 `s_txArmTick` / `s_txSettleMs`：`sdm845_stage_send(cmd, len, settle_ms)` 入队时打时间戳；`sdm845_stage_send_retry()` 在轮询里**到 settle 时间才第一次真正发送**（顺带保留 busy 重试语义）。
+- STAGE3 仍为 0ms 立即发（抢在任何毛刺重打提示符之前，行为不变）；
+- STAGE4（密码）与 STAGE5（amixer）各静默 500ms——给 login/shell 留足 tty 重配置与提示符就位的时间。
+
+预期时序：`login: ` → 账号+回车 → `Password: `（login 就位）→ 500ms → 密码+回车（无回显）→ `Welcome to AGNOS` → STAGE5 → 500ms → amixer → `Front Left: Playback` → BOOT_SUCCESS(8)。
+
+### 验证与遗留
+
+- 全仓重编 + 链接 0 错：RAM 4360/8 KB（53.2%）、FLASH 29072/60 KB（47.3%）。
+- WORKLOG 12 态图 STAGE4/5 行补 "settle 500ms"。
+- 500ms 为初值；若真机仍有偶发失败，可加大到 1s 或改为匹配 `Password:` 提示符后再发（原设计备选项）。
