@@ -104,7 +104,7 @@ static void sdm845_matcher_reset( Sdm845_Matcher_t *m )
 /*---------------------------------------------------------------------------*/
 static void sdm845_task_cb( qEvent_t e )
 {
-    uint8_t  tmp[ 64 ];
+    uint8_t  tmp[ 256 ];
     size_t   n;
     size_t   i;
 
