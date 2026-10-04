@@ -131,12 +131,13 @@ void Studio_USART2_Init(void)
 
   LL_IOP_GRP1_EnableClock(LL_IOP_GRP1_PERIPH_GPIOA);
   /**USART2 GPIO Configuration
-   * Both pins are muxed here (generator-native); the actual line topology is
-   * applied by USART2_SetLineMode() at the end of this init (starts RX-only
-   * because a CH343 USB-UART bridge is wired in parallel: driving PA0
-   * push-pull would fight the bridge's TX driver).
-   *PA0     ------> USART2_TX (dual-line mode) / high-Z input (RX-only mode)
-   *PA1     ------> USART2_RX
+   * Both pins stay muxed TX+RX permanently: contention with the parallel
+   * CH343 bridge is solved in HARDWARE by the SPDT switch on PF3
+   * (UART2_TX_SW), which routes who drives the SoC RX line. The switch is
+   * controlled by USART2_SetTxSource(); Studio_GPIO_Init starts it on the
+   * CH343 side.
+   *PA0     ------> USART2_TX (always push-pull AF9)
+   *PA1     ------> USART2_RX (always AF9)
    */
   GPIO_InitStruct.Pin = LL_GPIO_PIN_0|LL_GPIO_PIN_1;
   GPIO_InitStruct.Mode = LL_GPIO_MODE_ALTERNATE;
@@ -165,7 +166,7 @@ void Studio_USART2_Init(void)
   LL_USART_Enable(USART2);
 
   /* USER CODE BEGIN Studio_USART2_Init 1 */
-  USART2_SetLineMode( 1u );   /* start RX-only: CH343 shares the PA0 line */
+  USART2_SetTxSource( USART2_TXSRC_CH343 );  /* default: host owns the SoC RX */
   /* USER CODE END Studio_USART2_Init 1 */
 }
 
@@ -179,32 +180,24 @@ void Studio_USART2_Init(void)
 
 /* USER CODE BEGIN 1 */
 /**
-  * @brief  Switch the USART2 line topology at runtime.
-  *         rx_only = 1: PA0 released to a high-impedance floating input and
-  *                      the USART runs receiver-only (CH343 shares the line).
-  *         rx_only = 0: PA0 muxed as USART2_TX push-pull, TX+RX enabled.
-  *         PA1 is untouched: it is always muxed as USART2_RX.
-  * @param  rx_only 1 = RX-only, 0 = TX+RX. Safe to call repeatedly.
+  * @brief  Route the SoC RX line to the wanted TX driver via the PF3 SPDT
+  *         switch (UART2_TX_SW).
+  *         USART2_TXSRC_CH343 (1): CH343 TX -> SoC RX (default, host console).
+  *         USART2_TXSRC_PY32  (0): PA0 USART2_TX -> SoC RX (PY32 sends).
+  *         The USART2 peripheral itself stays TX+RX on both pins at all times;
+  *         PA1 (RX) monitoring is unaffected by the switch position.
+  * @param  src USART2_TXSRC_CH343 or USART2_TXSRC_PY32. Safe to call repeatedly.
+  * @note   Never switch away from PY32 while USART2_DMA_TxBusy(): the byte in
+  *         flight would land on the wrong throw. The boot FSM only switches at
+  *         state entries, where no transfer can be pending.
   * @retval None
   */
-void USART2_SetLineMode( uint8_t rx_only )
+void USART2_SetTxSource( uint8_t src )
 {
-  LL_GPIO_InitTypeDef GPIO_InitStruct;
-
-  /* PA0 only; PA1 stays muxed as USART2_RX in both topologies. */
-  LL_GPIO_StructInit( &GPIO_InitStruct );
-  GPIO_InitStruct.Pin        = LL_GPIO_PIN_0;
-  GPIO_InitStruct.Mode       = ( rx_only != 0u ) ? LL_GPIO_MODE_INPUT
-                                                 : LL_GPIO_MODE_ALTERNATE;
-  GPIO_InitStruct.Pull       = ( rx_only != 0u ) ? LL_GPIO_PULL_NO
-                                                 : LL_GPIO_PULL_UP;
-  GPIO_InitStruct.Speed      = LL_GPIO_SPEED_FREQ_VERY_HIGH;
-  GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
-  GPIO_InitStruct.Alternate  = LL_GPIO_AF9_USART2;
-  LL_GPIO_Init( GPIOA, &GPIO_InitStruct );
-
-  /* Receiver-only or TX+RX: TE/RE bits in CR1 (RE is set in both). */
-  LL_USART_SetTransferDirection( USART2,
-      ( rx_only != 0u ) ? LL_USART_DIRECTION_RX : LL_USART_DIRECTION_TX_RX );
+  if ( src == USART2_TXSRC_PY32 ) {
+    LL_GPIO_ResetOutputPin( UART2_TX_SW_Port, UART2_TX_SW );
+  } else {
+    LL_GPIO_SetOutputPin( UART2_TX_SW_Port, UART2_TX_SW );
+  }
 }
 /* USER CODE END 1 */
