@@ -66,6 +66,10 @@ size_t USART2_DMA_Read(uint8_t *out, size_t max_len);
  * for the next task run) instead of spinning. `data` must stay valid until
  * the transfer completes, so pass a static/string-literal buffer.
  *
+ * Re-arming sequence per RM 11.3.3/11.4.4: the channel is disabled first
+ * (CNDTR is writable only while EN=0), then registers are rewritten and the
+ * channel is re-enabled. CNDTR stays 0 after a completed normal-mode shot.
+ *
  * Prerequisites: the SoC RX line must already be handed to the PY32, i.e.
  * call USART2_SetTxSource(USART2_TXSRC_PY32) first while the PF3 switch is
  * on the CH343 throw.
@@ -78,8 +82,11 @@ uint8_t USART2_DMA_Send(const uint8_t *data, size_t len);
 
 /**
  * @brief Non-zero while the TX DMA transfer started by USART2_DMA_Send() is
- *        still running. Concurrent sends are rejected (returns busy) instead
- *        of queued: at most one transfer is ever in flight.
+ *        still running. "Busy" is EN && CNDTR!=0: on this DMA, EN does not
+ *        self-clear at normal completion (software-only per RM 11.4.7), so
+ *        the remaining-transfer count is the live progress signal.
+ *        Concurrent sends are rejected (returns busy) instead of queued: at
+ *        most one transfer is ever in flight.
  */
 uint8_t USART2_DMA_TxBusy(void);
 

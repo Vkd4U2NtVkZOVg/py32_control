@@ -105,7 +105,11 @@ size_t USART2_DMA_Read( uint8_t *out, size_t max_len )
 /*---------------------------------------------------------------------------*/
 /* TX: DMA1_Channel2 -> USART2_TX, one non-circular shot per Send() call.     */
 /* The CH2 request route (DMA2_MAP = USART2_TX) is programmed once in         */
-/* USART2_DMA_Start(); this function only re-arms the transfer.               */
+/* USART2_DMA_Start(); this function re-arms the transfer.                    */
+/* PY32 DMA notes (RM V1.6 11.4.4/11.4.7): EN is software-only (no auto-clear */
+/* at normal completion) and CNDTR is writable only while EN=0 - so re-arming */
+/* REQUIRES disabling the channel first, and "busy" must be judged by CNDTR,  */
+/* not by EN.                                                                 */
 /*---------------------------------------------------------------------------*/
 uint8_t USART2_DMA_Send( const uint8_t *data, size_t len )
 {
@@ -118,6 +122,9 @@ uint8_t USART2_DMA_Send( const uint8_t *data, size_t len )
     if ( len > 0xFFFFu ) {
         len = 0xFFFFu;                   /* DMA_NbData register limit       */
     }
+
+    /* CNDTR is read-only while EN=1: drop the channel before re-arming. */
+    LL_DMA_DisableChannel( DMA1, LL_DMA_CHANNEL_2 );
 
     LL_DMA_SetDataTransferDirection( DMA1, LL_DMA_CHANNEL_2,
                                      LL_DMA_DIRECTION_MEMORY_TO_PERIPH );
@@ -141,5 +148,10 @@ uint8_t USART2_DMA_Send( const uint8_t *data, size_t len )
 
 uint8_t USART2_DMA_TxBusy( void )
 {
-    return ( LL_DMA_IsEnabledChannel( DMA1, LL_DMA_CHANNEL_2 ) != 0u ) ? 1u : 0u;
+    /* EN does NOT self-clear at normal completion on this DMA (software-only
+     * per RM 11.4.7), so a finished transfer still reads enabled. The live
+     * busy signal is the remaining count: CNDTR decrements per byte and sits
+     * at 0 once the shot is done. */
+    return ( ( LL_DMA_IsEnabledChannel( DMA1, LL_DMA_CHANNEL_2 ) != 0u ) &&
+             ( LL_DMA_GetDataLength( DMA1, LL_DMA_CHANNEL_2 ) != 0u ) ) ? 1u : 0u;
 }
