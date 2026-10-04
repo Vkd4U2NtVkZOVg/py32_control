@@ -1841,7 +1841,7 @@ stateDiagram-v2
     STAGE2_WAIT --> BOOT_RESET : [60 s timeout && retry < 3]
     STAGE2_WAIT --> STRAP_FAIL : [60 s timeout && retry ≥ 3]
 
-    STAGE3_WAIT : entry / TX→PY32 (PF3 SPDT), reset matchers, TX DMA "comma\r\n"
+    STAGE3_WAIT : entry / TX→PY32 (PF3 TX-SW), reset matchers, TX DMA "comma\r\n"
     STAGE3_WAIT : do / match echo "comma"
     STAGE3_WAIT --> STAGE4_WAIT : [stage3 matched]
     STAGE3_WAIT --> BOOT_RESET : [15 s timeout && retry < 3]
@@ -1859,10 +1859,10 @@ stateDiagram-v2
     STAGE5_WAIT --> BOOT_RESET : [15 s timeout && retry < 3]
     STAGE5_WAIT --> STRAP_FAIL : [15 s timeout && retry ≥ 3]
 
-    BOOT_SUCCESS : entry / TX→CH343 (PF3 SPDT), booted=1
+    BOOT_SUCCESS : entry / TX→CH343 (PF3 TX-SW), booted=1
     BOOT_SUCCESS --> [*]
 
-    BOOT_RESET : entry / retry++, TX→CH343 (PF3 SPDT), PWRKEY+RST low
+    BOOT_RESET : entry / retry++, TX→CH343 (PF3 TX-SW), PWRKEY+RST low
     BOOT_RESET --> PMIC_SETTLE : [hold 15 s]
 
     PMIC_SETTLE : entry / keys released
@@ -1954,7 +1954,7 @@ stateDiagram-v2
 
 ### 状态图同步
 
-- WORKLOG 12 态 mermaid：STAGE3_WAIT 的 `entry / duplex` → `entry / TX→PY32 (PF3 SPDT)`；BOOT_SUCCESS 的 `entry / RX-only` → `entry / TX→CH343 (PF3 SPDT)`；BOOT_RESET 同步改为 `TX→CH343 (PF3 SPDT)`。
+- WORKLOG 12 态 mermaid：STAGE3_WAIT 的 `entry / duplex` → `entry / TX→PY32 (PF3 TX-SW)`；BOOT_SUCCESS 的 `entry / RX-only` → `entry / TX→CH343 (PF3 TX-SW)`；BOOT_RESET 同步改为 `TX→CH343 (PF3 TX-SW)`。
 - `sdm845_boot.c/.h` 文件头 ASCII 与文字说明同步（"duplex/RX-only" 措辞全部替换为 SPDT 归属）。
 
 ### 文件改动清单
@@ -1977,3 +1977,40 @@ stateDiagram-v2
 
 - 上电默认 PF3=1（CH343 拥有线路）；若硬件上希望"上电即 PY32 拥有"，改 `Studio_GPIO_Init` 的初始电平即可。
 - STAGE3→CH343 的切换时机与 SPDT 开关建立时间（ns 级）相比无影响；若未来把切换放到 DMA 传输中途需加 TxBusy 保护。
+
+---
+
+## 2026-10-03（修正）— 当前硬件仅为"断开 CH343_TX"，线模式重配置恢复（宏门控）
+
+### 勘误
+
+上一节把 PF3 写成了完整 SPDT（二选一路由）。实际当前硬件**只是把 CH343_TX 从并接总线断开**：PA0 仍与总线并接，真正的 SPDT 二选一路由以后才做。因此"选 PY32 时仅翻转 PF3"是不够的——PA0 还必须重新配成推挽 TX，选回 CH343 时也必须把 PA0 释放回高阻输入，否则两个驱动仍会在总线上打架。
+
+### 实现：`USART2_TXSW_LINEMODE` 门控（usart.h）
+
+```
+#define USART2_TXSRC_CH343   (1u)   /* PF3=1：CH343 TX 在总线上（默认） */
+#define USART2_TXSRC_PY32    (0u)   /* PF3=0：CH343 断开，PY32 发送     */
+#ifndef USART2_TXSW_LINEMODE
+#define USART2_TXSW_LINEMODE (1)    /* 1=当前硬件需重配 PA0；真 SPDT 后置 0 */
+#endif
+```
+
+`USART2_SetTxSource(src)` 内部（单一 API，调用点不变）：
+
+1. **宏=1（现状默认）**：先按 `src` 重配 PA0（PY32 → AF9 推挽 + `TX_RX`；CH343 → 高阻输入 + `RX`，即原 `SetLineMode` 语义），再翻转 PF3 断开/接回 CH343。
+2. **宏=0（未来真 SPDT）**：跳过 PA0 重配，只翻 PF3——编译期 `-DUSART2_TXSW_LINEMODE=0` 即可，代码零改动。
+
+调用点窗口保持不变：STAGE3 entry → PY32；BOOT_SUCCESS / BOOT_RESET / STRAP_FAIL entry → CH343；`Studio_USART2_Init` 末尾默认 CH343。
+
+### 措辞修正
+
+- `sdm845_boot.c/.h` 文件头、WORKLOG 12 态 mermaid：`SPDT` → `PF3 TX-SW`（"TX→PY32 (PF3 TX-SW)" / "TX→CH343 (PF3 TX-SW)"），避免文档超前于硬件。
+
+### 验证
+
+- 全仓 28 文件重编 + 全图链接 0 错：RAM 4344/8 KB（53%）、FLASH 28776/60 KB（46.8%）；`USART2_SetTxSource` 落位，`USART2_TXSW_LINEMODE=1` 默认路径即原 RX-only/TX+RX 行为。
+
+### 遗留
+
+- 真 SPDT 到位后：`-DUSART2_TXSW_LINEMODE=0`（或改 usart.h 缺省值）+ 本节归档，PF3 语义不变。
