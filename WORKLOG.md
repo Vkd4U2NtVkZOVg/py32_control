@@ -2014,3 +2014,40 @@ stateDiagram-v2
 ### 遗留
 
 - 真 SPDT 到位后：`-DUSART2_TXSW_LINEMODE=0`（或改 usart.h 缺省值）+ 本节归档，PF3 语义不变。
+
+---
+
+## 2026-10-03 — 真机首测失败定位：TX DMA 一字节未发（漏配 DMA2_MAP）+ 重试锁存
+
+### 现象（真机 + I2C BOOTSTATE 观测）
+
+上电流程走到 2(PWR_PRESS)→3(BOOT_CHECK)→4(STAGE2_WAIT)→5(STAGE3_WAIT)→6(STAGE4_WAIT)，STAGE4 超时强杀，重试两轮后终态 11(STRAP_FAIL)；并接的 CH343（主机侧）没有收到任何 PY32 发出的数据。
+
+### 根因（两个，叠加）
+
+1. **`USART2_DMA_Send` 漏配 CH2 请求路由（主犯）**：`USART2_DMA_Start` 只写了 `SYSCFG_CFGR3.DMA1_MAP=0x08`(USART2_RX)，**从未写 `DMA2_MAP=0x07`**(USART2_TX)。CH2 请求源停留在复位值 00000(ADC)，USART2 的 TX DMA 请求永远到不了 CH2：
+   - 一字节都发不出去（主机零收包）；
+   - 通道使能后 CNDTR 不减、EN 不清 → `TxBusy()` 恒 1 → **STAGE4/5 的发送被 busy 拒绝且返回值被 `(void)` 忽略**（静默丢弃）。
+   - 注释写着"re-routing CH2"，代码没写——纯评审盲区。
+2. **重试路径秒过（旧缺陷 11 仍未修干净）**：stage1/stage2 匹配器锁存与 `s_booted` 从不清除，BOOT_RESET 回来后 BOOT_CHECK/STAGE2_WAIT 瞬间通过，FSM 对着还在重启/已死掉的 SoC 盲打命令。
+3. STAGE3 的 `"comma"` 命中是**假的**：getty 提示符 `comma-740b6d1f login:` 本身含 `comma`，SetTxSource 切换瞬间的线路毛刺让 getty 重打提示符，重置后的匹配器把主机名当回显 → 5→6（否则 TX 死时 STAGE3 只能超时）。
+
+### 修复
+
+| 修复 | 文件 | 内容 |
+|---|---|---|
+| TX 路由 | `usart2_dma.c` | `USART2_DMA_Start` 补 `MODIFY_REG(SYSCFG->CFGR3, SYSCFG_CFGR3_DMA2_MAP_Msk, 0x07<<DMA2_MAP_Pos)`，CH1(RX)/CH2(TX) 路由一次配齐 |
+| 发送无损化 | `sdm845_boot.c` | 新增 `s_txPending` + `sdm845_stage_send/retry`：entry 发送被拒则挂起，NONE 轮询重试直到被接受——busy 不再丢命令 |
+| 重试重同步 | `sdm845_detect.c/.h` + `sdm845_boot.c` | 新增 `Sdm845_Detect_ResetAll()`（清全部 5 匹配器 + `s_booted`），**PWR_PRESS entry 调用**——每次上电尝试都重新等真实 banner |
+
+### 离线重放验证（`test/replay_boot_fsm.py`）
+
+- 场景 A（修复前：TX 死 + 旧锁存）：完整复现观测序列 `…PP→BC→S2→S3→S4 ×4 →SF`；
+- 场景 B（修复后 TX 正常）：`TP→PON→PP→BC→S2→S3→S4→S5→BS` 一次通过；
+- 场景 C（修复后 TX 仍死）：不再秒过，每轮诚实等 15s 超时 ×3 后 STRAP_FAIL，且每轮都重新经过 PP 重新同步。
+
+### 验证与遗留
+
+- 全仓重编 + 链接 0 错：RAM 4352/8 KB（53%）、FLASH 28996/60 KB（47.2%）。
+- **残留风险**：STAGE3 的目标串 `comma` 与主机名前缀相同，若 SoC 在 STAGE3 窗口内重打提示符（毛刺/回车）仍可能假命中。TX 修好后回显在 entry 后 ~1ms 即到，正常会赢；若真机复现，考虑把目标串改成长一点的特征（如 `comma` + 随后的 `@` 或回显行尾 `\r\n` 组合）。
+- 上电默认 PF3=CH343 侧，STAGE3 entry 才切 PY32——观测主机在 STAGE3 窗口会短暂"失联"（CH343 TX 被断开），属预期。
