@@ -1853,7 +1853,7 @@ stateDiagram-v2
     STAGE4_WAIT --> BOOT_RESET : [15 s timeout && retry < 3]
     STAGE4_WAIT --> STRAP_FAIL : [15 s timeout && retry ≥ 3]
 
-    STAGE5_WAIT : entry / settle 500ms, TX DMA "amixer set PCM 100%\r\n"
+    STAGE5_WAIT : entry / settle 2s, TX DMA "amixer set PCM 100%\r\n"
     STAGE5_WAIT : do / match "Front Left: Playback"
     STAGE5_WAIT --> BOOT_SUCCESS : [stage5 matched]
     STAGE5_WAIT --> BOOT_RESET : [15 s timeout && retry < 3]
@@ -2183,3 +2183,21 @@ Password:
 
 - 全仓重编 + 链接 0 错（告警仅厂商头文件）。
 - 遗留：上一轮的 settle 机制保留但 STAGE4 归零、仅 STAGE5 使用；若真机 STAGE5 偶发失败再评估是否改为匹配 shell 提示符。
+
+---
+
+## 2026-10-03 — STAGE5 静默期 500ms → 2s（等 shell 完全就位再发 amixer）
+
+### 调整
+
+用户要求进入 STAGE5 后等 **2 秒**再发 `amixer set PCM 100%\r\n`（`Welcome to AGNOS` 命中时 motd 可能仍在刷、shell 提示符尚未就位，多留余量）。
+
+- `SDM845_T_TXSETTLE_MS(500)` → `SDM845_T_STAGE5_SETTLE_MS(2000)`，仅 STAGE5 使用（STAGE3/4 由 getty 提示符门控，无静默）；
+- 现有 `s_txSettleMs` 机制直接支持：STAGE5 entry 入队后，轮询分支 2s 到点才第一次发送；
+- 文件头 ASCII 与 WORKLOG 12 态图同步为 `settle 2s`。
+
+注意：STAGE5 的 15s 超时从 entry 起算，扣除 2s 静默后 `Front Left: Playback` 的等待窗口剩 13s，充足。
+
+### 验证
+
+重编 + 全图链接 0 错：RAM 4360/8 KB（53.2%）、FLASH 29084/60 KB（47.3%）。

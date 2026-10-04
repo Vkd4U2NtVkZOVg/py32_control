@@ -14,7 +14,7 @@
  *     STAGE2_WAIT --t_login(60s) & retry>=MAX--> STRAP_FAIL (terminal)
  *     STAGE3_WAIT --entry: TX->PY32 (PF3 TX-SW) + TX DMA "comma\r\n", "Password:"--> STAGE4_WAIT
  *     STAGE4_WAIT --entry: TX DMA "comma\r\n" (password), "Welcome to AGNOS"--> STAGE5_WAIT
- *     STAGE5_WAIT --entry: settle 500ms + TX DMA "amixer set PCM 100%\r\n", "Front Left: Playback"--> BOOT_SUCCESS
+ *     STAGE5_WAIT --entry: settle 2s + TX DMA "amixer set PCM 100%\r\n", "Front Left: Playback"--> BOOT_SUCCESS
  *     STAGE3/4/5_WAIT --15s 无响应--> BOOT_RESET / STRAP_FAIL (按 retry)
  *     BOOT_RESET --t_kill(15s)--> PMIC_SETTLE
  *     PMIC_SETTLE --t_settle(3s)--> PWR_PRESS (retry loop)
@@ -75,10 +75,9 @@
 #define SDM845_T_BOOTCHK_S  (15.0f)    /* stage 1: wait for loader banner */
 #define SDM845_T_LOGIN_S    (60.0f)    /* stage 2: wait for login prompt  */
 #define SDM845_T_STAGE345_S (15.0f)    /* stage 3/4/5: command echo wait */
-#define SDM845_T_TXSETTLE_MS (500u)    /* stage 5 only: give the shell time to
-                                        * finish motd/prompt setup before the
-                                        * first command (stage 3/4 are gated
-                                        * by the getty prompts themselves)  */
+#define SDM845_T_STAGE5_SETTLE_MS (2000u)  /* stage 5: wait for the shell to
+                                        * finish motd/prompt setup after
+                                        * "Welcome to AGNOS" before typing   */
 #define SDM845_T_KILL_S     (15.0f)    /* hard-kill (PWR+RST low) pulse  */
 #define SDM845_T_SETTLE_S   (3.0f)     /* PMIC power-cycle settle        */
 #define SDM845_BOOT_MAX_RETRIES  (3u)
@@ -419,7 +418,7 @@ static qSM_Status_t st_Stage5Wait_Cb( qSM_Handler_t h )
             s_boot.stateId = (uint8_t)SDM845_STAGE5_WAIT;
             sdm845_stage_send( SDM845_CMD_AMIXER,
                                sizeof( SDM845_CMD_AMIXER ) - 1u,
-                               SDM845_T_TXSETTLE_MS );
+                               SDM845_T_STAGE5_SETTLE_MS );
             break;
         case SDM845_TIMEOUT:
             sdm845_stage_timeout( h );
