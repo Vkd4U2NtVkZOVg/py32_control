@@ -113,6 +113,15 @@ uint8_t Sdm845_Detect_IsStage5Seen(void);
 void Sdm845_Detect_ResetStage345(void);
 
 /**
+ * @brief Clear ALL stage latches (1..5) and rewind every KMP automaton,
+ *        including the latched IsBooted() flag. Call at the start of each
+ *        boot attempt (PWR_PRESS): without it a retry pass would sail
+ *        through BOOT_CHECK/STAGE2_WAIT on latches left over from the
+ *        previous attempt and fire commands at a SoC that is still down.
+ */
+void Sdm845_Detect_ResetAll(void);
+
+/**
  * @brief Non-zero once stage 2 ("login") has been observed AND the line has
  *        been idle for the required window. Latches true (never clears).
  */

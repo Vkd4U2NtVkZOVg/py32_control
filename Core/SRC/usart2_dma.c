@@ -37,9 +37,15 @@ void USART2_DMA_Start( void )
      * "RX line has data but the DMA receives nothing". */
     LL_AHB1_GRP1_EnableClock( LL_AHB1_GRP1_PERIPH_DMA1 );
 
-    /* 1) Route DMA1_Channel1 to the USART2_RX request via SYSCFG_CFGR3. */
+    /* 1) Route the two channels to their USART2 requests via SYSCFG_CFGR3.
+     * DMA1_MAP / DMA2_MAP are independent 5-bit fields (one per channel):
+     * CH1 -> USART2_RX (01000), CH2 -> USART2_TX (00111). Without the CH2
+     * write the TX channel stays on its reset source (ADC) and never sees a
+     * request: the transfer arms, moves zero bytes and never completes. */
     MODIFY_REG( SYSCFG->CFGR3, SYSCFG_CFGR3_DMA1_MAP_Msk,
                 (0x08UL << SYSCFG_CFGR3_DMA1_MAP_Pos) );   /* 01000 = USART2_RX */
+    MODIFY_REG( SYSCFG->CFGR3, SYSCFG_CFGR3_DMA2_MAP_Msk,
+                (0x07UL << SYSCFG_CFGR3_DMA2_MAP_Pos) );   /* 00111 = USART2_TX */
 
     /* 2) DMA1_Channel1: peripheral->memory, circular, byte/byte, mem incr. */
     LL_DMA_SetDataTransferDirection( DMA1, LL_DMA_CHANNEL_1,
@@ -98,8 +104,8 @@ size_t USART2_DMA_Read( uint8_t *out, size_t max_len )
 
 /*---------------------------------------------------------------------------*/
 /* TX: DMA1_Channel2 -> USART2_TX, one non-circular shot per Send() call.     */
-/* DMA1_MAP/DMA2_MAP are independent 5-bit fields in SYSCFG_CFGR3, so         */
-/* re-routing CH2 to USART2_TX (00111) leaves the RX route (01000) intact.    */
+/* The CH2 request route (DMA2_MAP = USART2_TX) is programmed once in         */
+/* USART2_DMA_Start(); this function only re-arms the transfer.               */
 /*---------------------------------------------------------------------------*/
 uint8_t USART2_DMA_Send( const uint8_t *data, size_t len )
 {

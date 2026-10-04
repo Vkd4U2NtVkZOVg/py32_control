@@ -83,6 +83,33 @@ static const char SDM845_CMD_ACCOUNT[] = "comma\r\n";                 /* stage 3
 static const char SDM845_CMD_PASSWORD[] = "comma\r\n";                /* stage 4 */
 static const char SDM845_CMD_AMIXER[] = "amixer set PCM 100%\r\n";    /* stage 5 */
 
+/*============================================================================*/
+/* TX queue: one command pending at a time. A send rejected by TxBusy() is    */
+/* retried from the poll branch instead of being dropped (a dropped command   */
+/* would hang the stage until its 15 s timeout for nothing).                  */
+/*============================================================================*/
+static const char *s_txPending;
+static uint32_t    s_txPendingLen;
+
+static void sdm845_stage_send( const char *cmd, uint32_t len )
+{
+    s_txPending    = cmd;
+    s_txPendingLen = len;
+    if ( USART2_DMA_Send( (const uint8_t *)cmd, len ) == 0u ) {
+        s_txPending = NULL;              /* accepted: DMA owns it now        */
+    }
+}
+
+static void sdm845_stage_send_retry( void )
+{
+    if ( s_txPending != NULL ) {
+        if ( USART2_DMA_Send( (const uint8_t *)s_txPending,
+                              s_txPendingLen ) == 0u ) {
+            s_txPending = NULL;          /* went through on a later poll     */
+        }
+    }
+}
+
 /* Thermal precheck: before powering the SoC/TEC, cool the enclosure if the
  * AHT20 ambient temperature is too high. Fan runs full speed until the temp
  * falls below the clear threshold, then boot proceeds. */
@@ -221,12 +248,15 @@ static qSM_Status_t st_PowerOnWait_Cb( qSM_Handler_t h )
     return qSM_STATUS_EXIT_SUCCESS;
 }
 
-/* PWR_PRESS: assert PWRKEY low to power the SoC on. */
+/* PWR_PRESS: assert PWRKEY low to power the SoC on. Entry also clears every
+ * detector latch: each attempt must re-match the fresh boot output, so a
+ * retry cannot fast-forward through BOOT_CHECK/STAGE2_WAIT on leftovers. */
 static qSM_Status_t st_PwrPress_Cb( qSM_Handler_t h )
 {
     switch ( h->Signal ) {
         case QSM_SIGNAL_ENTRY:
             s_boot.stateId = (uint8_t)SDM845_PWR_PRESS;
+            Sdm845_Detect_ResetAll();     /* honest re-sync per attempt */
             Pin_PwrKey( 1u );             /* pressed (low) */
             Pin_RstKey( 0u );             /* release */
             break;
@@ -322,14 +352,14 @@ static qSM_Status_t st_Stage3Wait_Cb( qSM_Handler_t h )
             s_boot.stateId = (uint8_t)SDM845_STAGE3_WAIT;
             USART2_SetTxSource( USART2_TXSRC_PY32 );  /* isolate CH343, PA0 sends */
             Sdm845_Detect_ResetStage345();        /* fresh matchers per pass */
-            (void)USART2_DMA_Send(
-                (const uint8_t *)SDM845_CMD_ACCOUNT,
-                sizeof( SDM845_CMD_ACCOUNT ) - 1u );
+            sdm845_stage_send( SDM845_CMD_ACCOUNT,
+                               sizeof( SDM845_CMD_ACCOUNT ) - 1u );
             break;
         case SDM845_TIMEOUT:
             sdm845_stage_timeout( h );
             return qSM_STATUS_SIGNAL_HANDLED;
         default:
+            sdm845_stage_send_retry();    /* re-send if the queue was busy   */
             /* Periodic poll: echo takes priority over the 15 s timeout. */
             if ( Sdm845_Detect_IsStage3Seen() != 0u ) {
                 h->NextState = &stStage4Wait;
@@ -347,14 +377,14 @@ static qSM_Status_t st_Stage4Wait_Cb( qSM_Handler_t h )
     switch ( h->Signal ) {
         case QSM_SIGNAL_ENTRY:
             s_boot.stateId = (uint8_t)SDM845_STAGE4_WAIT;
-            (void)USART2_DMA_Send(
-                (const uint8_t *)SDM845_CMD_PASSWORD,
-                sizeof( SDM845_CMD_PASSWORD ) - 1u );
+            sdm845_stage_send( SDM845_CMD_PASSWORD,
+                               sizeof( SDM845_CMD_PASSWORD ) - 1u );
             break;
         case SDM845_TIMEOUT:
             sdm845_stage_timeout( h );
             return qSM_STATUS_SIGNAL_HANDLED;
         default:
+            sdm845_stage_send_retry();
             if ( Sdm845_Detect_IsStage4Seen() != 0u ) {
                 h->NextState = &stStage5Wait;
                 return qSM_STATUS_SIGNAL_HANDLED;
@@ -371,14 +401,14 @@ static qSM_Status_t st_Stage5Wait_Cb( qSM_Handler_t h )
     switch ( h->Signal ) {
         case QSM_SIGNAL_ENTRY:
             s_boot.stateId = (uint8_t)SDM845_STAGE5_WAIT;
-            (void)USART2_DMA_Send(
-                (const uint8_t *)SDM845_CMD_AMIXER,
-                sizeof( SDM845_CMD_AMIXER ) - 1u );
+            sdm845_stage_send( SDM845_CMD_AMIXER,
+                               sizeof( SDM845_CMD_AMIXER ) - 1u );
             break;
         case SDM845_TIMEOUT:
             sdm845_stage_timeout( h );
             return qSM_STATUS_SIGNAL_HANDLED;
         default:
+            sdm845_stage_send_retry();
             if ( Sdm845_Detect_IsStage5Seen() != 0u ) {
                 h->NextState = &stBootSuccess;
                 return qSM_STATUS_SIGNAL_HANDLED;

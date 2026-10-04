@@ -181,6 +181,16 @@ void Sdm845_Detect_ResetStage345( void )
     sdm845_matcher_reset( &s_stage5 );
 }
 
+void Sdm845_Detect_ResetAll( void )
+{
+    sdm845_matcher_reset( &s_stage1 );
+    sdm845_matcher_reset( &s_stage2 );
+    sdm845_matcher_reset( &s_stage3 );
+    sdm845_matcher_reset( &s_stage4 );
+    sdm845_matcher_reset( &s_stage5 );
+    s_booted = 0u;                       /* IsBooted() must re-latch fresh */
+}
+
 uint8_t Sdm845_Detect_IsBooted( void )
 {
     return s_booted;
