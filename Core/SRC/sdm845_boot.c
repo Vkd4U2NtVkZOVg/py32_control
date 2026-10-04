@@ -12,7 +12,7 @@
  *     STAGE2_WAIT --stage2 "login" + idle--> STAGE3_WAIT
  *     STAGE2_WAIT --t_login(60s) & retry<MAX--> BOOT_RESET
  *     STAGE2_WAIT --t_login(60s) & retry>=MAX--> STRAP_FAIL (terminal)
- *     STAGE3_WAIT --entry: TX->PY32 (SPDT) + TX DMA "comma\r\n", echo "comma"--> STAGE4_WAIT
+ *     STAGE3_WAIT --entry: TX->PY32 (PF3 TX-SW) + TX DMA "comma\r\n", echo "comma"--> STAGE4_WAIT
  *     STAGE4_WAIT --entry: TX DMA "comma\r\n", "Welcome to AGNOS"--> STAGE5_WAIT
  *     STAGE5_WAIT --entry: TX DMA "amixer set PCM 100%\r\n", "Front Left: Playback"--> BOOT_SUCCESS
  *     STAGE3/4/5_WAIT --15s 无响应--> BOOT_RESET / STRAP_FAIL (按 retry)
@@ -28,7 +28,7 @@
  * which gates the TEC control task (TecControl).
  *
  * STAGE3/4/5_WAIT drive the post-login command chain: STAGE3 entry routes the
- * SoC RX line to the PY32 TX via the PF3 SPDT switch (USART2_SetTxSource(PY32)),
+ * SoC RX line to the PY32 TX via the PF3 TX switch (USART2_SetTxSource(PY32)),
  * re-arms the stage 3/4/5 matchers (Sdm845_Detect_ResetStage345) and queues the
  * command over non-blocking TX DMA (USART2_DMA_Send). Each stage advances on
  * its own RX banner (account echo / "Welcome to AGNOS" / "Front Left:
@@ -311,7 +311,7 @@ static void sdm845_stage_timeout( qSM_Handler_t h )
 }
 
 /* STAGE3_WAIT: login prompt answered. Entry routes the SoC RX to the PY32 TX
- * via the PF3 SPDT switch (the CH343 stops driving the line), re-arms the
+ * via the PF3 TX switch (the CH343 stops driving the line), re-arms the
  * stage 3/4/5 matchers so each retry pass starts clean, and queues the
  * account over non-blocking TX DMA. The stage advances on the getty echo
  * "comma" (the typed characters come back on RX). */
@@ -320,7 +320,7 @@ static qSM_Status_t st_Stage3Wait_Cb( qSM_Handler_t h )
     switch ( h->Signal ) {
         case QSM_SIGNAL_ENTRY:
             s_boot.stateId = (uint8_t)SDM845_STAGE3_WAIT;
-            USART2_SetTxSource( USART2_TXSRC_PY32 );  /* SPDT: PA0 drives SoC RX */
+            USART2_SetTxSource( USART2_TXSRC_PY32 );  /* isolate CH343, PA0 sends */
             Sdm845_Detect_ResetStage345();        /* fresh matchers per pass */
             (void)USART2_DMA_Send(
                 (const uint8_t *)SDM845_CMD_ACCOUNT,
@@ -389,7 +389,7 @@ static qSM_Status_t st_Stage5Wait_Cb( qSM_Handler_t h )
 }
 
 /* BOOT_SUCCESS: done; terminal. Entry hands the SoC RX line back to the
- * CH343 (PF3 SPDT) so the host console works normally after boot. */
+ * CH343 (PF3 TX switch) so the host console works normally after boot. */
 static qSM_Status_t st_BootSuccess_Cb( qSM_Handler_t h )
 {
     switch ( h->Signal ) {
@@ -405,7 +405,7 @@ static qSM_Status_t st_BootSuccess_Cb( qSM_Handler_t h )
 }
 
 /* BOOT_RESET: count + hard-kill (PWRKEY & RST_KEY both low). Entry also hands
- * the SoC RX line back to the CH343 (PF3 SPDT) so the PY32-TX window is
+ * the SoC RX line back to the CH343 (PF3 TX switch) so the PY32-TX window is
  * exactly stage3..5: during the kill/reboot wait the line is the host's. */
 static qSM_Status_t st_BootReset_Cb( qSM_Handler_t h )
 {

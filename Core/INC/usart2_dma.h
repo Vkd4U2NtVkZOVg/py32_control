@@ -66,9 +66,9 @@ size_t USART2_DMA_Read(uint8_t *out, size_t max_len);
  * for the next task run) instead of spinning. `data` must stay valid until
  * the transfer completes, so pass a static/string-literal buffer.
  *
- * Prerequisites: the SoC RX line must already be routed to the PY32 TX, i.e.
- * call USART2_SetTxSource(USART2_TXSRC_PY32) first when the PF3 SPDT is on
- * the CH343 throw.
+ * Prerequisites: the SoC RX line must already be handed to the PY32, i.e.
+ * call USART2_SetTxSource(USART2_TXSRC_PY32) first while the PF3 switch is
+ * on the CH343 throw.
  *
  * @param data  Bytes to send (literal/static storage; not copied).
  * @param len   Number of bytes (clamped to 0xFFFF, the DMA_NbData limit).

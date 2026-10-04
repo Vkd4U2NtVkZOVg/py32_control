@@ -131,12 +131,11 @@ void Studio_USART2_Init(void)
 
   LL_IOP_GRP1_EnableClock(LL_IOP_GRP1_PERIPH_GPIOA);
   /**USART2 GPIO Configuration
-   * Both pins stay muxed TX+RX permanently: contention with the parallel
-   * CH343 bridge is solved in HARDWARE by the SPDT switch on PF3
-   * (UART2_TX_SW), which routes who drives the SoC RX line. The switch is
-   * controlled by USART2_SetTxSource(); Studio_GPIO_Init starts it on the
-   * CH343 side.
-   *PA0     ------> USART2_TX (always push-pull AF9)
+   * Both pins are muxed TX+RX here (generator-native). While the
+   * USART2_TXSW_LINEMODE gate is 1, USART2_SetTxSource() reconfigures PA0
+   * at the end of this init: it starts on the CH343 throw, so PA0 goes to
+   * a high-Z input (RX-only) until the PY32 sends.
+   *PA0     ------> USART2_TX (push-pull AF9 while the PY32 sends)
    *PA1     ------> USART2_RX (always AF9)
    */
   GPIO_InitStruct.Pin = LL_GPIO_PIN_0|LL_GPIO_PIN_1;
@@ -180,20 +179,46 @@ void Studio_USART2_Init(void)
 
 /* USER CODE BEGIN 1 */
 /**
-  * @brief  Route the SoC RX line to the wanted TX driver via the PF3 SPDT
-  *         switch (UART2_TX_SW).
-  *         USART2_TXSRC_CH343 (1): CH343 TX -> SoC RX (default, host console).
-  *         USART2_TXSRC_PY32  (0): PA0 USART2_TX -> SoC RX (PY32 sends).
-  *         The USART2 peripheral itself stays TX+RX on both pins at all times;
-  *         PA1 (RX) monitoring is unaffected by the switch position.
+  * @brief  Select who may drive the SoC RX line via the PF3 switch
+  *         (UART2_TX_SW), which disconnects / reconnects the CH343 TX from
+  *         the shared bus.
+  *         USART2_TXSRC_CH343 (1): CH343 on the bus (default, host console).
+  *         USART2_TXSRC_PY32  (0): CH343 disconnected, PY32 PA0 sends.
+  *         While USART2_TXSW_LINEMODE is 1 (current partial hardware: PA0 is
+  *         still wired in parallel), this also reconfigures PA0 per throw:
+  *         TX push-pull + TX_RX for PY32, high-Z input + RX-only for CH343.
+  *         With a true SPDT installed, build with
+  *         -DUSART2_TXSW_LINEMODE=0 and only PF3 is toggled.
   * @param  src USART2_TXSRC_CH343 or USART2_TXSRC_PY32. Safe to call repeatedly.
   * @note   Never switch away from PY32 while USART2_DMA_TxBusy(): the byte in
-  *         flight would land on the wrong throw. The boot FSM only switches at
-  *         state entries, where no transfer can be pending.
+  *         flight would be corrupted. The boot FSM only switches at state
+  *         entries, where no transfer can be pending.
   * @retval None
   */
 void USART2_SetTxSource( uint8_t src )
 {
+#if USART2_TXSW_LINEMODE
+  LL_GPIO_InitTypeDef GPIO_InitStruct;
+
+  /* PA0 only; PA1 stays muxed as USART2_RX in both states. */
+  LL_GPIO_StructInit( &GPIO_InitStruct );
+  GPIO_InitStruct.Pin        = LL_GPIO_PIN_0;
+  GPIO_InitStruct.Mode       = ( src == USART2_TXSRC_PY32 ) ? LL_GPIO_MODE_ALTERNATE
+                                                            : LL_GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull       = ( src == USART2_TXSRC_PY32 ) ? LL_GPIO_PULL_UP
+                                                            : LL_GPIO_PULL_NO;
+  GPIO_InitStruct.Speed      = LL_GPIO_SPEED_FREQ_VERY_HIGH;
+  GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
+  GPIO_InitStruct.Alternate  = LL_GPIO_AF9_USART2;
+  LL_GPIO_Init( GPIOA, &GPIO_InitStruct );
+
+  /* TX+RX while sending; receiver-only while the CH343 owns the bus. */
+  LL_USART_SetTransferDirection( USART2,
+      ( src == USART2_TXSRC_PY32 ) ? LL_USART_DIRECTION_TX_RX
+                                   : LL_USART_DIRECTION_RX );
+#endif
+
+  /* PF3: isolate / re-connect the CH343 TX driver on the shared bus. */
   if ( src == USART2_TXSRC_PY32 ) {
     LL_GPIO_ResetOutputPin( UART2_TX_SW_Port, UART2_TX_SW );
   } else {

@@ -17,7 +17,7 @@
  *
  * STAGE3/4/5 drive the login + amixer command chain over TX DMA
  * (usart2_dma.h); STAGE3 entry routes the SoC RX line to the PY32 TX via the
- * PF3 SPDT switch (USART2_SetTxSource(USART2_TXSRC_PY32)), and each stage
+ * PF3 TX switch (USART2_SetTxSource(USART2_TXSRC_PY32)), and each stage
  * advances on its echoed/answered banner (sdm845_detect.h). BOOT_SUCCESS,
  * BOOT_RESET and STRAP_FAIL hand the line back to the CH343
  * (USART2_SetTxSource(USART2_TXSRC_CH343)).
