@@ -45,10 +45,7 @@ def run(tx_works, detect_reset_all, glitch_reprint):
             if t >= 1:
                 st = 'PON'; seq.append(st); t = 0; continue
         elif st == 'PON':
-            st = 'PP'; seq.append(st); t = 0
-            if detect_reset_all:
-                reset_all()
-            continue
+            st = 'PP'; seq.append(st); t = 0; continue
         elif st == 'PP':
             st = 'BC'; seq.append(st); t = 0; continue
         elif st == 'BC':
@@ -87,13 +84,15 @@ def run(tx_works, detect_reset_all, glitch_reprint):
             if t > 15:
                 stage_timeout(); continue
         elif st == 'BR':
+            if detect_reset_all:
+                reset_all()                    # wipe at kill start ...
+            if t >= 5:
+                latches['stage1'] = 1          # ... re-boot banner re-latches
             if t > 15:
                 st = 'PS'; seq.append(st); t = 0; continue
         elif st == 'PS':
             if t > 3:
                 st = 'PP'; seq.append(st); t = 0
-            if detect_reset_all:
-                reset_all()
             continue
 
 

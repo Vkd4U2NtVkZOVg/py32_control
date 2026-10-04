@@ -248,15 +248,15 @@ static qSM_Status_t st_PowerOnWait_Cb( qSM_Handler_t h )
     return qSM_STATUS_EXIT_SUCCESS;
 }
 
-/* PWR_PRESS: assert PWRKEY low to power the SoC on. Entry also clears every
- * detector latch: each attempt must re-match the fresh boot output, so a
- * retry cannot fast-forward through BOOT_CHECK/STAGE2_WAIT on leftovers. */
+/* PWR_PRESS: assert PWRKEY low to power the SoC on. No detector reset here:
+ * the SoC rails are always on, so the loader banner legitimately arrives
+ * during THERMAL_PRECHECK/POWER_ON_WAIT and that latch must survive into
+ * BOOT_CHECK. Retries re-sync at BOOT_RESET instead. */
 static qSM_Status_t st_PwrPress_Cb( qSM_Handler_t h )
 {
     switch ( h->Signal ) {
         case QSM_SIGNAL_ENTRY:
             s_boot.stateId = (uint8_t)SDM845_PWR_PRESS;
-            Sdm845_Detect_ResetAll();     /* honest re-sync per attempt */
             Pin_PwrKey( 1u );             /* pressed (low) */
             Pin_RstKey( 0u );             /* release */
             break;
@@ -435,8 +435,10 @@ static qSM_Status_t st_BootSuccess_Cb( qSM_Handler_t h )
 }
 
 /* BOOT_RESET: count + hard-kill (PWRKEY & RST_KEY both low). Entry also hands
- * the SoC RX line back to the CH343 (PF3 TX switch) so the PY32-TX window is
- * exactly stage3..5: during the kill/reboot wait the line is the host's. */
+ * the SoC RX line back to the CH343 (PF3 TX switch) and clears every detector
+ * latch BEFORE the PMIC cycle: the re-booting SoC prints a fresh loader
+ * banner during the kill/settle window and that (not the stale one) must
+ * re-latch for the next BOOT_CHECK. */
 static qSM_Status_t st_BootReset_Cb( qSM_Handler_t h )
 {
     switch ( h->Signal ) {
@@ -444,6 +446,7 @@ static qSM_Status_t st_BootReset_Cb( qSM_Handler_t h )
             s_boot.stateId = (uint8_t)SDM845_BOOT_RESET;
             s_boot.retryCount++;
             USART2_SetTxSource( USART2_TXSRC_CH343 );  /* end the TX window */
+            Sdm845_Detect_ResetAll();     /* re-sync before the fresh banner */
             Pin_PwrKey( 1u );             /* pressed (low) */
             Pin_RstKey( 1u );             /* pressed (low) */
             break;
