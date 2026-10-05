@@ -14,8 +14,9 @@
  *     STAGE2_WAIT --t_login(60s) & retry>=MAX--> STRAP_FAIL (terminal)
  *     STAGE3_WAIT --entry: TX->PY32 (PF3 TX-SW) + TX DMA "comma\r\n", "Password:"--> STAGE4_WAIT
  *     STAGE4_WAIT --entry: TX DMA "comma\r\n" (password), "Welcome to AGNOS"--> STAGE5_WAIT
- *     STAGE5_WAIT --entry: settle 2s + TX DMA "amixer set PCM 100%\r\n", "Front Left: Playback"--> BOOT_SUCCESS
- *     STAGE3/4/5_WAIT --15s 无响应--> BOOT_RESET / STRAP_FAIL (按 retry)
+ *     STAGE5_WAIT --entry: settle 10s + TX DMA "\r\n\r\namixer set PCM 100%\r\n\r\n\r\n", "Front Left: Playback"--> BOOT_SUCCESS
+ *     STAGE3/4_WAIT --15s 无响应--> BOOT_RESET / STRAP_FAIL (按 retry)
+ *     STAGE5_WAIT --15s 无响应--> STRAP_FAIL (terminal, 不复位: 已到 userspace)
  *     BOOT_RESET --t_kill(15s)--> PMIC_SETTLE
  *     PMIC_SETTLE --t_settle(3s)--> PWR_PRESS (retry loop)
  *
@@ -75,7 +76,7 @@
 #define SDM845_T_BOOTCHK_S  (15.0f)    /* stage 1: wait for loader banner */
 #define SDM845_T_LOGIN_S    (60.0f)    /* stage 2: wait for login prompt  */
 #define SDM845_T_STAGE345_S (15.0f)    /* stage 3/4/5: command echo wait */
-#define SDM845_T_STAGE5_SETTLE_MS (2000u)  /* stage 5: wait for the shell to
+#define SDM845_T_STAGE5_SETTLE_MS (10000u)  /* stage 5: wait for the shell to
                                         * finish motd/prompt setup after
                                         * "Welcome to AGNOS" before typing   */
 #define SDM845_T_KILL_S     (15.0f)    /* hard-kill (PWR+RST low) pulse  */
@@ -85,7 +86,7 @@
 /* Post-login command chain (sent once per STAGE entry over TX DMA). */
 static const char SDM845_CMD_ACCOUNT[] = "comma\r\n";                 /* stage 3 */
 static const char SDM845_CMD_PASSWORD[] = "comma\r\n";                /* stage 4 */
-static const char SDM845_CMD_AMIXER[] = "amixer set PCM 100%\r\n";    /* stage 5 */
+static const char SDM845_CMD_AMIXER[] = "\r\n\r\namixer set PCM 100%\r\n\r\n\r\n";    /* stage 5 */
 
 /*============================================================================*/
 /* TX queue: one command pending at a time. A send rejected by TxBusy() is    */
@@ -341,8 +342,9 @@ static qSM_Status_t st_Stage2Wait_Cb( qSM_Handler_t h )
     return qSM_STATUS_EXIT_SUCCESS;
 }
 
-/* Shared stage-3/4/5 timeout decision: retry or halt, same policy as the
- * earlier stages. */
+/* Shared stage-3/4 timeout decision: retry or halt, same policy as the
+ * earlier stages. STAGE5 deliberately does NOT use this - it halts directly
+ * (see st_Stage5Wait_Cb). */
 static void sdm845_stage_timeout( qSM_Handler_t h )
 {
     if ( s_boot.retryCount < SDM845_BOOT_MAX_RETRIES ) {
@@ -421,7 +423,12 @@ static qSM_Status_t st_Stage5Wait_Cb( qSM_Handler_t h )
                                SDM845_T_STAGE5_SETTLE_MS );
             break;
         case SDM845_TIMEOUT:
-            sdm845_stage_timeout( h );
+            /* STAGE5 never matched the amixer reply. By now the SoC is fully
+             * past hardware bring-up (loader + kernel + userspace login), so a
+             * PMIC hard-cycle (BOOT_RESET) would not fix a userspace-side miss
+             * and could disturb a half-booted system. Halt (STRAP_FAIL) for
+             * external recovery instead of resetting the 845. */
+            h->NextState = &stStrapFail;
             return qSM_STATUS_SIGNAL_HANDLED;
         default:
             sdm845_stage_send_retry();

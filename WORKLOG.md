@@ -876,7 +876,7 @@ stateDiagram-v2
     STAGE5_WAIT : entry / usart2_send("amixer set PCM 100%\n")
     STAGE5_WAIT : do / match command echo
     STAGE5_WAIT --> BOOT_SUCCESS : [echo seen]
-    STAGE5_WAIT --> BOOT_RESET : [15 s timeout && retry < MAX]
+    %%STAGE5_WAIT --> BOOT_RESET : [15 s timeout && retry ]
     STAGE5_WAIT --> STRAP_FAIL : [15 s timeout && retry >= MAX]
 
     BOOT_SUCCESS : entry / usart2_SetLineMode(RX_ONLY), stop FSM
@@ -1853,11 +1853,10 @@ stateDiagram-v2
     STAGE4_WAIT --> BOOT_RESET : [15 s timeout && retry < 3]
     STAGE4_WAIT --> STRAP_FAIL : [15 s timeout && retry ≥ 3]
 
-    STAGE5_WAIT : entry / settle 2s, TX DMA "amixer set PCM 100%\r\n"
+    STAGE5_WAIT : entry / settle 10s, TX DMA "\r\n\r\namixer set PCM 100%\r\n\r\n\r\n"
     STAGE5_WAIT : do / match "Front Left: Playback"
     STAGE5_WAIT --> BOOT_SUCCESS : [stage5 matched]
-    STAGE5_WAIT --> BOOT_RESET : [15 s timeout && retry < 3]
-    STAGE5_WAIT --> STRAP_FAIL : [15 s timeout && retry ≥ 3]
+    STAGE5_WAIT --> STRAP_FAIL : [15 s timeout]  (不复位: 已到 userspace, 硬复位无益)
 
     BOOT_SUCCESS : entry / TX→CH343 (PF3 TX-SW), booted=1
     BOOT_SUCCESS --> [*]
@@ -2234,3 +2233,31 @@ Fan_GetSource();                     /* 查询当前归属                     *
 ### 遗留
 
 - 后续 TEC/boot 调风扇时，建议用 `Fan_SetSource(FAN_SOURCE_PY32)` 表达"接管风扇"，用 `Fan_SetSource(FAN_SOURCE_SDM845)` 表达"交还"，取代现在通过 `Fan_SetEnabled(0)` 隐式交还的写法。
+
+---
+
+## 2026-10-06 — STAGE5 失败不复位（STRAP_FAIL 终态停机）
+
+### 调整
+
+用户修改了 SDM845 boot 状态机：**STAGE5（amixer 命令阶段）失败后不再复位 845**。
+
+- 之前：STAGE5 15s 超时走共享的 `sdm845_stage_timeout()`——`retry < 3` 强杀（BOOT_RESET）重试，`≥ 3` 才 STRAP_FAIL。
+- 现在：STAGE5 超时**直接 STRAP_FAIL 终态停机**，不经过 BOOT_RESET、不加重试、不动 PWRKEY/RST。
+
+### 理由
+
+STAGE5 意味着 845 已完成硬件级启动（loader → kernel → userspace login 全部就位），只剩 `amixer` 指令的回显未匹配。此时硬复位（PMIC 断电重启）只能修复更早阶段的硬件问题，对 userspace 侧 miss 无益，反而可能干扰一个已部分 boot 的系统。故改为停机，等待外部恢复。
+
+### 修改
+
+| 文件 | 改动 |
+|---|---|
+| `Core/SRC/sdm845_boot.c` | STAGE5 `SDM845_TIMEOUT` 分支：去掉注释掉的 `sdm845_stage_timeout(h)`，直接 `h->NextState = &stStrapFail` 并注明不复位理由；`sdm845_stage_timeout()` 注释改为"stage-3/4 共用"，不再涵盖 STAGE5；文件头 ASCII：STAGE5 拆出为 `15s 无响应--> STRAP_FAIL (不复位)`，且 settle 2s→10s、amixer 命令串同步为带前后空行版 |
+| `WORKLOG.md` | 12 态 mermaid STAGE5 行：删 `--> BOOT_RESET` 分支、`--> STRAP_FAIL : [15 s timeout]`、entry 同步 settle 10s 与空行 amixer；本小节 |
+
+随同保留用户本次已改的工作区内容：`SDM845_T_STAGE5_SETTLE_MS` 2000→10000、`SDM845_CMD_AMIXER` 改为 `"\r\n\r\namixer set PCM 100%\r\n\r\n\r\n"`。
+
+### 验证
+
+- 重编 `sdm845_boot.c` + 全图链接 0 错（待执行）。
