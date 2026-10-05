@@ -9,14 +9,15 @@
 static volatile uint32_t s_tach_pulses;
 static uint8_t s_duty_percent;
 static uint8_t s_enabled;
+static uint8_t s_source = (uint8_t)FAN_SOURCE_SDM845;
 
 void Fan_Init(void)
 {
     s_tach_pulses = 0U;
     s_duty_percent = 0U;
     s_enabled = 0U;
+    Fan_SetSource( FAN_SOURCE_SDM845 );   /* default: hand the fan to the SoC */
 
-    LL_GPIO_ResetOutputPin(FAN_CH_SW_Port, FAN_CH_SW_Pin);
     LL_TIM_SetAutoReload(TIM3, FAN_PWM_PERIOD_TICKS);
     LL_TIM_OC_SetCompareCH2(TIM3, 0U);
     LL_TIM_CC_EnableChannel(TIM3, LL_TIM_CHANNEL_CH2);
@@ -26,10 +27,8 @@ void Fan_Init(void)
 void Fan_SetEnabled(uint8_t enabled)
 {
     s_enabled = (enabled != 0U) ? 1U : 0U;
-    if (s_enabled != 0U) {
-        LL_GPIO_SetOutputPin(FAN_CH_SW_Port, FAN_CH_SW_Pin);
-    } else {
-        LL_GPIO_ResetOutputPin(FAN_CH_SW_Port, FAN_CH_SW_Pin);
+    Fan_SetSource( ( s_enabled != 0U ) ? FAN_SOURCE_PY32 : FAN_SOURCE_SDM845 );
+    if ( s_enabled == 0U ) {
         LL_TIM_OC_SetCompareCH2(TIM3, 0U);
     }
 }
@@ -52,6 +51,21 @@ void Fan_SetDutyPercent(uint8_t duty_percent)
 uint8_t Fan_GetDutyPercent(void)
 {
     return s_duty_percent;
+}
+
+void Fan_SetSource(Fan_Source_t source)
+{
+    s_source = ( source == FAN_SOURCE_PY32 ) ? 1u : 0u;
+    if ( s_source != 0u ) {
+        LL_GPIO_SetOutputPin( FAN_CH_SW_Port, FAN_CH_SW_Pin );  /* PY32 drives PWM */
+    } else {
+        LL_GPIO_ResetOutputPin( FAN_CH_SW_Port, FAN_CH_SW_Pin ); /* SoC drives PWM */
+    }
+}
+
+Fan_Source_t Fan_GetSource(void)
+{
+    return ( s_source != 0u ) ? FAN_SOURCE_PY32 : FAN_SOURCE_SDM845;
 }
 
 uint32_t Fan_GetTachPulses(void)

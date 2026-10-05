@@ -2201,3 +2201,36 @@ Password:
 ### 验证
 
 重编 + 全图链接 0 错：RAM 4360/8 KB（53.2%）、FLASH 29084/60 KB（47.3%）。
+
+---
+
+## 2026-10-06 — PA11 风扇控制通道：显式归属 API（Fan_SetSource / Fan_GetSource）
+
+### 背景
+
+PA11（`FAN_CH_SW`）硬件上是**风扇 PWM 控制通道切换**：拉低 = 风扇交给 **SDM845** 控制，拉高 = 由 **PY32**（TIM3 CH2）驱动。之前这个语义被隐式埋在 `Fan_SetEnabled()` 里（enabled→PA11 高→PY32；disabled→PA11 低→845），调用方想"把风扇交给 845"不得不借道"禁用风扇"，意图不清晰，也没有单独查询归属的接口。
+
+### 修改
+
+| 文件 | 改动 |
+|---|---|
+| `Core/INC/fan.h` | 新增 `Fan_Source_t` 枚举（`FAN_SOURCE_SDM845=0`/`FAN_SOURCE_PY32=1`，= PA11 低/高）；新增 `Fan_SetSource()` / `Fan_GetSource()`；文件头文档显式写明 PA11 通道语义 |
+| `Core/SRC/fan.c` | 新增 `s_source` 状态与 `Fan_SetSource()`/`Fan_GetSource()`；`Fan_SetEnabled()` 改为委托 `Fan_SetSource()`（enabled→PY32、disabled→845）切换 PA11，归零动作保留；`Fan_Init()` 默认 `Fan_SetSource(FAN_SOURCE_SDM845)`（交还 845） |
+
+调用约定：
+
+```c
+Fan_SetSource( FAN_SOURCE_SDM845 );  /* PA11 low  -> 风扇由 SDM845 驱动 */
+Fan_SetDutyPercent( 100u );          /* 仅 PY32 拥有通道时有意义        */
+Fan_SetSource( FAN_SOURCE_PY32 );    /* PA11 high -> 风扇由 PY32 驱动     */
+Fan_GetSource();                     /* 查询当前归属                     */
+```
+
+### 验证
+
+- `fan.c` 编译 0 错（告警仅厂商头文件无关参数）；
+- 全图链接 0 错：RAM 4360/8 KB（53.2%）、FLASH 32260/60 KB（52.5%）。
+
+### 遗留
+
+- 后续 TEC/boot 调风扇时，建议用 `Fan_SetSource(FAN_SOURCE_PY32)` 表达"接管风扇"，用 `Fan_SetSource(FAN_SOURCE_SDM845)` 表达"交还"，取代现在通过 `Fan_SetEnabled(0)` 隐式交还的写法。
