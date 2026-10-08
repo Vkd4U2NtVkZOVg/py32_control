@@ -854,7 +854,7 @@ stateDiagram-v2
     STAGE2_WAIT : entry / keep both keys released
     STAGE2_WAIT : do / match "login:" and wait idle >= 2 s
     STAGE2_WAIT --> STAGE3_WAIT : [stage2 matched && idle >= 2 s]
-    STAGE2_WAIT --> BOOT_RESET : [60 s timeout && retry < MAX]
+    %% STAGE2_WAIT --> BOOT_RESET : [60 s timeout && retry < MAX]
     STAGE2_WAIT --> STRAP_FAIL : [60 s timeout && retry >= MAX]
 
     state "STAGE3\nLogin account" as STAGE3_WAIT
@@ -862,14 +862,14 @@ stateDiagram-v2
     STAGE3_WAIT : entry / usart2_send("user account\n")
     STAGE3_WAIT : do / match "password:"
     STAGE3_WAIT --> STAGE4_WAIT : [password prompt seen]
-    STAGE3_WAIT --> BOOT_RESET : [15 s timeout && retry < MAX]
+    %% STAGE3_WAIT --> BOOT_RESET : [15 s timeout && retry < MAX]
     STAGE3_WAIT --> STRAP_FAIL : [15 s timeout && retry >= MAX]
 
     state "STAGE4\nPassword" as STAGE4_WAIT
     STAGE4_WAIT : entry / usart2_send("password\n")
     STAGE4_WAIT : do / match shell prompt "#"
     STAGE4_WAIT --> STAGE5_WAIT : [prompt seen]
-    STAGE4_WAIT --> BOOT_RESET : [15 s timeout && retry < MAX]
+    %% STAGE4_WAIT --> BOOT_RESET : [15 s timeout && retry < MAX]
     STAGE4_WAIT --> STRAP_FAIL : [15 s timeout && retry >= MAX]
 
     state "STAGE5\nCMD1 amixer" as STAGE5_WAIT
@@ -879,15 +879,19 @@ stateDiagram-v2
     %%STAGE5_WAIT --> BOOT_RESET : [15 s timeout && retry ]
     STAGE5_WAIT --> STRAP_FAIL : [15 s timeout && retry >= MAX]
 
+    state "BOOT_SUCCESS" as BOOT_SUCCESS
     BOOT_SUCCESS : entry / usart2_SetLineMode(RX_ONLY), stop FSM
     BOOT_SUCCESS --> [*]
 
+    state "BOOT RESET " as BOOT_RESET
     BOOT_RESET : entry / retry++, press PWRKEY + RST_KEY
     BOOT_RESET --> PMIC_SETTLE : [hold 15 s]
 
+    state "PMIC_SETTLE" as PMIC_SETTLE
     PMIC_SETTLE : entry / release PWRKEY + RST_KEY
     PMIC_SETTLE --> PWR_PRESS : [settle 3 s]
 
+    state "BOOT_FAILED" as STRAP_FAIL
     STRAP_FAIL : entry / release PWRKEY + RST_KEY
     STRAP_FAIL : do / halt and wait for external recovery
 ```
@@ -1838,20 +1842,20 @@ stateDiagram-v2
 
     STAGE2_WAIT : do / match "login" && idle ≥ 2 s
     STAGE2_WAIT --> STAGE3_WAIT : [stage2 matched && idle ≥ 2 s]
-    STAGE2_WAIT --> BOOT_RESET : [60 s timeout && retry < 3]
-    STAGE2_WAIT --> STRAP_FAIL : [60 s timeout && retry ≥ 3]
+    %%STAGE2_WAIT --> BOOT_RESET : [60 s timeout && retry < 3]
+    STAGE2_WAIT --> STRAP_FAIL : [60 s timeout]  (不复位: 复位仅保留于 BOOT_CHECK)
 
     STAGE3_WAIT : entry / TX→PY32 (PF3 TX-SW), reset matchers, TX DMA "comma\r\n"
     STAGE3_WAIT : do / match "Password:"
     STAGE3_WAIT --> STAGE4_WAIT : [stage3 matched]
-    STAGE3_WAIT --> BOOT_RESET : [15 s timeout && retry < 3]
-    STAGE3_WAIT --> STRAP_FAIL : [15 s timeout && retry ≥ 3]
+    %%STAGE3_WAIT --> BOOT_RESET : [15 s timeout && retry < 3]
+    STAGE3_WAIT --> STRAP_FAIL : [15 s timeout]  (不复位)
 
     STAGE4_WAIT : entry / TX DMA "comma\r\n" (password, prompt-gated)
     STAGE4_WAIT : do / match "Welcome to AGNOS"
     STAGE4_WAIT --> STAGE5_WAIT : [stage4 matched]
-    STAGE4_WAIT --> BOOT_RESET : [15 s timeout && retry < 3]
-    STAGE4_WAIT --> STRAP_FAIL : [15 s timeout && retry ≥ 3]
+    %%STAGE4_WAIT --> BOOT_RESET : [15 s timeout && retry < 3]
+    STAGE4_WAIT --> STRAP_FAIL : [15 s timeout]  (不复位)
 
     STAGE5_WAIT : entry / settle 10s, TX DMA "\r\n\r\namixer set PCM 100%\r\n\r\n\r\n"
     STAGE5_WAIT : do / match "Front Left: Playback"
@@ -1860,10 +1864,11 @@ stateDiagram-v2
 
     BOOT_SUCCESS : entry / TX→CH343 (PF3 TX-SW), booted=1
     BOOT_SUCCESS --> [*]
-
+    state "BOOT_RESET" as BOOT_RESET
     BOOT_RESET : entry / retry++, TX→CH343 (PF3 TX-SW), reset detectors, PWRKEY+RST low
     BOOT_RESET --> PMIC_SETTLE : [hold 15 s]
-
+    
+    state "PMIC_SETTLE" as PMIC_SETTLE
     PMIC_SETTLE : entry / keys released
     PMIC_SETTLE --> PWR_PRESS : [settle 3 s]
 
@@ -2261,3 +2266,27 @@ STAGE5 意味着 845 已完成硬件级启动（loader → kernel → userspace 
 ### 验证
 
 - 重编 `sdm845_boot.c` + 全图链接 0 错（待执行）。
+
+---
+
+## 2026-10-06 — STAGE2/3/4 失败不复位：复位仅保留于 BOOT_CHECK（以 1815 行图为准）
+
+### 调整
+
+用户更新 2026-10-03「最终状态图」（WORKLOG 1815 行 mermaid）：把 STAGE2/3/4 的 `--> BOOT_RESET` 超时迁移全部注释掉，失败一律进 `STRAP_FAIL`。硬复位（PMIC 断电重启）只保留在 `BOOT_CHECK`（stage1 未匹配时按 retry<3 重试）。意图：一旦 loader banner 出现、进入登录链之后，任何超时都视为该系统无法自行修复，停机等待外部恢复，不惊扰已起来的电源域。
+
+### 图中遗留守卫问题的修正
+
+原图 STAGE2/3/4 的 `STRAP_FAIL` 迁移写着 `[超时 && retry ≥ 3]`——但 retry 只在 `BOOT_RESET` 递增，而这些态的复位迁移已被注释，进态路径上基本不可能凑到 retry≥3；若保留守卫，超时后**无迁移可触发**，状态机停在原地无限重定时（挂死）。故把三条守卫改为无条件的 `--> STRAP_FAIL`（与 STAGE5 一致）。`BOOT_CHECK` 的 retry 分流保留。
+
+### 代码修改
+
+| 文件 | 改动 |
+|---|---|
+| `Core/SRC/sdm845_boot.c` | `st_Stage2Wait_Cb`/`st_Stage3Wait_Cb`/`st_Stage4Wait_Cb` 的 `SDM845_TIMEOUT` 分支直接 `stStrapFail`；删除仅剩 stage3/4 使用的 `sdm845_stage_timeout()`；文件头 ASCII 同步（`STAGE2/3/4/5_WAIT --超时--> STRAP_FAIL (不复位)`） |
+| `Core/INC/sdm845_boot.h` | 头注释 `(any stage timeout) --> BOOT_RESET` 改为 `BOOT_CHECK` retry 分流 + `STAGE2..5 超时--> STRAP_FAIL (no reset)` |
+| `WORKLOG.md` | 1815 图 STAGE2/3/4 的 STRAP_FAIL 迁移去掉 `&& retry ≥ 3`；本小节 |
+
+### 验证
+
+- 重编 + 全图链接 0 错（待执行）。

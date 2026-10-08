@@ -10,13 +10,11 @@
  *     BOOT_CHECK --15s 无响应 & retry<MAX--> BOOT_RESET
  *     BOOT_CHECK --15s 无响应 & retry>=MAX--> STRAP_FAIL (terminal)
  *     STAGE2_WAIT --stage2 "login" + idle--> STAGE3_WAIT
- *     STAGE2_WAIT --t_login(60s) & retry<MAX--> BOOT_RESET
- *     STAGE2_WAIT --t_login(60s) & retry>=MAX--> STRAP_FAIL (terminal)
+ *     STAGE2_WAIT --t_login(60s) 无响应--> STRAP_FAIL (terminal, 不复位)
  *     STAGE3_WAIT --entry: TX->PY32 (PF3 TX-SW) + TX DMA "comma\r\n", "Password:"--> STAGE4_WAIT
  *     STAGE4_WAIT --entry: TX DMA "comma\r\n" (password), "Welcome to AGNOS"--> STAGE5_WAIT
  *     STAGE5_WAIT --entry: settle 10s + TX DMA "\r\n\r\namixer set PCM 100%\r\n\r\n\r\n", "Front Left: Playback"--> BOOT_SUCCESS
- *     STAGE3/4_WAIT --15s 无响应--> BOOT_RESET / STRAP_FAIL (按 retry)
- *     STAGE5_WAIT --15s 无响应--> STRAP_FAIL (terminal, 不复位: 已到 userspace)
+ *     STAGE2/3/4/5_WAIT --超时--> STRAP_FAIL (terminal, 不复位; 硬复位仅保留于 BOOT_CHECK)
  *     BOOT_RESET --t_kill(15s)--> PMIC_SETTLE
  *     PMIC_SETTLE --t_settle(3s)--> PWR_PRESS (retry loop)
  *
@@ -322,12 +320,10 @@ static qSM_Status_t st_Stage2Wait_Cb( qSM_Handler_t h )
             s_boot.stateId = (uint8_t)SDM845_STAGE2_WAIT;
             break;
         case SDM845_TIMEOUT:
-            /* Loader up but no login: kernel/init hang -> targeted retry. */
-            if ( s_boot.retryCount < SDM845_BOOT_MAX_RETRIES ) {
-                h->NextState = &stBootReset;
-            } else {
-                h->NextState = &stStrapFail;
-            }
+            /* Loader up but no login after t_login: kernel/init hang. The
+             * hard power-cycle budget is spent in BOOT_CHECK only; once the
+             * loader banner matched, no more resets - halt for recovery. */
+            h->NextState = &stStrapFail;
             return qSM_STATUS_SIGNAL_HANDLED;
         default:
             /* Periodic poll: stage2+idle (stable login prompt) takes priority
@@ -340,18 +336,6 @@ static qSM_Status_t st_Stage2Wait_Cb( qSM_Handler_t h )
             break;
     }
     return qSM_STATUS_EXIT_SUCCESS;
-}
-
-/* Shared stage-3/4 timeout decision: retry or halt, same policy as the
- * earlier stages. STAGE5 deliberately does NOT use this - it halts directly
- * (see st_Stage5Wait_Cb). */
-static void sdm845_stage_timeout( qSM_Handler_t h )
-{
-    if ( s_boot.retryCount < SDM845_BOOT_MAX_RETRIES ) {
-        h->NextState = &stBootReset;
-    } else {
-        h->NextState = &stStrapFail;
-    }
 }
 
 /* STAGE3_WAIT: login prompt answered. Entry routes the SoC RX to the PY32 TX
@@ -371,7 +355,10 @@ static qSM_Status_t st_Stage3Wait_Cb( qSM_Handler_t h )
                                sizeof( SDM845_CMD_ACCOUNT ) - 1u, 0u );
             break;
         case SDM845_TIMEOUT:
-            sdm845_stage_timeout( h );
+            /* No "Password:" prompt: login never accepted the account. The
+             * hard power-cycle budget is spent in BOOT_CHECK only - once past
+             * the loader banner, timeout halts instead of resetting. */
+            h->NextState = &stStrapFail;
             return qSM_STATUS_SIGNAL_HANDLED;
         default:
             sdm845_stage_send_retry();    /* re-send if the queue was busy   */
@@ -398,7 +385,9 @@ static qSM_Status_t st_Stage4Wait_Cb( qSM_Handler_t h )
                                sizeof( SDM845_CMD_PASSWORD ) - 1u, 0u );
             break;
         case SDM845_TIMEOUT:
-            sdm845_stage_timeout( h );
+            /* No "Welcome to AGNOS": the password was rejected or getty died.
+             * Same policy as STAGE2/3: no reset past the loader banner, halt. */
+            h->NextState = &stStrapFail;
             return qSM_STATUS_SIGNAL_HANDLED;
         default:
             sdm845_stage_send_retry();

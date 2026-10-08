@@ -8,8 +8,8 @@
  *     PWR_PRESS --t_hold--> BOOT_CHECK --stage1--> STAGE2_WAIT --stage2+idle--> STAGE3_WAIT
  *     STAGE3_WAIT --send "comma" + "Password:"--> STAGE4_WAIT --send "comma" + "Welcome to AGNOS"--> STAGE5_WAIT
  *     STAGE5_WAIT --send "amixer set PCM 100%" + "Front Left: Playback"--> BOOT_SUCCESS
- *     (any stage timeout) --> BOOT_RESET --t_kill--> PMIC_SETTLE --t_settle--> PWR_PRESS
- *     (timeout & retry>=MAX) --> STRAP_FAIL (halt)
+ *     BOOT_CHECK --15s timeout--> BOOT_RESET (retry<MAX) / STRAP_FAIL (retry>=MAX)
+ *     STAGE2/3/4/5_WAIT --timeout--> STRAP_FAIL (terminal, no reset)
  *
  * THERMAL_PRECHECK reads the AHT20 ambient temperature before powering anything:
  * if it exceeds SDM845_PRECHECK_TEMP_MILLIC the fan is run at full speed until
