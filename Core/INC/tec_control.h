@@ -1,8 +1,11 @@
 /**
  * @file tec_control.h
- * @brief TEC cooling fan control task (QuarkTS periodic task).
+ * @brief TEC control task (QuarkTS periodic task).
  *
- * Multi-source temperature fusion + PID control + feedforward + fault protection:
+ * Multi-source temperature fusion + PID control + feedforward + fault protection.
+ * The TEC current command (0..100 %) is emitted through the MCP4725 DAC into the
+ * power-stage control window; the heatsink fan is decoupled and follows the
+ * hot-side temperature instead:
  *   - Temperature fusion: hot*0.5 + sdm845*0.3 + env*0.2
  *   - Dynamic target: 45°C + env compensation - SoC compensation
  *   - PID main loop: TecPid_Update() with fused temperature
@@ -10,13 +13,14 @@
  *   - Fault protection: overtemp full-speed/shutdown, overcurrent feedforward, fan fault alarm
  *
  * Dependencies (already implemented):
- *   - AHT20_Get_LastDewPointMilliCelsius() - environment temperature
+ *   - AHT20_Get_LastTempMilliCelsius() - environment temperature
  *   - Studio_ADC1_ReadHotMilliCelsius() - TEC hot-side temperature
  *   - Studio_ADC1_ReadCurrentMilliamp() - TEC current
  *   - Fan_Get_LastRPM() - fan speed
  *   - TRES_I2C_Slave_GetSdm845TempMilliC() - SDM845 SoC temperature
  *   - TecPid_* - PID controller
- *   - Fan_SetDutyPercent() - fan PWM control
+ *   - MCP4725_* - DAC actuator (TEC current command, soft-I2C)
+ *   - Fan_SetDutyPercent() - fan PWM control (heatsink, decoupled)
  *   - TEC_VEN (PA12) - TEC enable pin
  */
 #ifndef __TEC_CONTROL_H__
@@ -48,6 +52,18 @@ extern "C" {
 #define FAN_MIN_RPM                 500
 #define TEC_CONTROL_PERIOD_S        1.0f
 
+/* DAC actuator (MCP4725): maps the 0..100 % TEC command to the power-stage
+ * control-window voltage. VREF = MCP4725 VDD; MAX_CTRL = top of the control
+ * window the power stage accepts (TPS63802-VSET style input). */
+#define TEC_DAC_VREF_MV             (3300u)
+#define TEC_DAC_MAX_CTRL_MV         (1200u)
+
+/* Heatsink fan is decoupled from the TEC PID output: linear ramp on the hot-side
+ * temperature, base airflow while the TEC is active, full speed at TEMP_FULL. */
+#define TEC_FAN_TEMP_BASE_MILLIC    (40000)  /* 40°C: fan starts ramping */
+#define TEC_FAN_TEMP_FULL_MILLIC    (60000)  /* 60°C: fan full speed      */
+#define TEC_FAN_DUTY_BASE           (30u)    /* base airflow while active */
+
 /**
  * @brief Initialize the TEC control task.
  *
@@ -58,9 +74,9 @@ extern "C" {
  *   4. Runs PID control
  *   5. Adds feedforward compensation
  *   6. Checks fault conditions
- *   7. Outputs final duty to Fan_SetDutyPercent()
+ *   7. Outputs TEC duty to the MCP4725 DAC; fan duty from hot-side temperature
  *
- * Call after Fan_Task_Init() and AHT20_Task_Init().
+ * Call after Fan_Task_Init(), AHT20_Task_Init() and MCP4725_Init().
  */
 void TecControl_Init(void);
 
@@ -74,6 +90,12 @@ uint8_t TecControl_GetAlarm(void);
  * @brief Clear alarm flags.
  */
 void TecControl_ClearAlarm(void);
+
+/**
+ * @brief Current TEC current command (0..100 % of the DAC control window).
+ * @return Last duty written to the MCP4725 this control cycle.
+ */
+uint8_t TecControl_GetDacPercent(void);
 
 #ifdef __cplusplus
 }

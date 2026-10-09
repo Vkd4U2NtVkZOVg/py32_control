@@ -60,6 +60,7 @@ static uint8_t Reg_Read(uint8_t addr)
         case TRES_REG_TECFLAGS:  return TecControl_GetAlarm();
         case TRES_REG_AHTSTAT:   return (uint8_t)AHT20_Get_LastStatus();
         case TRES_REG_FANDUTY:   return Fan_GetDutyPercent();
+        case TRES_REG_TECDUTY:   return TecControl_GetDacPercent();
         default: break;
     }
 

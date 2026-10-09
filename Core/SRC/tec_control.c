@@ -1,9 +1,11 @@
 /**
  * @file tec_control.c
- * @brief TEC cooling fan control task (QuarkTS periodic task).
+ * @brief TEC control task (QuarkTS periodic task).
  *
  * Reads all temperature/current sources, fuses them, runs PID + feedforward,
- * applies fault protection, and drives the fan PWM. Non-blocking: a plain
+ * applies fault protection, and emits the TEC current command through the
+ * MCP4725 DAC into the power-stage control window. The heatsink fan is
+ * decoupled and follows the hot-side temperature. Non-blocking: a plain
  * periodic QuarkTS task (1 s period) that runs to completion and returns.
  */
 #include "tec_control.h"
@@ -17,6 +19,7 @@
 #include "tres_i2c_slave.h"
 #include "tec_pid.h"
 #include "sdm845_boot.h"
+#include "mcp4725.h"
 
 /*============================================================================*/
 /* Plausibility windows for sensor validity (milli-degC). NTC/AHT20 report    */
@@ -39,6 +42,7 @@ static qTask_t   s_task;
 static TecPid_t  s_pid;
 static uint8_t   s_alarm;
 static uint8_t   s_tec_enabled;
+static uint8_t   s_dac_percent;      /* last TEC duty written to the MCP4725 */
 
 /*============================================================================*/
 /* Helpers                                                                     */
@@ -60,6 +64,40 @@ static void tec_set_enabled( uint8_t on )
     s_tec_enabled = ( on != 0u ) ? 1u : 0u;
 }
 
+/* Command the TEC current via the MCP4725: duty (0..100 %) is scaled into the
+ * power-stage control window (0..TEC_DAC_MAX_CTRL_MV). Writes only when the
+ * value changed, to avoid pointless soft-I2C traffic every 1 s cycle. */
+static void tec_dac_set( uint8_t duty )
+{
+    uint16_t mv;
+
+    if ( duty == s_dac_percent ) {
+        return;
+    }
+    s_dac_percent = duty;
+    mv = (uint16_t)( ( (uint32_t)duty * TEC_DAC_MAX_CTRL_MV ) / 100u );
+    (void)MCP4725_SetVoltage_mV( mv, TEC_DAC_VREF_MV );
+}
+
+/* Heatsink fan is decoupled from the TEC PID output: base airflow while the
+ * TEC is active, then a linear ramp over [TEC_FAN_TEMP_BASE, TEMP_FULL] on the
+ * hot-side temperature, saturating at 100 %. */
+static uint8_t tec_fan_duty_from_hot( int32_t hot_mc )
+{
+    int32_t duty = (int32_t)TEC_FAN_DUTY_BASE;
+
+    if ( hot_mc > TEC_FAN_TEMP_BASE_MILLIC ) {
+        duty = (int32_t)TEC_FAN_DUTY_BASE +
+               ( ( hot_mc - TEC_FAN_TEMP_BASE_MILLIC ) *
+                 ( 100 - (int32_t)TEC_FAN_DUTY_BASE ) ) /
+               ( TEC_FAN_TEMP_FULL_MILLIC - TEC_FAN_TEMP_BASE_MILLIC );
+    }
+    if ( duty > 100 ) {
+        duty = 100;
+    }
+    return (uint8_t)duty;
+}
+
 /*============================================================================*/
 /* Periodic control callback                                                   */
 /*============================================================================*/
@@ -74,6 +112,7 @@ static void TecControl_Cb( qEvent_t e )
     int32_t pid_out;
     int32_t feedforward;
     int32_t duty;
+    uint8_t fan_duty;
     uint32_t fan_rpm;
 
     (void)e;
@@ -107,8 +146,9 @@ static void TecControl_Cb( qEvent_t e )
     s_alarm = TEC_ALARM_NONE;
 
     if ( hot_mc > TEC_HOT_DANGER_MILLIC ) {
-        /* danger: cut TEC, fan full speed */
+        /* danger: cut TEC, zero the DAC command, fan full speed */
         tec_set_enabled( 0u );
+        tec_dac_set( 0u );
         Fan_SetDutyPercent( 100u );
         s_alarm |= ( TEC_ALARM_OVERTEMP | TEC_ALARM_HOT_WARNING );
         return;
@@ -116,10 +156,11 @@ static void TecControl_Cb( qEvent_t e )
 
     /* Thermal precheck gate: the SDM845 boot state machine cools the enclosure
      * (fan full speed) until the AHT20 ambient is safe before starting the SoC
-     * and TEC. While that is pending, hold the TEC off and do not drive the fan
-     * (the precheck owns it), so we never fight the cooldown. */
+     * and TEC. While that is pending, hold the TEC off (DAC to 0 V) and do not
+     * drive the fan (the precheck owns it), so we never fight the cooldown. */
     if ( Sdm845_Boot_IsThermalReady() == 0u ) {
         tec_set_enabled( 0u );
+        tec_dac_set( 0u );
         s_alarm |= TEC_ALARM_THERMAL_WAIT;
         return;
     }
@@ -167,13 +208,15 @@ static void TecControl_Cb( qEvent_t e )
     }
 
     /*--- 8. fan fault detection (only when commanding real airflow) --------*/
-    fan_rpm = Fan_Get_LastRPM();
-    if ( ( (uint8_t)duty > TEC_FAN_FAULT_MIN_DUTY ) &&
+    fan_duty = tec_fan_duty_from_hot( hot_mc );
+    fan_rpm  = Fan_Get_LastRPM();
+    if ( ( fan_duty > TEC_FAN_FAULT_MIN_DUTY ) &&
          ( fan_rpm < FAN_MIN_RPM ) ) {
         s_alarm |= TEC_ALARM_FAN_FAULT;
     }
 
-    Fan_SetDutyPercent( (uint8_t)duty );
+    Fan_SetDutyPercent( fan_duty );        /* heatsink fan: follows hot side */
+    tec_dac_set( (uint8_t)duty );          /* TEC current command via MCP4725 */
 }
 
 /*============================================================================*/
@@ -189,8 +232,9 @@ void TecControl_Init( void )
                        -50.0f, 50.0f,
                        0.3f );
 
-    s_alarm       = TEC_ALARM_NONE;
-    s_tec_enabled = 0u;
+    s_alarm        = TEC_ALARM_NONE;
+    s_tec_enabled  = 0u;
+    s_dac_percent  = 0u;
     tec_set_enabled( 0u );   /* held off until the SDM845 thermal precheck passes */
 
     (void)qOS_Add_Task( &s_task, TecControl_Cb, qLowest_Priority,
@@ -206,4 +250,9 @@ uint8_t TecControl_GetAlarm( void )
 void TecControl_ClearAlarm( void )
 {
     s_alarm = TEC_ALARM_NONE;
+}
+
+uint8_t TecControl_GetDacPercent( void )
+{
+    return s_dac_percent;
 }

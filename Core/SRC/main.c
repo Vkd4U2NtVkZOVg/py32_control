@@ -62,6 +62,7 @@
 #include "sdm845_detect.h"
 #include "sdm845_boot.h"
 #include "tec_control.h"
+#include "mcp4725.h"
 #include "stdio.h"
 /* USER CODE END Includes */
 
@@ -129,6 +130,7 @@ int main(void)
   Studio_GPIO_Init();
   Studio_I2C1_Init();
   SoftI2C_Init();
+  MCP4725_Init();               /* DAC out to 0 V: no TEC current until control takes over */
   Studio_ADC1_Init();
   Studio_USART2_Init();
   USART2_DMA_Start();       /* USART2 (PA0/PA1) DMA RX via DMA1_Channel1 */

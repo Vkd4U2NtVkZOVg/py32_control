@@ -1915,8 +1915,9 @@ stateDiagram-v2
 | 0x32 | TECFLAGS | `TecControl_GetAlarm()` | TEC 报警位图（OVERTEMP/HOT_WARNING/OVERCURRENT/FAN_FAULT/THERMAL_WAIT） |
 | 0x33 | AHTSTAT | `AHT20_Get_LastStatus()` | 最近一次 AHT20 驱动结果码（0 OK，负数为错误，int8） |
 | 0x34 | FANDUTY | `Fan_GetDutyPercent()` | 当前风扇占空比命令值（%，无论哪个写入方） |
+| 0x35 | TECDUTY | `TecControl_GetDacPercent()` | 当前 TEC 电流命令（PID+前馈合并后的 0..100%，经 MCP4725 输出） |
 
-实现要点：读路径**实时合成**（不缓存快照），`Reg_Read()` 直接调各模块 getter，主机每次读到的都是当下值；一个 `i2cget` 起始地址 0x30 连读 5 字节即可看到整板机器/执行器健康。AHT20 的 8 态 FSM 状态号与 fan_task 的 RPM 窗口对主机诊断价值低（前者步骤秒级完成，后者已有 RPM 语义），故 AHT20 上报**驱动状态码**、风扇上报**占空比**而非状态号——这是有意选择。
+实现要点：读路径**实时合成**（不缓存快照），`Reg_Read()` 直接调各模块 getter，主机每次读到的都是当下值；一个 `i2cget` 起始地址 0x30 连读 6 字节即可看到整板机器/执行器健康。AHT20 的 8 态 FSM 状态号与 fan_task 的 RPM 窗口对主机诊断价值低（前者步骤秒级完成，后者已有 RPM 语义），故 AHT20 上报**驱动状态码**、风扇上报**占空比**而非状态号——这是有意选择。
 
 ### 文件改动清单
 
@@ -2290,3 +2291,52 @@ STAGE5 意味着 845 已完成硬件级启动（loader → kernel → userspace 
 ### 验证
 
 - 重编 + 全图链接 0 错（待执行）。
+
+---
+
+## 2026-10-09 — TI TEC 方案研究（TIDA-050017 / AFE639D2）与 MCP4725 执行器落地
+
+### TI 方案研究结论
+
+参考两份 TI 文档设计了 TEC 执行器替换方案：
+
+- **TIDA-050017（ZHCU651A）**：3.3V 输入的 TEC 驱动器参考设计。功率级用 TPS63802 buck-boost（2A、11 µA 静态电流、<30 mm²），MSP430FR2433 跑数字 PI 闭环，控温精度 <0.1°C，面向激光器/SFP 光模块等精密控温。
+- **AFE639D2（afe639d2.pdf）**：TEC 专用"智能模拟前端"——双通道 12-bit DAC + ADC、I2C 主机接口，用电压或 PWM 输出驱动 TEC 功率级，可闭环外部数字温度传感器。
+
+**替换策略**：TI 方案的模拟控制输出（MCU/AFE 的 PWM 或 DAC）由 **MCP4725**（12-bit I2C DAC，PB0/PB1 软 I2C 总线，地址 0x60）接管。PY32 已有 PID（TecPid_*）、温度融合、电流采样（INA181A2 → PA6）——这些保留不动，只换"执行器输出"一环。用户确认三项设计决策：**① duty(0..100) 缩放到功率级控制窗口**；**② 单向制冷**（TEC_VEN 使能 + DAC 控幅度，无方向位）；**③ 风扇与 TEC 解耦**（风扇独立按热端温度驱动）。
+
+### 控制链路（落地后）
+
+```
+PID + 电流前馈  --duty(0..100)-->  MCP4725 DAC  --0..TEC_DAC_MAX_CTRL_MV-->  TEC 功率级 → TEC 电流
+热端温度 NTC    --TEC_FAN_DUTY_BASE..100%-->    风扇 PWM (TIM3 CH2)
+TEC_VEN(PA12)   = 使能
+故障保护（OVERTEMP/THERMAL_WAIT）→ DAC 强制 0V + 风扇全速/让出
+```
+
+### 参数宏（tec_control.h，真机需标定）
+
+| 宏 | 初值 | 含义 |
+|---|---|---|
+| `TEC_DAC_VREF_MV` | 3300 | MCP4725 参考 = VDD |
+| `TEC_DAC_MAX_CTRL_MV` | 1200 | 功率级控制窗口上限（TPS63802-VSET 风格输入） |
+| `TEC_FAN_TEMP_BASE_MILLIC` | 40000 | 风扇 40°C 起线性爬升 |
+| `TEC_FAN_TEMP_FULL_MILLIC` | 60000 | 60°C 风扇全速 |
+| `TEC_FAN_DUTY_BASE` | 30 | 激活时基础风量 |
+
+### 修改
+
+| 文件 | 改动 |
+|---|---|
+| `Core/SRC/tec_control.c` | include `mcp4725.h`；新增 `tec_dac_set()`（duty→控制窗口 mV→`MCP4725_SetVoltage_mV`，值不变不写以省 I2C 流量）与 `tec_fan_duty_from_hot()`（热端线性映射）；OVERTEMP/THERMAL_WAIT 早退时 DAC 强制 0V；风扇故障检测改判**风扇 duty**；输出段 `Fan_SetDutyPercent(热端规则)` + `tec_dac_set(TEC duty)`；新增 `TecControl_GetDacPercent()` |
+| `Core/INC/tec_control.h` | 新宏 + `TecControl_GetDacPercent()` 原型；头注释同步（执行器改为 MCP4725 + 风扇解耦） |
+| `Core/SRC/main.c` | include + `MCP4725_Init()`（紧随 `SoftI2C_Init()`，上电 DAC 0V） |
+| `Core/SRC/tres_i2c_slave.c` / `Core/INC/tres_i2c_slave.h` | 机器状态块新增 **0x35 TECDUTY** → `TecControl_GetDacPercent()` |
+| `test/tres_i2c_probe.py` | 机器状态块连读 0x30..0x35，解码 TECDUTY |
+| `WORKLOG.md` | 本节 + 0x35 寄存器表行 |
+
+### 验证与遗留
+
+- 全仓重编 + 全图链接 0 错（待执行）。
+- 映射边界（Python 离线校验）：duty 0%/100%、窗口缩放、钳制；风扇温度线性段。
+- **遗留**：`TEC_DAC_MAX_CTRL_MV` 需按实际功率级控制输入标定（若功率级满程就是 3.3V，直接改 3300 即满量程映射）；风扇温度阈值/PID 增益按真机散热系统标定；MCP4725 上电默认 0V 已由 `MCP4725_Init()` 保证（不写 EEPROM，防磨损）。

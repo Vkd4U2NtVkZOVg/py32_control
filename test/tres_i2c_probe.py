@@ -21,6 +21,8 @@ Registers:
   0x12 PINS     control-pin snapshot
   0x13 LASTERR  0 none / 1 illegal-in-state / 2 bad magic
   0x14 VERSION  0x02
+  0x30-0x35 machine-state block: BOOTSTATE / BOOTRETRY / TECFLAGS /
+                                 AHTSTAT / FANDUTY / TECDUTY
 
 States (STATUS bit[3:0], TRES_State_t):
   0 PWR_UP, 1 BOOT_WAIT_NORMAL, 2 RUNNING, 3 PULSE_RESET_NORMAL,
@@ -46,6 +48,7 @@ TRES_REG_BOOTRETRY = 0x31
 TRES_REG_TECFLAGS = 0x32
 TRES_REG_AHTSTAT = 0x33
 TRES_REG_FANDUTY = 0x34
+TRES_REG_TECDUTY = 0x35
 
 TRES_CMD_MAGIC = 0xA5
 TRES_CMD_RESET = 1
@@ -169,12 +172,12 @@ a command path fails, or a real command is rejected by the TRES policy.
     if version != 0x02:
         sys.exit("    VERSION mismatch - slave not responding as expected")
 
-    print("[2] machine-state block: read 0x30..0x34 (auto-increment)")
-    bootstate, bootretry, tecflags, ahtstat, fanduty = \
-        t.read_reg(TRES_REG_BOOTSTATE, 5)
-    print("    SDM845: {}({}) retry={}  FAN={}{}".format(
+    print("[2] machine-state block: read 0x30..0x35 (auto-increment)")
+    bootstate, bootretry, tecflags, ahtstat, fanduty, tecduty = \
+        t.read_reg(TRES_REG_BOOTSTATE, 6)
+    print("    SDM845: {}({}) retry={}  FAN={}%  TEC={}%".format(
         SDM845_STATE_NAMES.get(bootstate, "?"), bootstate, bootretry,
-        fanduty, "%"))
+        fanduty, tecduty))
     flags = "|".join(name for mask, name in TEC_FLAG_NAMES
                      if tecflags & mask) or "NONE"
     print("    TEC alarms: {}(0x{:02X})  AHT20 status: {}".format(

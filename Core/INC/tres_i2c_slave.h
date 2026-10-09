@@ -58,14 +58,15 @@ extern "C" {
 #define TRES_REG_SDM845_TEMP      0x20u
 #define TRES_REG_SDM845_TEMP_LEN  4u
 
-/* Machine-state block (0x30..0x34, all read-only, one byte each): the live
+/* Machine-state block (0x30..0x35, all read-only, one byte each): the live
  * state/health of every state machine and actuator on the MCU, so the host
- * can diagnose the whole board from one 5-byte burst read at 0x30. */
+ * can diagnose the whole board from one 6-byte burst read at 0x30. */
 #define TRES_REG_BOOTSTATE  0x30u   /**< Sdm845_State_t (sdm845_boot.h)       */
 #define TRES_REG_BOOTRETRY  0x31u   /**< SDM845 boot retry counter            */
 #define TRES_REG_TECFLAGS   0x32u   /**< TEC_ALARM_* bitmask (tec_control.h)  */
 #define TRES_REG_AHTSTAT    0x33u   /**< last AHT20 driver status (int8)      */
 #define TRES_REG_FANDUTY    0x34u   /**< last commanded fan duty, percent     */
+#define TRES_REG_TECDUTY    0x35u   /**< TEC current cmd to DAC, percent      */
 
 /* Exported functions --------------------------------------------------------*/
 /** Enable I2C1 slave interrupts (call after TRES_Cmd_Init). */
