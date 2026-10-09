@@ -32,8 +32,15 @@
  *   0x32 TECFLAGS  R  TEC control alarms (TEC_ALARM_* bitmask, tec_control.h)
  *   0x33 AHTSTAT   R  last AHT20 driver result code (0 OK, negative = error)
  *   0x34 FANDUTY   R  last fan duty commanded by any writer, percent
+ *   0x35 TECDUTY   R  last TEC current command to the DAC, percent
+ *   0x40..0xAF    RW  NVRAM parameter window: one 4-byte big-endian value per
+ *                     slot. Slot n of NvParamTecId_t (nv_params.h) lives at
+ *                     0x40 + 4*n. Values are 32-bit big-endian; writing the
+ *                     4th byte commits the value into the NVRAM RAM cache.
+ *                     Persist with the SAVE_PARAMS command.
+ *                     (0x40 + 4*28 = 0xB0, so the window is 0x40..0xAF.)
  ******************************************************************************
-  */
+ */
 #ifndef __TRES_I2C_SLAVE_H__
 #define __TRES_I2C_SLAVE_H__
 
@@ -43,6 +50,7 @@ extern "C" {
 
 /* Includes ------------------------------------------------------------------*/
 #include <stdint.h>
+#include "nv_params.h"   /* NVM_PARAM_COUNT for the NVRAM window size */
 
 /* Exported constants --------------------------------------------------------*/
 #define TRES_REG_CMD        0x00u
@@ -67,6 +75,14 @@ extern "C" {
 #define TRES_REG_AHTSTAT    0x33u   /**< last AHT20 driver status (int8)      */
 #define TRES_REG_FANDUTY    0x34u   /**< last commanded fan duty, percent     */
 #define TRES_REG_TECDUTY    0x35u   /**< TEC current cmd to DAC, percent      */
+
+/* NVRAM parameter window: slot n (NvParamTecId_t) at 0x40 + 4*n, 4 bytes
+ * big-endian. Reading any byte of a slot returns that byte; writing the 4th
+ * byte commits the assembled value into the NVRAM RAM cache. The window is
+ * 4 * NVM_PARAM_COUNT bytes, i.e. 0x40..0xAF. */
+#define TRES_REG_NV_BASE    0x40u
+#define TRES_REG_NV_LEN     4u
+#define TRES_REG_NV_END     ( TRES_REG_NV_BASE + TRES_REG_NV_LEN * NVM_PARAM_COUNT )
 
 /* Exported functions --------------------------------------------------------*/
 /** Enable I2C1 slave interrupts (call after TRES_Cmd_Init). */

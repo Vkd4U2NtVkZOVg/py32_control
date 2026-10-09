@@ -32,6 +32,8 @@
 
 /* Includes ------------------------------------------------------------------*/
 #include "adc.h"
+#include "nv_params.h"
+#include "tres_i2c_slave.h"
 /* USER CODE BEGIN Includes */
 
 /* USER CODE END Includes */
@@ -265,19 +267,40 @@ uint16_t Studio_ADC1_ReadCurrentRaw(void)
 
 uint32_t Studio_ADC1_ReadCurrentMilliamp(void)
 {
+  /* Current-sense chain calibration from NVRAM (INA181A2 + divider). Values
+   * are snapshotted once; changing NVRAM takes effect after reboot. */
+  static uint32_t shunt_uohm = 0u;
+  static uint32_t amp_gain   = 0u;
+  static uint32_t div_num    = 1u;
+  static uint32_t div_den    = 1u;
+  static uint32_t adc_vref_mv = 0u;
   uint32_t adc_code = Studio_ADC1_ReadCurrentRaw();
   uint64_t adc_voltage_uV;
   uint64_t shunt_voltage_uV;
   uint64_t current_mA;
 
+  if ( shunt_uohm == 0u ) {
+    shunt_uohm  = NvParams_Get( NV_TEC_CURRENT_SHUNT_UOHM );
+    amp_gain    = NvParams_Get( NV_TEC_CURRENT_AMP_GAIN );
+    div_num     = NvParams_Get( NV_TEC_CURRENT_DIVIDER_NUM );
+    div_den     = NvParams_Get( NV_TEC_CURRENT_DIVIDER_DEN );
+    adc_vref_mv = NvParams_Get( NV_TEC_CURRENT_ADC_VREF_MV );
+    if ( ( amp_gain == 0u ) || ( div_num == 0u ) || ( div_den == 0u ) ||
+         ( adc_vref_mv == 0u ) ) {
+      /* Guard against corrupt NVRAM values: fall back to a sane default. */
+      amp_gain    = 50u;
+      div_num     = 1u;
+      div_den     = 2u;
+      adc_vref_mv = 1800u;
+    }
+  }
+
   /* Vadc = code * Vref / 4095; undo the INA output divider, then divide by
    * (shunt resistance * amplifier gain). Keep integer arithmetic in uV. */
-  adc_voltage_uV = ((uint64_t)adc_code * TEC_CURRENT_ADC_VREF_MV * 1000ULL) /
-                   4095ULL;
-  shunt_voltage_uV = (adc_voltage_uV * TEC_CURRENT_DIVIDER_DEN) /
-                     TEC_CURRENT_DIVIDER_NUM;
+  adc_voltage_uV = ((uint64_t)adc_code * adc_vref_mv * 1000ULL) / 4095ULL;
+  shunt_voltage_uV = (adc_voltage_uV * div_den) / div_num;
   current_mA = (shunt_voltage_uV * 1000ULL) /
-               ((uint64_t)TEC_CURRENT_SHUNT_UOHM * TEC_CURRENT_AMP_GAIN);
+               ((uint64_t)shunt_uohm * amp_gain);
   return (uint32_t)current_mA;
 }
 

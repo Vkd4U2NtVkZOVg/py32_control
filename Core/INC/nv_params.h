@@ -4,19 +4,36 @@
  *
  * A fixed-size table of uint32 parameters is kept in a RAM cache and
  * persisted to the last FLASH sector on demand. The on-flash block is a
- * single 128-byte page: magic + version + crc32 + 29 parameter slots.
+ * single 128-byte page. Layout: [ magic ][ version ][ crc32 ][ params[] ];
+ * the block is packed into exactly one flash page by a union in nv_params.c,
+ * so the reserved pad is derived by the compiler, not hand-written.
  *
  *   Base: 0x0800F000 (last sector of the 64 KB device, page-aligned).
- *   Layout: [ magic ][ version ][ crc32 ][ params[0] .. params[28] ]
+ *
+ * The layout is TEC-specific: every tunable controller/sensor parameter has
+ * a named slot (NvParamTecId_t). Float gains are stored as Q16 fixed point
+ * (value x 65536) so a plain uint32 slot holds them exactly; convert back
+ * with (float)raw / 65536.0f. There are no tunable macros in the firmware
+ * anymore: tec_control/adc read their configuration from here at power-up.
+ *
+ * Adding a parameter = adding one enum line in NvParamTecId_t (before the
+ * NV_PARAM_COUNT_MARKER sentinel) and one default in s_defaults. The count,
+ * the on-flash block size and the I2C window (which derives from
+ * NVM_PARAM_COUNT) all follow automatically. Bump NVM_VERSION when the
+ * on-flash layout changes (the sentinel/union handles the size, not the
+ * version).
  *
  * Write strategy is single-block rewrite: NvParams_Save() erases the one page
  * and programms the whole block again. Endurance is ~10k erase cycles on PY32,
  * which is fine for parameters that are written rarely (calibration, config).
  *
  * Usage:
- *   NvParams_Init();                 // once, at power-up (loads or defaults)
- *   ... NvParams_Get(id) / NvParams_Set(id, v) ...
- *   NvParams_Save();                 // persist the RAM cache to FLASH
+ *   NvParams_Init();                    // once, at power-up (loads or defaults)
+ *   ... NvParams_Get(NV_TEC_PID_KP_Q16) / NvParams_Set(id, v) ...
+ *   NvParams_Save();                    // persist the RAM cache to FLASH
+ *
+ * The I2C slave exposes every slot as a 4-byte big-endian window at
+ * 0x40..0xAF (tres_i2c_slave.h), plus SAVE_PARAMS / DEFAULT_PARAMS commands.
  */
 #ifndef __NV_PARAMS_H__
 #define __NV_PARAMS_H__
@@ -27,50 +44,59 @@
 extern "C" {
 #endif
 
-/* How many uint32 parameter slots are persisted. The on-flash block is a
- * fixed 128-byte page: magic(4) + version(4) + crc32(4) + 29 * 4 = 128. */
-#define NVM_PARAM_COUNT      (29u)
+/* How many uint32 parameter slots are persisted. Derived from the enum
+ * sentinel NV_PARAM_COUNT_MARKER: adding a slot to NvParamTecId_t automatically
+ * grows the count (and the on-flash block) - no manual bookkeeping. */
+#define NVM_PARAM_COUNT      ( (uint8_t)NV_PARAM_COUNT_MARKER )
+
+/* Q16 fixed-point scale for float parameters stored as uint32. */
+#define NVM_Q16_SCALE        (65536.0f)
 
 /**
- * @brief Parameter identifiers (slots). Add application-specific slots here,
- *        but do not change the numeric order of existing ids once deployed.
+ * @brief TEC parameter slots (also the I2C window slot index: slot n lives at
+ *        register 0x40 + 4*n, big-endian). Do not reorder once deployed; bump
+ *        NVM_VERSION instead on a layout change.
  */
 typedef enum {
-    NV_PARAM_0 = 0u,          /**< user parameter slot 0                          */
-    NV_PARAM_1,               /**< user parameter slot 1                          */
-    NV_PARAM_2,               /**< user parameter slot 2                          */
-    NV_PARAM_3,               /**< user parameter slot 3                          */
-    NV_PARAM_4,               /**< user parameter slot 4                          */
-    NV_PARAM_5,               /**< user parameter slot 5                          */
-    NV_PARAM_6,               /**< user parameter slot 6                          */
-    NV_PARAM_7,               /**< user parameter slot 7                          */
-    NV_PARAM_8,               /**< user parameter slot 8                          */
-    NV_PARAM_9,               /**< user parameter slot 9                          */
-    NV_PARAM_10,              /**< user parameter slot 10                         */
-    NV_PARAM_11,              /**< user parameter slot 11                         */
-    NV_PARAM_12,              /**< user parameter slot 12                         */
-    NV_PARAM_13,              /**< user parameter slot 13                         */
-    NV_PARAM_14,              /**< user parameter slot 14                         */
-    NV_PARAM_15,              /**< user parameter slot 15                         */
-    NV_PARAM_16,              /**< user parameter slot 16                         */
-    NV_PARAM_17,              /**< user parameter slot 17                         */
-    NV_PARAM_18,              /**< user parameter slot 18                         */
-    NV_PARAM_19,              /**< user parameter slot 19                         */
-    NV_PARAM_20,              /**< user parameter slot 20                         */
-    NV_PARAM_21,              /**< user parameter slot 21                         */
-    NV_PARAM_22,              /**< user parameter slot 22                         */
-    NV_PARAM_23,              /**< user parameter slot 23                         */
-    NV_PARAM_24,              /**< user parameter slot 24                         */
-    NV_PARAM_25,              /**< user parameter slot 25                         */
-    NV_PARAM_26,              /**< user parameter slot 26                         */
-    NV_PARAM_27,              /**< user parameter slot 27                         */
-    NV_PARAM_28               /**< user parameter slot 28                         */
-} NvParamId_t;
+    NV_TEC_PID_KP_Q16 = 0u,            /**< PID proportional gain (Q16)         */
+    NV_TEC_PID_KI_Q16,                 /**< PID integral gain (Q16)             */
+    NV_TEC_PID_KD_Q16,                 /**< PID derivative gain (Q16)           */
+    NV_TEC_TARGET_BASE_MILLIC,         /**< base TEC target, milli-degC         */
+    NV_TEC_HOT_OVERTEMP_MILLIC,        /**< hot > this: fan full speed (m°C)    */
+    NV_TEC_HOT_DANGER_MILLIC,          /**< hot > this: TEC off + fan 100 (m°C) */
+    NV_TEC_CURRENT_FEEDFORWARD_MA,     /**< current above this gets FF (mA)     */
+    NV_TEC_CURRENT_DANGER_MA,          /**< current above this: alarm +FF50 (mA)*/
+    NV_TEC_FAN_MIN_RPM,                /**< fan fault threshold (RPM)           */
+    NV_TEC_CONTROL_PERIOD_MS,          /**< control/QuarkTS period (ms)         */
+    NV_TEC_DAC_VREF_MV,                /**< MCP4725 reference = VDD (mV)        */
+    NV_TEC_DAC_MAX_CTRL_MV,            /**< top of power-stage control window   */
+    NV_TEC_FAN_TEMP_BASE_MILLIC,       /**< fan starts ramping at this hot (m°C)*/
+    NV_TEC_FAN_TEMP_FULL_MILLIC,       /**< fan full speed at this hot (m°C)    */
+    NV_TEC_FAN_DUTY_BASE,              /**< base airflow while TEC active (%)   */
+    NV_TEC_CURRENT_SHUNT_UOHM,         /**< INA181A2 shunt resistance (µOhm)    */
+    NV_TEC_CURRENT_AMP_GAIN,           /**< INA181A2 gain (50 V/V)              */
+    NV_TEC_CURRENT_DIVIDER_NUM,        /**< sense divider numerator             */
+    NV_TEC_CURRENT_DIVIDER_DEN,        /**< sense divider denominator           */
+    NV_TEC_CURRENT_ADC_VREF_MV,        /**< ADC reference for the sense chain   */
+    NV_TEC_TEMP_VALID_MIN_MILLIC,      /**< lowest plausible temperature (m°C)  */
+    NV_TEC_TEMP_VALID_MAX_MILLIC,      /**< highest plausible temperature (m°C) */
+    NV_TEC_CURRENT_VALID_MAX_MA,       /**< highest plausible TEC current (mA)  */
+    NV_TEC_FAN_FAULT_MIN_DUTY,         /**< fan fault needs duty above this (%) */
+    NV_TEC_ENV_COMP_TEMP_MILLIC,       /**< env above this raises the target    */
+    NV_TEC_SOC_TIGHTEN_TEMP_MILLIC,    /**< SDM above this tightens the target  */
+    NV_TEC_SOC_TIGHTEN_DELTA_MILLIC,   /**< by how much it tightens (m°C)       */
+    NV_TEC_COLD_SOURCE,                /**< cold-side temperature source select:
+                                            0 = TEC_COLD ADC (PA4), 1 = SDM845   */
+    NV_PARAM_COUNT_MARKER,             /**< sentinel: MUST stay last. NVM_PARAM_COUNT
+                                            is derived from it, so adding a slot
+                                            is just adding a line above.         */
+} NvParamTecId_t;
 
 /**
  * @brief Load the parameter cache from FLASH at power-up. Validates the magic,
  *        version and CRC of the stored block; on any mismatch fills the cache
- *        with the firmware defaults. Does not write to FLASH.
+ *        with the firmware defaults and persists them to FLASH immediately
+ *        (so the store is valid on every later power-up).
  */
 void  NvParams_Init(void);
 

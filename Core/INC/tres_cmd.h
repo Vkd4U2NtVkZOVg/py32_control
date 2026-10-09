@@ -14,13 +14,14 @@
   * "count, do not react" behavior of the state diagram).
   *
   * Host register values exposed to the I2C layer:
-  *     0x10 STATUS   : bit[3:0]=state, 4=host_ready, 7=last_cmd_rejected
-  *     0x11 RETRIES  : CMD_REPORT_FAIL counter
-  *     0x12 PINS     : live control-pin snapshot
-  *     0x13 LASTERR  : detail code of the last rejected command
-  *     0x14 VERSION  : interface version
-  ******************************************************************************
-  */
+ *     0x10 STATUS   : bit[3:0]=state, 4=host_ready, 7=last_cmd_rejected
+ *     0x11 RETRIES  : CMD_REPORT_FAIL counter
+ *     0x12 PINS     : live control-pin snapshot
+ *     0x13 LASTERR  : detail code of the last rejected command
+ *     0x14 VERSION  : interface version
+ *     0x40..0xAF    : NVRAM parameter window (see tres_i2c_slave.h)
+ ******************************************************************************
+ */
 #ifndef __TRES_CMD_H__
 #define __TRES_CMD_H__
 
@@ -36,7 +37,9 @@ extern "C" {
 typedef enum {
     TRES_CMD_RESET       = 1u,  /**< reset pulse, boot NORMAL (BOOT0=0)      */
     TRES_CMD_ENTER_DFU   = 2u,  /**< reset pulse, boot DFU (BOOT0=1, USB on) */
-    TRES_CMD_REPORT_FAIL = 3u   /**< count-only failure report (no reaction) */
+    TRES_CMD_REPORT_FAIL = 3u,  /**< count-only failure report (no reaction) */
+    TRES_CMD_SAVE_PARAMS = 4u,  /**< persist the NVRAM RAM cache to FLASH    */
+    TRES_CMD_DEFAULT_PARAMS = 5u /**< reload NVRAM firmware defaults (RAM)    */
 } TRES_CmdId_t;
 
 #define TRES_CMD_MAGIC          0xA5u   /**< first byte of a command write  */

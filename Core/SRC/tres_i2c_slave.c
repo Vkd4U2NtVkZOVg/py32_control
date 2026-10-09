@@ -18,6 +18,7 @@
 #include "tec_control.h"
 #include "aht20_task.h"
 #include "fan.h"
+#include "nv_params.h"
 
 /* Private define ------------------------------------------------------------*/
 #define CMD_WRITE_LEN   3u      /* [magic][cmd][param]                        */
@@ -36,6 +37,11 @@ static uint8_t  s_cmdBuf[ CMD_WRITE_LEN ];
 static uint8_t  s_tempBuf[ TRES_REG_SDM845_TEMP_LEN ];
 static volatile uint32_t s_temp_raw;
 static volatile uint8_t  s_temp_valid;
+
+/* NVRAM parameter window staging: 4 bytes per slot, big-endian. Bytes land in
+ * s_nvBuf indexed by their offset within the slot; the 4th byte commits the
+ * assembled value into the NVRAM RAM cache. */
+static uint8_t  s_nvBuf[ TRES_REG_NV_LEN ];
 
 /* Private function prototypes -----------------------------------------------*/
 static uint8_t Reg_Read(uint8_t addr);
@@ -70,8 +76,18 @@ static uint8_t Reg_Read(uint8_t addr)
         case TRES_REG_PINS:    return TRES_Seq_GetPinsSnapshot();
         case TRES_REG_LASTERR: return TRES_Cmd_LastErr();
         case TRES_REG_VERSION: return TRES_IF_VERSION;
-        default:               return 0u;   /* CMD is write-only          */
+        default: break;
     }
+
+    /* NVRAM parameter window: slot n at 0x40 + 4*n, big-endian byte selection. */
+    if ( ( addr >= TRES_REG_NV_BASE ) && ( addr < TRES_REG_NV_END ) ) {
+        uint32_t off = (uint32_t)( addr - TRES_REG_NV_BASE );
+        uint8_t  slot  = (uint8_t)( off / TRES_REG_NV_LEN );
+        uint8_t  byte  = (uint8_t)( off % TRES_REG_NV_LEN );
+        return (uint8_t)( NvParams_Get( slot ) >> ( 24u - 8u * byte ) );
+    }
+
+    return 0u;   /* CMD is write-only          */
 }
 
 /*============================================================================*/
@@ -172,6 +188,26 @@ void I2C1_IRQHandler(void)
                                  ( (uint32_t)s_tempBuf[ 3 ]       );
                     s_temp_valid = 1u;
                 }
+                /* auto-advance the register pointer for a burst write */
+                s_regPtr++;
+            } else if ( ( s_regPtr >= TRES_REG_NV_BASE ) &&
+                        ( s_regPtr < TRES_REG_NV_END ) ) {
+                /* NVRAM window: 4 bytes big-endian per slot. The 4th byte
+                 * commits into the RAM cache (NvParams_Save persists).        */
+                uint32_t off  = (uint32_t)( s_regPtr - TRES_REG_NV_BASE );
+                uint8_t  slot = (uint8_t)( off / TRES_REG_NV_LEN );
+                uint8_t  byte = (uint8_t)( off % TRES_REG_NV_LEN );
+
+                s_nvBuf[ byte ] = b;
+                if ( byte == ( TRES_REG_NV_LEN - 1u ) ) {
+                    NvParams_Set( slot,
+                                  ( (uint32_t)s_nvBuf[ 0 ] << 24 ) |
+                                  ( (uint32_t)s_nvBuf[ 1 ] << 16 ) |
+                                  ( (uint32_t)s_nvBuf[ 2 ] << 8  ) |
+                                  ( (uint32_t)s_nvBuf[ 3 ]       ) );
+                }
+                /* auto-advance the register pointer for a burst write */
+                s_regPtr++;
             }
             /* writes to read-only registers are ignored                      */
         }

@@ -7,10 +7,16 @@
  * power-stage control window; the heatsink fan is decoupled and follows the
  * hot-side temperature instead:
  *   - Temperature fusion: hot*0.5 + sdm845*0.3 + env*0.2
- *   - Dynamic target: 45°C + env compensation - SoC compensation
+ *   - Dynamic target: base + env compensation - SoC compensation
  *   - PID main loop: TecPid_Update() with fused temperature
- *   - Feedforward: TEC current > 2A adds duty proportional to current
+ *   - Feedforward: TEC current > threshold adds duty proportional to current
  *   - Fault protection: overtemp full-speed/shutdown, overcurrent feedforward, fan fault alarm
+ *
+ * All tunable parameters (PID gains, targets, thresholds, DAC window, fan ramp,
+ * sensor scale) live in NVRAM (nv_params.h) and are snapshotted at
+ * TecControl_Init() time - there are no tunable macros. Edit them over the I2C
+ * parameter window (0x40.., see tres_i2c_slave.h) and save, or via the host
+ * command SAVE_PARAMS.
  *
  * Dependencies (already implemented):
  *   - AHT20_Get_LastTempMilliCelsius() - environment temperature
@@ -32,42 +38,19 @@
 extern "C" {
 #endif
 
-/* Alarm flags (bitmask) */
+/* Alarm flags (bitmask) - informational, not tunable. */
 #define TEC_ALARM_NONE              0x00
-#define TEC_ALARM_OVERTEMP          0x01  /* hot-side > 70°C, TEC disabled */
-#define TEC_ALARM_HOT_WARNING       0x02  /* hot-side > 60°C, fan full-speed */
-#define TEC_ALARM_OVERCURRENT       0x04  /* TEC current > 3A, feedforward +50% */
-#define TEC_ALARM_FAN_FAULT         0x08  /* fan RPM < 500 with duty > 30% */
-#define TEC_ALARM_THERMAL_WAIT      0x10  /* ambient precheck: TEC held off */
-
-/* Control parameters (tunable) */
-#define TEC_PID_KP                  2.0f
-#define TEC_PID_KI                  0.1f
-#define TEC_PID_KD                  0.5f
-#define TEC_TARGET_BASE_MILLIC      45000   /* 45°C */
-#define TEC_HOT_OVERTEMP_MILLIC     60000   /* 60°C */
-#define TEC_HOT_DANGER_MILLIC       70000   /* 70°C */
-#define TEC_CURRENT_FEEDFORWARD_MA  2000    /* 2A */
-#define TEC_CURRENT_DANGER_MA       3000    /* 3A */
-#define FAN_MIN_RPM                 500
-#define TEC_CONTROL_PERIOD_S        1.0f
-
-/* DAC actuator (MCP4725): maps the 0..100 % TEC command to the power-stage
- * control-window voltage. VREF = MCP4725 VDD; MAX_CTRL = top of the control
- * window the power stage accepts (TPS63802-VSET style input). */
-#define TEC_DAC_VREF_MV             (3300u)
-#define TEC_DAC_MAX_CTRL_MV         (1200u)
-
-/* Heatsink fan is decoupled from the TEC PID output: linear ramp on the hot-side
- * temperature, base airflow while the TEC is active, full speed at TEMP_FULL. */
-#define TEC_FAN_TEMP_BASE_MILLIC    (40000)  /* 40°C: fan starts ramping */
-#define TEC_FAN_TEMP_FULL_MILLIC    (60000)  /* 60°C: fan full speed      */
-#define TEC_FAN_DUTY_BASE           (30u)    /* base airflow while active */
+#define TEC_ALARM_OVERTEMP          0x01  /* hot-side > danger, TEC disabled   */
+#define TEC_ALARM_HOT_WARNING       0x02  /* hot-side > overtemp, fan full-speed */
+#define TEC_ALARM_OVERCURRENT       0x04  /* TEC current > danger, FF +50%     */
+#define TEC_ALARM_FAN_FAULT         0x08  /* fan RPM < min with duty > min     */
+#define TEC_ALARM_THERMAL_WAIT      0x10  /* ambient precheck: TEC held off    */
 
 /**
  * @brief Initialize the TEC control task.
  *
- * Creates a QuarkTS periodic task (1s period, qLowest_Priority) that:
+ * Snapshots the NVRAM parameter table (nv_params.h), then creates a QuarkTS
+ * periodic task (period from NVRAM, default 1 s, qLowest_Priority) that:
  *   1. Reads all temperature/current getters
  *   2. Fuses temperatures (weighted average)
  *   3. Computes dynamic target temperature

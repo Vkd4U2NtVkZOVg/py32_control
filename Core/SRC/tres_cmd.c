@@ -14,6 +14,7 @@
 #include "QuarkTS.h"
 #include "tres_cmd.h"
 #include "tres_seq.h"
+#include "nv_params.h"
 
 /* Private typedef -----------------------------------------------------------*/
 typedef struct {
@@ -43,6 +44,16 @@ static uint8_t Policy_Apply(uint8_t cmd, uint8_t param)
     /* CMD_REPORT_FAIL is legal in every state and never migrates.           */
     if ( cmd == TRES_CMD_REPORT_FAIL ) {
         s_failCnt++;
+        return 1u;
+    }
+
+    /* NVRAM housekeeping is legal in every state and never migrates.        */
+    if ( cmd == TRES_CMD_SAVE_PARAMS ) {
+        (void)NvParams_Save();
+        return 1u;
+    }
+    if ( cmd == TRES_CMD_DEFAULT_PARAMS ) {
+        NvParams_RestoreDefaults();   /* RAM cache only; SAVE persists it     */
         return 1u;
     }
 

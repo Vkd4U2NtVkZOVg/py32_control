@@ -21,6 +21,7 @@
 #include "fan_task.h"
 #include "fan.h"
 #include "qport_py32.h"
+#include "adc.h"
 
 /*============================================================================*/
 /* Timing                                                                      */
@@ -34,7 +35,6 @@ static qTask_t  s_fanTask;
 static uint32_t s_prev_pulses;
 static uint32_t s_prev_tick;
 static uint32_t s_last_rpm;
-
 /*============================================================================*/
 /* Task callback: runs once per FAN_SAMPLE_PERIOD_S                            */
 /*============================================================================*/
