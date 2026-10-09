@@ -311,6 +311,11 @@ int32_t Studio_ADC1_ReadHotMilliCelsius(void)
 
 int32_t Studio_ADC1_ReadColdMilliCelsius(void)
 {
+  /* Cold-side temperature source switch (NVRAM NV_TEC_COLD_SOURCE):
+   *   0 = TEC_COLD ADC on PA4 (default), 1 = SDM845 host-reported temp. */
+  if ( NvParams_Get( NV_TEC_COLD_SOURCE ) != 0u ) {
+    return TRES_I2C_Slave_GetSdm845TempMilliC();
+  }
   return NTC3950_AdcToMilliCelsius(Studio_ADC1_ReadColdRaw());
 }
 
