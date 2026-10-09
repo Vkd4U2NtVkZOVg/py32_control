@@ -187,11 +187,15 @@ void Studio_ADC1_Init(void)
   LL_APB1_GRP2_EnableClock(LL_APB1_GRP2_PERIPH_ADC1);
 
   /** Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
+   *  Clock follows the official LL ADC_MultichannelSwitch example: SYSCLK 32 MHz
+   *  / APB1 DIV1 -> PCLK 32 MHz, so DIV4 keeps the ADC clock at 8 MHz (within
+   *  spec). DIV1 (32 MHz) exceeded the ADC clock limit and made conversions
+   *  unreliable after the first one.
   */
-  ADC_InitStruct.Clock = LL_ADC_CLOCK_SYNC_PCLK_DIV1;
+  ADC_InitStruct.Clock = LL_ADC_CLOCK_SYNC_PCLK_DIV4;
   ADC_InitStruct.Resolution = LL_ADC_RESOLUTION_12B;
   ADC_InitStruct.DataAlignment = LL_ADC_DATA_ALIGN_RIGHT;
-  ADC_InitStruct.LowPowerMode = LL_ADC_LP_MODE_NONE;
+  ADC_InitStruct.LowPowerMode = LL_ADC_LP_AUTOWAIT;
   LL_ADC_Init(ADC1, &ADC_InitStruct);
 
   ADC_REG_InitStruct.TriggerSource = LL_ADC_REG_TRIG_SOFTWARE;
@@ -202,13 +206,9 @@ void Studio_ADC1_Init(void)
   LL_ADC_REG_Init(ADC1, &ADC_REG_InitStruct);
 
   LL_ADC_REG_SetSequencerScanDirection(ADC1, LL_ADC_REG_SEQ_SCAN_DIR_FORWARD);
-  LL_ADC_SetSamplingTimeCommonChannels(ADC1, LL_ADC_SAMPLINGTIME_3CYCLES_5);
-
-  LL_ADC_REG_SetSequencerChAdd(ADC1, LL_ADC_CHANNEL_4);
-
-  LL_ADC_REG_SetSequencerChAdd(ADC1, LL_ADC_CHANNEL_5);
-
-  LL_ADC_REG_SetSequencerChAdd(ADC1, LL_ADC_CHANNEL_6);
+  /* Official example uses 239.5 cycles; 3.5 cycles undersampled the NTC/INA
+     chain and left the sample capacitor stuck at an arbitrary mid-scale value. */
+  LL_ADC_SetSamplingTimeCommonChannels(ADC1, LL_ADC_SAMPLINGTIME_239CYCLES_5);
 
   Studio_ADC1_Calibrate();
   LL_ADC_Enable(ADC1);
@@ -218,34 +218,33 @@ void Studio_ADC1_Init(void)
 }
 
 /*---------------------------------------------------------------------------*/
-/* Single-channel conversion helpers. A single software-triggered conversion
- * is used so each result is explicitly associated with its requested channel. */
+/* Single-channel conversion helpers (official LL ADC_MultichannelSwitch     */
+/* pattern: APP_AdcConvert). The ADC is started once at init and kept        */
+/* enabled - AN1011 §1: "ADC使能后软件不能禁能" (a runtime LL_ADC_Disable made */
+/* conversions stick at 2048). Each read re-assigns one channel, starts a     */
+/* conversion, waits for EOC, and clears CHSELR again.                        */
 uint16_t Studio_ADC1_ReadChannel(uint32_t channel)
 {
-  uint32_t timeout = 100000U;
   uint16_t value = 0U;
 
-  if (LL_ADC_IsEnabled(ADC1) != 0U) {
-    LL_ADC_Disable(ADC1);
-    while (LL_ADC_IsEnabled(ADC1) != 0U) {
-      /* wait for the ADC disable handshake */
-    }
-  }
-
+  /* Clear all channels */
+  WRITE_REG(ADC1->CHSELR, 0U);
+  /* Select the wanted channel */
   LL_ADC_REG_SetSequencerChannels(ADC1, channel);
-  LL_ADC_ClearFlag_EOC(ADC1);
-  LL_ADC_ClearFlag_EOS(ADC1);
-  LL_ADC_Enable(ADC1);
+
+  LL_ADC_Enable(ADC1);                             /* ADC must remain enabled; no disable */
+  LL_mDelay(1);                                    /* ADC stabilization, min 8 ADC clocks */
+
   LL_ADC_REG_StartConversion(ADC1);
-  timeout = 100000U;
-  while ((LL_ADC_IsActiveFlag_EOC(ADC1) == 0U) && (timeout-- != 0U)) {
+  while (LL_ADC_IsActiveFlag_EOC(ADC1) == 0U) {
     /* wait for end of conversion */
   }
-  if (timeout != 0U) {
-    value = LL_ADC_REG_ReadConversionData12(ADC1);
-  }
   LL_ADC_ClearFlag_EOC(ADC1);
-  LL_ADC_ClearFlag_EOS(ADC1);
+  value = LL_ADC_REG_ReadConversionData12(ADC1);
+
+  /* Clear all channels */
+  WRITE_REG(ADC1->CHSELR, 0U);
+
   return value;
 }
 
