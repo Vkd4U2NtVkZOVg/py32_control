@@ -163,7 +163,7 @@ static void tec_params_load( Tec_Params_t *p )
         p->current_valid_max_ma = 5000u;
     }
     if ( ( p->hot_fb_gain_q16 == 0u ) || ( p->hot_fb_max_millic <= 0 ) ) {
-        p->hot_fb_gain_q16   = NVM_Q16( 2.0f );
+        p->hot_fb_gain_q16   = (uint32_t)( 2.0f * NVM_Q16_SCALE );   /* 2.0 in Q16 */
         p->hot_fb_max_millic = 30000u;
     }
 }
