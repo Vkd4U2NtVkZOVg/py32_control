@@ -37,7 +37,7 @@
 #define NVM_BASE        (0x0800F000UL)  /**< last flash sector, page-aligned  */
 #define NVM_MAGIC       (0x4E564433u)   /**< 'NVD3'                            */
 #define NVM_VERSION     (7u)            /**< v7: dual-slot power-fail layout  */
-#define NVM_PAGES       (2u)            /**< 2 x 128B pages (256B per slot)   */
+#define NVM_PAGE_BYTES  (128u)          /**< PY32F030 flash page size          */
 #define NVM_SLOTS       (2u)            /**< A/B slots; Save flips between them*/
 
 #define NVM_OK          (0)
@@ -64,17 +64,16 @@ static const uint32_t s_flash_timing[ 5 ] = {
 /* Q16 fixed-point encoding for the float (PID gain) parameters. */
 #define NVM_Q16( x )    ( (uint32_t)( (x) * NVM_Q16_SCALE ) )
 
-#define NVM_BLOCK_SIZE  (128u * NVM_PAGES)   /**< 256B store = 2 flash pages    */
-
 /* Slot base addresses: slot i starts at NVM_BASE + i * NVM_BLOCK_SIZE. The
- * A/B pair occupies 512 B inside the reserved 4 KB NVM sector. */
+ * A/B pair occupies 2 * NVM_BLOCK_SIZE bytes inside the reserved 4 KB NVM
+ * sector. */
 #define NVM_SLOT_ADDR( i )  ( NVM_BASE + ( (uint32_t)( i ) * NVM_BLOCK_SIZE ) )
 
 /*============================================================================*/
-/* On-flash block layout (two consecutive 128-byte flash pages per slot). The  */
-/* union makes the reserved pad follow NVM_PARAM_COUNT automatically, so       */
-/* adding a parameter never needs manual byte bookkeeping. seq grows on every  */
-/* Save so Init() can tell which slot holds the newest good block.             */
+/* On-flash block layout (NVM_PAGES consecutive 128-byte flash pages per      */
+/* slot, derived from the block size below - adding a parameter grows the     */
+/* page count automatically). seq grows on every Save so Init() can tell      */
+/* which slot holds the newest good block.                                    */
 /*============================================================================*/
 typedef struct {
     uint32_t magic;
@@ -84,14 +83,24 @@ typedef struct {
     uint32_t params[ NVM_PARAM_COUNT ];
 } Nvm_Block_Data_t;
 
+/* Pages per slot, derived from the actual block size: a 148-byte block
+ * takes 2 pages, a block <= 128 bytes would take 1, etc. No manual
+ * bookkeeping when the parameter table grows or shrinks. */
+#define NVM_PAGES       ( ( sizeof( Nvm_Block_Data_t ) + NVM_PAGE_BYTES - 1u ) / NVM_PAGE_BYTES )
+#define NVM_BLOCK_SIZE  ( NVM_PAGE_BYTES * NVM_PAGES )
+
 typedef union {
-    Nvm_Block_Data_t  data;             /**< magic+version+crc+params          */
+    Nvm_Block_Data_t  data;             /**< magic+version+seq+crc+params      */
     uint8_t           page[ NVM_BLOCK_SIZE ];
 } Nvm_Block_t;
 _Static_assert( sizeof( Nvm_Block_Data_t ) <= NVM_BLOCK_SIZE,
                 "Nvm_Block_Data_t must fit the NVM flash pages" );
 _Static_assert( sizeof( Nvm_Block_t ) == NVM_BLOCK_SIZE,
                 "Nvm_Block_t must equal the NVM flash pages" );
+/* Dual-slot budget: both slots together must stay inside the reserved 4 KB
+ * NVM sector (page-aligned erase always touches whole pages). */
+_Static_assert( ( NVM_SLOTS * NVM_BLOCK_SIZE ) <= 4096u,
+                "dual-slot NVM store exceeds the reserved 4 KB sector" );
 
 /*============================================================================*/
 /* RAM cache + defaults                                                        */
