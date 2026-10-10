@@ -45,6 +45,9 @@ extern "C" {
 #define TEC_ALARM_OVERCURRENT       0x04  /* TEC current > danger, FF +50%     */
 #define TEC_ALARM_FAN_FAULT         0x08  /* fan RPM < min with duty > min     */
 #define TEC_ALARM_THERMAL_WAIT      0x10  /* ambient precheck: TEC held off    */
+#define TEC_ALARM_SENSOR            0x80  /* temperature/current source invalid:
+                                             NTC open/short, ADC timeout - TEC
+                                             driven to a safe state               */
 
 /**
  * @brief Initialize the TEC control task.

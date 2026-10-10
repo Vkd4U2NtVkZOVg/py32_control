@@ -193,6 +193,21 @@ static void TecControl_Cb( qEvent_t e )
     /*--- 4. fault protection (highest priority first) ----------------------*/
     s_alarm = TEC_ALARM_NONE;
 
+    /* Hot-side sensor failure is FAIL-SAFE, not fall-back: the hot side
+     * feeds the overtemp shutdown, the fan ramp and the fan-fault check.
+     * An open NTC reads as -40 C (would never trip the overtemp guard) and
+     * a shorted NTC as +200 C. Treat any invalid hot-side reading as a
+     * sensor fault: cut the TEC, spin the fan at 100 % and stop driving
+     * until the reading is plausible again. (ADC read timeout also
+     * surfaces here, via an out-of-window code.) */
+    if ( is_temp_valid( hot_mc ) == 0 ) {
+        tec_set_enabled( 0u );
+        (void)tec_dac_set( 0u );
+        Fan_SetDutyPercent( 100u );
+        s_alarm |= TEC_ALARM_SENSOR;
+        return;
+    }
+
     if ( hot_mc > s_p.hot_danger_millic ) {
         /* danger: cut TEC, zero the DAC command, fan full speed */
         tec_set_enabled( 0u );

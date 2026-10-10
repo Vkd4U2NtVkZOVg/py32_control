@@ -162,6 +162,7 @@ TEC_FLAG_NAMES = (
     (0x04, "OVERCURRENT"),
     (0x08, "FAN_FAULT"),
     (0x10, "THERMAL_WAIT"),
+    (0x80, "SENSOR"),
 )
 
 
