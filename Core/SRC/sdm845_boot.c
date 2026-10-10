@@ -510,7 +510,9 @@ static qSM_Status_t st_StrapFail_Cb( qSM_Handler_t h )
 /*============================================================================*/
 static const qSM_TimeoutStateDefinition_t s_toThermalPrecheck[] = {
     { (qTime_t)( (float)SDM845_PRECHECK_POLL_MS / 1000.0f ),
-      QSM_TSOPT_INDEX(0) | QSM_TSOPT_SET_ENTRY | QSM_TSOPT_RST_EXIT },
+      QSM_TSOPT_INDEX(0) | QSM_TSOPT_SET_ENTRY | QSM_TSOPT_RST_EXIT |
+      QSM_TSOPT_PERIODIC },   /* periodic: keep polling AHT20 while too hot /
+                                 sensor invalid until proceed or fail-open   */
 };
 static const qSM_TimeoutStateDefinition_t s_toPwup[] = {
     { (qTime_t)SDM845_T_PWUP_S,
