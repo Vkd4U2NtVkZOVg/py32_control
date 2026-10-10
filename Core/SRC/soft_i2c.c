@@ -33,6 +33,12 @@
 #define SOFT_I2C_WRITE_BIT             0U
 #define SOFT_I2C_READ_BIT              1U
 
+/* Upper bound on a single transaction payload. Transactions run with IRQs
+ * disabled for the whole bit-bang, so an unbounded len would starve the
+ * scheduler / I2C1 slave / tach EXTI for seconds. Every in-tree caller
+ * transfers <= 16 bytes (NVRAM slot 4 B, AES window 16 B).              */
+#define SOFT_I2C_MAX_TRANSFER          (64U)
+
 /*============================================================================*/
 /* Low level pin primitives                                                    */
 /*============================================================================*/
@@ -237,6 +243,9 @@ SoftI2C_Status_t SoftI2C_Master_Write(uint8_t addr7, const uint8_t *buf, uint16_
     if ((NULL == buf) && (len > 0U)) {
         return SOFT_I2C_ERR_PARAM;
     }
+    if (len > SOFT_I2C_MAX_TRANSFER) {
+        return SOFT_I2C_ERR_PARAM;   /* reject before disabling IRQs */
+    }
 
     primask = __get_PRIMASK();
     __disable_irq();
@@ -270,6 +279,9 @@ SoftI2C_Status_t SoftI2C_Master_Read(uint8_t addr7, uint8_t *buf, uint16_t len)
     if ((NULL == buf) && (len > 0U)) {
         return SOFT_I2C_ERR_PARAM;
     }
+    if (len > SOFT_I2C_MAX_TRANSFER) {
+        return SOFT_I2C_ERR_PARAM;   /* reject before disabling IRQs */
+    }
 
     primask = __get_PRIMASK();
     __disable_irq();
@@ -300,6 +312,9 @@ SoftI2C_Status_t SoftI2C_WriteReg(uint8_t addr7, uint8_t reg, const uint8_t *buf
 
     if ((NULL == buf) && (len > 0U)) {
         return SOFT_I2C_ERR_PARAM;
+    }
+    if (len > SOFT_I2C_MAX_TRANSFER) {
+        return SOFT_I2C_ERR_PARAM;   /* reject before disabling IRQs */
     }
 
     primask = __get_PRIMASK();
@@ -337,6 +352,9 @@ SoftI2C_Status_t SoftI2C_ReadReg(uint8_t addr7, uint8_t reg, uint8_t *buf, uint1
 
     if ((NULL == buf) && (len > 0U)) {
         return SOFT_I2C_ERR_PARAM;
+    }
+    if (len > SOFT_I2C_MAX_TRANSFER) {
+        return SOFT_I2C_ERR_PARAM;   /* reject before disabling IRQs */
     }
 
     primask = __get_PRIMASK();
