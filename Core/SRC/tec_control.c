@@ -111,6 +111,52 @@ static void tec_params_load( Tec_Params_t *p )
         p->dac_min_ctrl_mv = 0;
         p->dac_max_ctrl_mv = 1200;   /* NVRAM factory default (NV_TEC_DAC_MAX_CTRL_MV) */
     }
+
+    /* Relation/range sanity for the rest of the parameter set (same threat
+     * model: host-writable NVRAM or a FLASH bit flip). Each violated
+     * invariant falls back to its factory default:
+     *  - fan ramp span: full <= base divides by zero / reverses the ramp
+     *  - hot thresholds: warning must stay below danger, or the warning
+     *    path never fires before the danger shutdown
+     *  - current thresholds: the FF knee must sit below the danger limit
+     *  - PID gains: must be positive, or TecPid_Init() rejects them and
+     *    the controller silently never runs
+     *  - soft-start step: must be > 0, or the ramp never advances
+     *  - plausibility window: min < max, or is_temp_valid() rejects
+     *    everything and every cycle falls back to the target            */
+    if ( p->fan_temp_base_millic >= p->fan_temp_full_millic ) {
+        p->fan_temp_base_millic = 40000u;
+        p->fan_temp_full_millic = 60000u;
+    }
+    if ( p->hot_overtemp_millic >= p->hot_danger_millic ) {
+        p->hot_overtemp_millic = 60000u;
+        p->hot_danger_millic   = 70000u;
+    }
+    if ( p->cur_feedforward_ma >= p->cur_danger_ma ) {
+        p->cur_feedforward_ma = 2000u;
+        p->cur_danger_ma      = 3000u;
+    }
+    if ( ( p->pid_kp <= 0.0f ) || ( p->pid_ki <= 0.0f ) || ( p->pid_kd < 0.0f ) ) {
+        p->pid_kp = 2.0f;
+        p->pid_ki = 0.1f;
+        p->pid_kd = 0.5f;
+    }
+    if ( ( p->ramp_step_percent <= 0 ) || ( p->ramp_step_percent > 100 ) ) {
+        p->ramp_step_percent = 5u;
+    }
+    if ( ( p->fan_duty_base < 0 ) || ( p->fan_duty_base > 100 ) ) {
+        p->fan_duty_base = 30u;
+    }
+    if ( p->dewpoint_margin_millic < 0 ) {
+        p->dewpoint_margin_millic = 2000u;
+    }
+    if ( p->temp_valid_min_millic >= p->temp_valid_max_millic ) {
+        p->temp_valid_min_millic = (int32_t)( -20000 );
+        p->temp_valid_max_millic = 120000u;
+    }
+    if ( p->current_valid_max_ma <= 0 ) {
+        p->current_valid_max_ma = 5000u;
+    }
 }
 
 /*============================================================================*/
