@@ -349,7 +349,7 @@ stateDiagram-v2
     HOT_INVALID : 关 TEC_VEN + DAC0, 风扇 100%
     HOT_INVALID --> [*] : TEC_ALARM_SENSOR(0x80) 提前退出
 
-    DYNAMIC_TARGET : base + env补偿 − 冷端收紧<br/>热折返: 热端>60°C 每超1°C 目标+2°C(封顶+30°C)
+    DYNAMIC_TARGET : base + env补偿 − 冷端收紧<br/>热折返: 热端>80°C 每超1°C 目标+2°C(封顶+30°C)
     DYNAMIC_TARGET --> DEWPOINT_GUARD
 
     DEWPOINT_GUARD : 冷端 < 露点+margin → 硬切
@@ -428,7 +428,7 @@ duty 100% -> DAC_MIN_CTRL_MV -> VOUT 分压自然点 / 满制冷端
 - 热端传感器失效（开路 -40°C / 短路 +200°C / ADC 超时）：关 TEC、DAC 置安全端、风扇 100%，置 `SENSOR(0x80)`；冷端/环境无效则回退目标值（不失效保护）；
 - 冷端低于 `露点 + DEWPOINT_MARGIN`：硬切（关 TEC + DAC0 + 风扇 100%，`DEWPOINT 0x20`）——独立于 PID 的硬保护层，与 PID 共用同一冷端变量；
 - 热端超过 danger 阈值（80°C，NVRAM 可设）：关闭 `TEC_VEN`、DAC 置安全端、风扇全速（`OVERTEMP 0x01`）——最后防线，正常折返到不了；
-- 热端超过 overtemp 阈值（60°C）：`HOT_WARNING(0x02)`，**热折返**——冷端目标按增益 2.0/°C 线性抬升（封顶 +30°C），PID 自动减小制冷、热端负荷随之下降，回落后自动恢复；不压 duty=0、不清积分器（避免 bang-bang 振荡）；
+- 热端超过 overtemp 阈值（80°C）：`HOT_WARNING(0x02)`，**热折返**——冷端目标按增益 2.0/°C 线性抬升（封顶 +30°C），PID 自动减小制冷、热端负荷随之下降，回落后自动恢复；不压 duty=0、不清积分器（避免 bang-bang 振荡）；
 - 过流（> `CURRENT_DANGER`）：`OVERCURRENT(0x04)`，**关 TEC enable 线** + DAC0 + 风扇 100%，电流回落经正常启动路径恢复；
 - 热预检未通过：`THERMAL_WAIT(0x10)`，TEC 保持关闭，不抢占预检阶段的风扇控制；
 - DAC 写失败：`DAC_FAULT(0x40)`，下周期重试，`s_dac_percent` 保持 last-good（不假装已执行）；
@@ -441,8 +441,8 @@ duty 100% -> DAC_MIN_CTRL_MV -> VOUT 分压自然点 / 满制冷端
 |---|---:|---|
 | `PID_KP/KI/KD` | 2.0 / 0.1 / 0.5 | Q16 存储 |
 | `TARGET_BASE` | 45°C | 冷端（被控对象）基准目标 |
-| `HOT_OVERTEMP` | 60°C | 热警告（折返起点） |
-| `HOT_DANGER` | 80°C | 危险关断（最后防线，NVRAM 可设） |
+| `HOT_OVERTEMP` | 80°C | 热警告（折返起点） |
+| `HOT_DANGER` | 90°C | 危险关断（最后防线，NVRAM 可设） |
 | `HOT_FB_GAIN` | 2.0 | 折返增益：热端每超 1°C 冷端目标抬 2°C |
 | `HOT_FB_MAX` | +30°C | 折返抬升上限 |
 | `DAC_MIN_CTRL` | 0 mV 默认占位 | 需实机标定，理论约 740 mV |
