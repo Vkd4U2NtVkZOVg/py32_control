@@ -2927,3 +2927,34 @@ int32_t ff_base    = (int32_t)( gradient_c * s_p.ff_gain );
 | 8 | `tec_control.c` | `tec_params_load()` 校验从"仅 DAC 窗口"扩展为全套关系/范围校验，任一违反回落出厂默认：风扇斜坡 `base<full`（除零/反转防护）、`hot_overtemp<hot_danger`（警告先于危险）、`cur_ff_knee<cur_danger`、PID 增益 `kp>0,ki>0,kd>=0`（防 `TecPid_Init` 静默失败）、`0<ramp_step<=100`、`0<=fan_duty_base<=100`、`dewpoint_margin>=0`、`temp_valid_min<max`、`current_valid_max>0` |
 
 编译 0 错 0 警。
+
+---
+
+## 2026-10-10 — NVRAM 双槽存储：掉电安全的 A/B 交替写（S1 修复）
+
+### 背景
+
+v6 的 `NvParams_Save()` 单块顺序擦写 2 页（erase p0 → erase p1 → program p0 → program p1），中途任何掉电都留下"半个新块 + 半个旧块"的撕裂块，上电 CRC 失败 → 全部参数回默认，标定丢失。这就是安全审查确认的 S1。
+
+### 实现（NVM_VERSION 6 → 7，v7 双槽布局）
+
+| 项 | 内容 |
+|---|---|
+| 布局 | slot A = `0x0800F000`、slot B = `0x0800F100`，各 256B（2 页），共占预留 4KB 的前 512B |
+| 块头 | 加 `seq` 字段：`[magic][version][seq][crc][params]`（140B ≤ 256B），每次 Save 单调 +1 |
+| Init | 双 slot 各自校验 magic/version/CRC → 都有效取 seq 大者 / 单有效用它 / 都无效回默认并立即 Save（写 slot A） |
+| Save | 写**非 active** slot → 读回校验（含 seq）→ 通过后翻转 active。即使翻转前掉电，上电按 seq 取新块，Save 仍生效 |
+| 加固 | `Save()` 里两处 `while(BUSY)` 忙等补 `NVM_FLASH_TIMEOUT` 超时（此前 erase/program 前的 BUSY 等待无超时）；所有 FLASH 失败路径补 `LL_FLASH_Lock()` |
+
+**掉电安全论证**：写 target 期间掉电 → target 撕裂但 active 完整（恢复旧参数）；program 完成后翻转前掉电 → 上电 seq 判新采用新块（本次 Save 生效）。任何时刻至少一个 CRC 有效块。
+
+### 验证
+
+- `test/nv_dualslot_sim.py`（新增）：Python 复刻 v7 布局与 Init/Save 语义（CRC 用 zlib，`"123456789"→0xCBF43926` 对齐），枚举 Save 的全部 6 个掉电点 × 4 类场景（稳态 slot0/slot1、空白首次、双槽全损、torn-write 垃圾）+ 200 轮交替随机掉电长跑，**230 项断言全部通过**——任何掉电点后恢复值 ∈ {上一个好块, 本次新块}，绝无 defaults 意外回退或垃圾。
+- 全量 Core/SRC 编译 0 错 0 警（`-Wall -Wextra` + `TRES_AES_ENABLE=1`）。
+- `nv_params.h` 头注释同步：修正遗留的"single 128-byte page"/`0x40..0xAB` 旧描述为双槽布局 + `0x40..0xC3` 窗口。
+
+### 遗留
+
+- CRC 仍只覆盖 `params[]`（S3）：magic/version/seq 有独立比较兜底，位翻转走安全降级；扩 CRC 到 header 需两段 CRC 改造，收益有限，暂不做。
+- 擦写耗时翻倍（4 页 vs 2 页），SAVE_PARAMS 的关中断窗口相应变长——soft-I2C/调度器在 Save 期间被推迟属已知代价。

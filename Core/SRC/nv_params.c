@@ -35,9 +35,10 @@
 /* Config                                                                      */
 /*============================================================================*/
 #define NVM_BASE        (0x0800F000UL)  /**< last flash sector, page-aligned  */
-#define NVM_MAGIC       (0x4E564433u)   /**< 'NVD3' - NVM layout v3: two pages  */
-#define NVM_VERSION     (6u)
-#define NVM_PAGES       (2u)            /**< 2 x 128B pages (256B store)       */
+#define NVM_MAGIC       (0x4E564433u)   /**< 'NVD3'                            */
+#define NVM_VERSION     (7u)            /**< v7: dual-slot power-fail layout  */
+#define NVM_PAGES       (2u)            /**< 2 x 128B pages (256B per slot)   */
+#define NVM_SLOTS       (2u)            /**< A/B slots; Save flips between them*/
 
 #define NVM_OK          (0)
 #define NVM_ERR_PARAM   (-1)
@@ -65,14 +66,20 @@ static const uint32_t s_flash_timing[ 5 ] = {
 
 #define NVM_BLOCK_SIZE  (128u * NVM_PAGES)   /**< 256B store = 2 flash pages    */
 
+/* Slot base addresses: slot i starts at NVM_BASE + i * NVM_BLOCK_SIZE. The
+ * A/B pair occupies 512 B inside the reserved 4 KB NVM sector. */
+#define NVM_SLOT_ADDR( i )  ( NVM_BASE + ( (uint32_t)( i ) * NVM_BLOCK_SIZE ) )
+
 /*============================================================================*/
-/* On-flash block layout (two consecutive 128-byte flash pages). The union     */
-/* makes the reserved pad follow NVM_PARAM_COUNT automatically, so             */
-/* adding a parameter never needs manual byte bookkeeping.                     */
+/* On-flash block layout (two consecutive 128-byte flash pages per slot). The  */
+/* union makes the reserved pad follow NVM_PARAM_COUNT automatically, so       */
+/* adding a parameter never needs manual byte bookkeeping. seq grows on every  */
+/* Save so Init() can tell which slot holds the newest good block.             */
 /*============================================================================*/
 typedef struct {
     uint32_t magic;
     uint32_t version;
+    uint32_t seq;                       /**< write generation (monotonic)      */
     uint32_t crc;                       /**< CRC-32 over params[]             */
     uint32_t params[ NVM_PARAM_COUNT ];
 } Nvm_Block_Data_t;
@@ -90,6 +97,9 @@ _Static_assert( sizeof( Nvm_Block_t ) == NVM_BLOCK_SIZE,
 /* RAM cache + defaults                                                        */
 /*============================================================================*/
 static uint32_t s_cache[ NVM_PARAM_COUNT ];
+static uint32_t s_active_slot;      /**< slot holding the newest good block  */
+static uint32_t s_active_seq;       /**< its seq (next Save writes seq+1)    */
+static uint8_t  s_active_valid;     /**< 0 until a good block was seen/written*/
 
 /* Production defaults for every TEC slot (index order = NvParamTecId_t).
  * These match the previous tunable macros in tec_control.h/adc.h. The unit
@@ -194,18 +204,41 @@ static void nv_flash_timing_config( void )
 /*============================================================================*/
 void NvParams_Init( void )
 {
-    const Nvm_Block_t *stored = (const Nvm_Block_t *)NVM_BASE;
+    static const Nvm_Block_t * const slot[ NVM_SLOTS ] = {
+        (const Nvm_Block_t *)NVM_SLOT_ADDR( 0 ),
+        (const Nvm_Block_t *)NVM_SLOT_ADDR( 1 ),
+    };
+    uint8_t valid[ NVM_SLOTS ];
+    uint32_t i;
 
-    if ( ( stored->data.magic == NVM_MAGIC ) &&
-         ( stored->data.version == NVM_VERSION ) &&
-         ( stored->data.crc == nv_crc32( (const uint8_t *)stored->data.params,
-                                        sizeof( stored->data.params ) ) ) ) {
-        memcpy( s_cache, stored->data.params, sizeof( s_cache ) );
+    for ( i = 0u ; i < NVM_SLOTS ; ++i ) {
+        valid[ i ] = ( ( slot[ i ]->data.magic == NVM_MAGIC ) &&
+                       ( slot[ i ]->data.version == NVM_VERSION ) &&
+                       ( slot[ i ]->data.crc == nv_crc32( (const uint8_t *)slot[ i ]->data.params,
+                                                          sizeof( slot[ i ]->data.params ) ) ) ) ? 1u : 0u;
+    }
+
+    /* Newest good block wins: with both slots valid the higher seq is the
+     * last completed Save (a Save that was interrupted mid-write leaves its
+     * target slot CRC-invalid, so the previous slot still wins). */
+    if ( valid[ 0 ] != 0u && valid[ 1 ] != 0u ) {
+        s_active_slot = ( slot[ 1 ]->data.seq > slot[ 0 ]->data.seq ) ? 1u : 0u;
+    } else if ( valid[ 1 ] != 0u ) {
+        s_active_slot = 1u;
+    } else {
+        s_active_slot = 0u;
+    }
+    s_active_valid = valid[ s_active_slot ];
+
+    if ( s_active_valid != 0u ) {
+        s_active_seq = slot[ s_active_slot ]->data.seq;
+        memcpy( s_cache, slot[ s_active_slot ]->data.params, sizeof( s_cache ) );
     } else {
         nv_load_defaults();
-        /* First boot / corrupted block: persist the defaults immediately so
-         * the store is valid (and the defaults are no longer "unwritten") on
-         * every later power-up. */
+        s_active_seq = 0u;
+        /* First boot / both slots unusable: persist the defaults immediately
+         * so the store is valid (and no longer "unwritten") on every later
+         * power-up. Save() targets the (invalid) active slot, i.e. slot 0. */
         (void)NvParams_Save();
     }
 }
@@ -232,12 +265,25 @@ int NvParams_Save( void )
                                            pad bytes must be deterministic */
     uint32_t primask;
     uint32_t timeout;
+    uint32_t target_slot;
+    uint32_t page;
+    uint32_t slot_base;
 
     block.data.magic   = NVM_MAGIC;
     block.data.version = NVM_VERSION;
+    block.data.seq     = s_active_seq + 1u;
     memcpy( block.data.params, s_cache, sizeof( s_cache ) );
     block.data.crc     = nv_crc32( (const uint8_t *)block.data.params,
                                    sizeof( block.data.params ) );
+
+    /* Dual-slot power-fail strategy: always write the slot that does NOT
+     * hold the newest good block. A reset mid-write only damages that
+     * target slot; the previous slot stays CRC-valid, so Init() recovers
+     * the old parameters. Only after the read-back verify passes does the
+     * active slot flip - and even a reset before the flip is harmless,
+     * because Init() picks by seq, not by the RAM flag. */
+    target_slot = ( s_active_valid != 0u ) ? ( 1u - s_active_slot ) : s_active_slot;
+    slot_base   = NVM_SLOT_ADDR( target_slot );
 
     primask = __get_PRIMASK();
     __disable_irq();
@@ -254,13 +300,18 @@ int NvParams_Save( void )
     nv_flash_timing_config();
 
     /*--- page erase (official LL sequence), NVM_PAGES pages -----------------*/
-    for ( uint32_t page = 0u ; page < NVM_PAGES ; ++page ) {
+    for ( page = 0u ; page < NVM_PAGES ; ++page ) {
+        timeout = NVM_FLASH_TIMEOUT;
         while ( LL_FLASH_IsActiveFlag_BUSY( FLASH ) != 0u ) {
-            /* wait Busy = 0 */
+            if ( timeout-- == 0u ) {
+                LL_FLASH_Lock( FLASH );
+                __set_PRIMASK( primask );
+                return NVM_ERR_FLASH;
+            }
         }
         FLASH->SR = ( FLASH_SR_EOP | FLASH_SR_WRPERR );   /* clear status    */
         LL_FLASH_EnablePageErase( FLASH );
-        LL_FLASH_SetEraseAddress( FLASH, NVM_BASE + page * 128u ); /* erase   */
+        LL_FLASH_SetEraseAddress( FLASH, slot_base + page * 128u ); /* erase */
         timeout = NVM_FLASH_TIMEOUT;
         while ( LL_FLASH_IsActiveFlag_BUSY( FLASH ) != 0u ) {
             if ( timeout-- == 0u ) {
@@ -278,15 +329,20 @@ int NvParams_Save( void )
     }
 
     /*--- page program (official LL sequence), NVM_PAGES pages ----------------*/
-    for ( uint32_t page = 0u ; page < NVM_PAGES ; ++page ) {
+    for ( page = 0u ; page < NVM_PAGES ; ++page ) {
         uint8_t *src = (uint8_t *)&block + page * 128u;
 
+        timeout = NVM_FLASH_TIMEOUT;
         while ( LL_FLASH_IsActiveFlag_BUSY( FLASH ) != 0u ) {
-            /* wait Busy = 0 */
+            if ( timeout-- == 0u ) {
+                LL_FLASH_Lock( FLASH );
+                __set_PRIMASK( primask );
+                return NVM_ERR_FLASH;
+            }
         }
         FLASH->SR = ( FLASH_SR_EOP | FLASH_SR_WRPERR );
         LL_FLASH_EnablePageProgram( FLASH );
-        LL_FLASH_PageProgram( FLASH, NVM_BASE + page * 128u, (uint32_t *)src );
+        LL_FLASH_PageProgram( FLASH, slot_base + page * 128u, (uint32_t *)src );
         timeout = NVM_FLASH_TIMEOUT;
         while ( LL_FLASH_IsActiveFlag_BUSY( FLASH ) != 0u ) {
             if ( timeout-- == 0u ) {
@@ -307,17 +363,23 @@ int NvParams_Save( void )
     LL_FLASH_Lock( FLASH );
     __set_PRIMASK( primask );
 
-    /*--- read-back verification: catch silent erase/program failure --------*/
+    /*--- read-back verification of the slot just written ---------------------*/
     {
-        const Nvm_Block_t *written = (const Nvm_Block_t *)NVM_BASE;
+        const Nvm_Block_t *written = (const Nvm_Block_t *)slot_base;
         if ( ( written->data.magic != block.data.magic ) ||
              ( written->data.version != block.data.version ) ||
+             ( written->data.seq != block.data.seq ) ||
              ( written->data.crc  != block.data.crc  ) ||
              ( memcmp( written->data.params, block.data.params,
                        sizeof( block.data.params ) ) != 0 ) ) {
             return NVM_ERR_FLASH;
         }
     }
+
+    /* Verified: flip the active slot only now. */
+    s_active_slot  = target_slot;
+    s_active_seq   = block.data.seq;
+    s_active_valid = 1u;
     return NVM_OK;
 }
 

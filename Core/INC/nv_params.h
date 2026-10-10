@@ -3,12 +3,15 @@
  * @brief Non-volatile parameter storage over the internal FLASH.
  *
  * A fixed-size table of uint32 parameters is kept in a RAM cache and
- * persisted to the last FLASH sector on demand. The on-flash block is a
- * single 128-byte page. Layout: [ magic ][ version ][ crc32 ][ params[] ];
- * the block is packed into exactly one flash page by a union in nv_params.c,
- * so the reserved pad is derived by the compiler, not hand-written.
+ * persisted to the last FLASH sector on demand. The store is dual-slot:
+ * two identical 256-byte blocks (each two 128-byte flash pages) at
+ * 0x0800F000 (slot A) and 0x0800F100 (slot B). Layout per slot:
+ * [ magic ][ version ][ seq ][ crc32 ][ params[] ]; the block is packed
+ * by a union in nv_params.c, so the reserved pad is derived by the
+ * compiler, not hand-written.
  *
- *   Base: 0x0800F000 (last sector of the 64 KB device, page-aligned).
+ *   Base: 0x0800F000 (last sector of the 64 KB device, page-aligned);
+ *   the A/B pair uses the first 512 B of the reserved 4 KB sector.
  *
  * The layout is TEC-specific: every tunable controller/sensor parameter has
  * a named slot (NvParamTecId_t). Float gains are stored as Q16 fixed point
@@ -23,9 +26,14 @@
  * on-flash layout changes (the sentinel/union handles the size, not the
  * version).
  *
- * Write strategy is single-block rewrite: NvParams_Save() erases the one page
- * and programms the whole block again. Endurance is ~10k erase cycles on PY32,
- * which is fine for parameters that are written rarely (calibration, config).
+ * Write strategy is alternating dual-slot: NvParams_Save() erases and
+ * programs the slot that does NOT hold the newest good block, verifies the
+ * programmed image by read-back, and only then flips the active slot
+ * (Init() also picks by seq, so a reset before the flip is harmless). A
+ * power failure mid-Save therefore always leaves one CRC-valid block -
+ * either the previous or the new parameters - instead of a torn store.
+ * Endurance is ~10k erase cycles per page on PY32, doubled by the A/B
+ * alternation; fine for parameters that are written rarely.
  *
  * Usage:
  *   NvParams_Init();                    // once, at power-up (loads or defaults)
@@ -33,7 +41,7 @@
  *   NvParams_Save();                    // persist the RAM cache to FLASH
  *
  * The I2C slave exposes every slot as a 4-byte big-endian window at
- * 0x40..0xAB (tres_i2c_slave.h), plus SAVE_PARAMS / DEFAULT_PARAMS commands.
+ * 0x40..0xC3 (tres_i2c_slave.h), plus SAVE_PARAMS / DEFAULT_PARAMS commands.
  */
 #ifndef __NV_PARAMS_H__
 #define __NV_PARAMS_H__
@@ -109,9 +117,10 @@ typedef enum {
 } NvParamTecId_t;
 
 /**
- * @brief Load the parameter cache from FLASH at power-up. Validates the magic,
- *        version and CRC of the stored block; on any mismatch fills the cache
- *        with the firmware defaults and persists them to FLASH immediately
+ * @brief Load the parameter cache from FLASH at power-up. Validates both
+ *        slots (magic, version, CRC) and takes the newest good one (higher
+ *        seq); if neither slot holds a valid block, fills the cache with
+ *        the firmware defaults and persists them to FLASH immediately
  *        (so the store is valid on every later power-up).
  */
 void  NvParams_Init(void);
@@ -132,8 +141,11 @@ uint32_t NvParams_Get(uint8_t id);
 void NvParams_Set(uint8_t id, uint32_t val);
 
 /**
- * @brief Persist the RAM cache to FLASH: erase the parameter page and program
- *        the whole block (with recomputed CRC). Blocking, and disables IRQs
+ * @brief Persist the RAM cache to FLASH: erase and program the slot that
+ *        does NOT hold the newest good block (with recomputed CRC and a
+ *        monotonically increasing seq), verify the programmed image by
+ *        read-back, then flip the active slot. A power failure mid-Save
+ *        leaves the previous slot intact. Blocking, and disables IRQs
  *        around the flash access.
  * @return 0 on success, or a negative error code on failure.
  */
