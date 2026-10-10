@@ -228,6 +228,7 @@ void Studio_ADC1_Init(void)
 uint16_t Studio_ADC1_ReadChannel(uint32_t channel)
 {
   uint16_t value = 0U;
+  uint32_t timeout = 1000000U;   /* ~ms at 32 MHz; abort if EOC never arrives */
 
   /* Clear all channels */
   WRITE_REG(ADC1->CHSELR, 0U);
@@ -239,7 +240,13 @@ uint16_t Studio_ADC1_ReadChannel(uint32_t channel)
 
   LL_ADC_REG_StartConversion(ADC1);
   while (LL_ADC_IsActiveFlag_EOC(ADC1) == 0U) {
-    /* wait for end of conversion */
+    if ( timeout-- == 0U ) {
+      /* Conversion never completed (clock/peripheral fault). Return 0: the
+       * hot/cold NTC paths then read as sensor faults and the TEC loop
+       * drives to a safe state instead of blocking forever. */
+      WRITE_REG(ADC1->CHSELR, 0U);
+      return 0U;
+    }
   }
   LL_ADC_ClearFlag_EOC(ADC1);
   value = LL_ADC_REG_ReadConversionData12(ADC1);
