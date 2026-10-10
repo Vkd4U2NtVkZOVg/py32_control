@@ -99,6 +99,18 @@ static void tec_params_load( Tec_Params_t *p )
     p->dewpoint_margin_millic = (int32_t)NvParams_Get( NV_TEC_DEWPOINT_MARGIN_MILLIC );
     p->ff_gain                = (float)NvParams_Get( NV_TEC_FF_GAIN_Q16 ) / NVM_Q16_SCALE;
 
+    /* Sanity-check the DAC FB-injection window: tec_dac_set() computes
+     * span = dac_max - dac_min and multiplies duty*span, so a corrupt
+     * window (host-written NVRAM or a FLASH bit flip) where min >= max
+     * would wrap span to ~2^32 and make the DAC output an arbitrary
+     * voltage. Fall back to the factory defaults on any violation. */
+    if ( ( p->dac_min_ctrl_mv < 0 ) || ( p->dac_max_ctrl_mv < 0 ) ||
+         ( p->dac_min_ctrl_mv > (int32_t)MCP4725_VDD_MV ) ||
+         ( p->dac_max_ctrl_mv > (int32_t)MCP4725_VDD_MV ) ||
+         ( p->dac_min_ctrl_mv >= p->dac_max_ctrl_mv ) ) {
+        p->dac_min_ctrl_mv = 0;
+        p->dac_max_ctrl_mv = 1200;   /* NVRAM factory default (NV_TEC_DAC_MAX_CTRL_MV) */
+    }
 }
 
 /*============================================================================*/
