@@ -129,15 +129,15 @@ int main(void)
   /* Initialize all configured peripherals */
   Studio_GPIO_Init();
   Studio_I2C1_Init();
+  NvParams_Init();          /* load non-volatile parameters (FLASH, no write) */
   SoftI2C_Init();
-  MCP4725_Init();               /* DAC out to 0 V: no TEC current until control takes over */
+  MCP4725_Init();               /* DAC out to 0V: TEC current only by control task */
   Studio_ADC1_Init();
   Studio_USART2_Init();
   USART2_DMA_Start();       /* USART2 (PA0/PA1) DMA RX via DMA1_Channel1 */
   Studio_TIM3_Init();
   Fan_Init();
   Studio_USART1_Init();
-  NvParams_Init();          /* load non-volatile parameters (FLASH, no write) */
   /* USER CODE BEGIN 2 */
   /* Enable the 1 kHz SysTick tick + critical sections (QPort_Setup); the
      scheduler needs this time base live before qOS_Setup is called. */

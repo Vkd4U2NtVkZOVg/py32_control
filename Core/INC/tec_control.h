@@ -2,15 +2,19 @@
  * @file tec_control.h
  * @brief TEC control task (QuarkTS periodic task).
  *
- * Multi-source temperature fusion + PID control + feedforward + fault protection.
+ * Cold-side temperature control + feedforward + fault protection.
  * The TEC current command (0..100 %) is emitted through the MCP4725 DAC into the
  * power-stage control window; the heatsink fan is decoupled and follows the
  * hot-side temperature instead:
- *   - Temperature fusion: hot*0.5 + sdm845*0.3 + env*0.2
- *   - Dynamic target: base + env compensation - SoC compensation
- *   - PID main loop: TecPid_Update() with fused temperature
+ *   - Controlled variable: COLD side (sdm_mc) - PID feedback + dew-point guard
+ *   - Hot side: protection only (danger shutdown, warning, fan ramp) - never
+ *     enters the PID error
+ *   - Ambient (env_mc): target compensation + common-mode feedforward
+ *   - Dynamic target: base + env compensation - SoC compensation (cold-side)
+ *   - PID main loop: TecPid_Update() with the cold-side temperature
  *   - Feedforward: TEC current > threshold adds duty proportional to current
- *   - Fault protection: overtemp full-speed/shutdown, overcurrent feedforward, fan fault alarm
+ *   - Fault protection: overtemp full-speed/shutdown, overcurrent feedforward,
+ *     fan fault alarm, dew-point hard cut + independent condensation floor
  *
  * All tunable parameters (PID gains, targets, thresholds, DAC window, fan ramp,
  * sensor scale) live in NVRAM (nv_params.h) and are snapshotted at
@@ -45,6 +49,10 @@ extern "C" {
 #define TEC_ALARM_OVERCURRENT       0x04  /* TEC current > danger, FF +50%     */
 #define TEC_ALARM_FAN_FAULT         0x08  /* fan RPM < min with duty > min     */
 #define TEC_ALARM_THERMAL_WAIT      0x10  /* ambient precheck: TEC held off    */
+#define TEC_ALARM_DEWPOINT          0x20  /* cold side < dew point + margin,
+                                             TEC drive cut to avoid condensation */
+#define TEC_ALARM_DAC_FAULT         0x40  /* MCP4725 write failed: commanded duty
+                                             not applied (mis-actuation)        */
 #define TEC_ALARM_SENSOR            0x80  /* temperature/current source invalid:
                                              NTC open/short, ADC timeout - TEC
                                              driven to a safe state               */
@@ -55,12 +63,11 @@ extern "C" {
  * Snapshots the NVRAM parameter table (nv_params.h), then creates a QuarkTS
  * periodic task (period from NVRAM, default 1 s, qLowest_Priority) that:
  *   1. Reads all temperature/current getters
- *   2. Fuses temperatures (weighted average)
- *   3. Computes dynamic target temperature
- *   4. Runs PID control
+ *   2. Computes the dynamic target temperature (cold side)
+ *   3. Checks fault conditions (dew point, overtemp, overcurrent, thermal gate)
+ *   4. Runs PID control on the cold side
  *   5. Adds feedforward compensation
- *   6. Checks fault conditions
- *   7. Outputs TEC duty to the MCP4725 DAC; fan duty from hot-side temperature
+ *   6. Outputs TEC duty to the MCP4725 DAC; fan duty from hot-side temperature
  *
  * Call after Fan_Task_Init(), AHT20_Task_Init() and MCP4725_Init().
  */

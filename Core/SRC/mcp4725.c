@@ -15,7 +15,9 @@ static MCP4725_Status_t mcp_status(SoftI2C_Status_t status)
 
 MCP4725_Status_t MCP4725_Init(void)
 {
-    return MCP4725_SetCode(0U);
+    /* Power-on default is 0 V: no TEC current until the TEC control task
+     * explicitly commands it (startup anchor from NVRAM + ramp). */
+    return MCP4725_SetVoltage_mV(0U);
 }
 
 MCP4725_Status_t MCP4725_SetCode(uint16_t code)
