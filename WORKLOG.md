@@ -2380,3 +2380,24 @@ python3 tres_i2c_probe.py --bus 3 --auth
 
 - 全库 grep 确认无残留两参调用。
 - CLI 语法编译 `mcp4725.c` + `tec_control.c`：项目代码 0 错 0 警（仅既有供应商头文件 unused-parameter 噪音）。
+
+---
+
+## 2026-10-10 — 取消 NVRAM 参数 `NV_TEC_DAC_VREF_MV`（DAC 满量程基准已固定 3.3 V）
+
+### 工作内容（背景与目标）
+
+上一条把 `MCP4725_SetVoltage_mV` 的满量程基准固定为宏 `MCP4725_VDD_MV (3300U)` 后，NVRAM 里对应的 `NV_TEC_DAC_VREF_MV` 槽成了死配置（照常读写、无人消费）。本次把它整体移除。
+
+### 设计关键点与实现方式
+
+- **删枚举行 + 删默认值**：`nv_params.h` 移除 `NV_TEC_DAC_VREF_MV`（原槽 10），`nv_params.c` 移除 `= 3300u` 默认值；`tec_control.c` 删掉 `Tec_Params_t.dac_vref_mv` 字段及其读取行。
+- **升 `NVM_VERSION` 3 → 4**：删槽改变了后续所有参数的槽位（各 -1，I2C 地址整体左移），按 nv_params.h 既定规则"layout change 必须升版本"处理——设备下次上电版本校验失败会按固件默认值重建参数区。
+- **槽数 28 → 27**：NVRAM 窗口收窄为 `0x40..0xAB`（自动派生），`tres_cmd.h`/`nv_params.h` 文档注释同步。
+- **探针脚本 `tres_i2c_probe.py`**：`NV_PARAMS` 表删 `DAC_VREF` 条目、帮助文本 28 槽/0x40..0xAF 改 27 槽/0x40..0xAB。该文件当前还带着 AES `--auth` 的未提交改动，本次提交未含探针脚本，改动留在工作区（与固件在树内保持一致，待 AES 工作一并提交）。
+
+### 验证
+
+- 全库 grep：无 `NV_TEC_DAC_VREF_MV` / `dac_vref` / `DAC_VREF` 代码残留。
+- CLI 语法编译 `nv_params.c` + `tec_control.c`：项目代码 0 错 0 警。
+- 探针 `py_compile` 通过，`NV_PARAMS` 计为 27 槽、无 DAC_VREF。

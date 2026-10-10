@@ -26,7 +26,7 @@ Registers:
   0x14 VERSION  0x02
   0x30-0x35 machine-state block: BOOTSTATE / BOOTRETRY / TECFLAGS /
                                  AHTSTAT / FANDUTY / TECDUTY
-  0x40-0xAF NVRAM parameter window: 28 slots x 4-byte big-endian values
+  0x40-0xAB NVRAM parameter window: 27 slots x 4-byte big-endian values
 
 Commands (0x00 <- [0xA5][cmdId][param]):
   1 RESET, 2 ENTER_DFU, 3 REPORT_FAIL, 4 SAVE_PARAMS, 5 DEFAULT_PARAMS
@@ -69,6 +69,16 @@ TRES_CMD_DEFAULT_PARAMS = 5
 TRES_REG_NV_BASE = 0x40
 TRES_REG_NV_LEN = 4
 NVM_Q16_SCALE = 65536.0   # Q16 fixed point: raw = round(value * 65536)
+
+# AES challenge-response authentication window (firmware: TRES_AES_ENABLE).
+#   0xB0..0xBF  CHALLENGE (W) 16 bytes big-endian
+#   0xC0..0xCF  RESPONSE (R)  AES-128-ECB(device_key, challenge)
+TRES_REG_CHAL_BASE = 0xB0
+TRES_REG_RESP_BASE = 0xC0
+TRES_AUTH_LEN = 16
+# Must match AES_DEVICE_KEY_BYTES in Core/INC/aes.h (same per-product key).
+AES_DEVICE_KEY = bytes.fromhex(
+    "2B7E151628AED2A6ABF7158809CF4F3C")
 NV_PARAMS = [
     ("PID_KP", "x1", 1 / 65536.0),
     ("PID_KI", "x1", 1 / 65536.0),
@@ -80,7 +90,6 @@ NV_PARAMS = [
     ("CUR_DANGER", "mA", 1),
     ("FAN_MIN_RPM", "RPM", 1),
     ("CONTROL_PERIOD", "ms", 1),
-    ("DAC_VREF", "mV", 1),
     ("DAC_MAX_CTRL", "mV", 1),
     ("FAN_TEMP_BASE", "mC", 1),
     ("FAN_TEMP_FULL", "mC", 1),
@@ -229,7 +238,7 @@ step:
   [2] status:   read the machine-state block 0x30..0x35
                 (SDM845 boot state, TEC alarms, AHT20 status, fan/TEC duty)
   [3] commands: CMD_REPORT_FAIL x2 and verify the RETRIES counter advances
-  [4] params:   dump the NVRAM parameter window 0x40..0xAF (28 slots x 4B)
+  [4] params:   dump the NVRAM parameter window 0x40..0xAB (27 slots x 4B)
   [5] action:   one of --reset / --dfu / --params / --set, or skipped
 
 Protocol (write): first byte selects the register pointer, following bytes
@@ -253,6 +262,11 @@ Modes (mutually exclusive, all off by default):
                SAVE_PARAMS (RAM -> FLASH), DEFAULT_PARAMS (reload firmware
                defaults), then restore the original value. Writes FLASH once
                per SAVE_PARAMS (page erase+program, ~10k cycles).
+  --auth       AES challenge-response anti-clone check: write 16 random
+               bytes to the CHALLENGE window (0xB0), read the RESPONSE
+               window (0xC0) and verify AES-128-ECB(device_key, challenge)
+               matches. Requires firmware built with TRES_AES_ENABLE=1 and
+               the host cryptography library (pip3 install cryptography).
 
 Commands (register 0x00 <- [0xA5][cmdId][param]):
   1 RESET          power-cycle pulse into normal boot (RUNNING/DFU_ACTIVE)
@@ -261,7 +275,7 @@ Commands (register 0x00 <- [0xA5][cmdId][param]):
   4 SAVE_PARAMS    persist the NVRAM RAM cache to FLASH
   5 DEFAULT_PARAMS reload firmware defaults into the NVRAM RAM cache
 
-NVRAM parameter window (0x40..0xAF, 4-byte big-endian per slot):
+NVRAM parameter window (0x40..0xAB, 4-byte big-endian per slot):
   slot n lives at 0x40 + 4*n; the 4th byte written commits the value into
   the RAM cache. Persist with SAVE_PARAMS. --set accepts any of these names
   (case-insensitive); Q16 gain slots display as raw/65536:
@@ -295,6 +309,7 @@ Examples:
   python3 tres_i2c_probe.py --bus 3 --reset              # reset SDM845 (gated)
   python3 tres_i2c_probe.py --bus 3 --dfu                # boot DFU (gated)
   python3 tres_i2c_probe.py --bus 3 --params             # NVRAM SAVE round-trip
+  python3 tres_i2c_probe.py --bus 3 --auth               # AES anti-clone check
 
 Exit status:
   0  all exercised steps passed
@@ -326,6 +341,11 @@ Prerequisites:
                            "slot name from the list below (case-insensitive, "
                            "e.g. TARGET_BASE) or a slot number 0..27; VALUE "
                            "is decimal or hex. Persist with --save.")
+    mode.add_argument("--auth", action="store_true",
+                      help="AES challenge-response: write 16 random bytes to "
+                           "the CHALLENGE window, read RESPONSE back, and "
+                           "verify AES-128-ECB(device_key, challenge) matches "
+                           "(requires firmware built with TRES_AES_ENABLE=1)")
     ap.add_argument("--save", action="store_true",
                     help="with --set: also send SAVE_PARAMS to persist the "
                          "slot to FLASH (page erase+program)")
@@ -468,6 +488,31 @@ Prerequisites:
         else:
             print("    RAM cache only - send --save to persist to FLASH "
                   "(or CMD_SAVE_PARAMS manually)")
+    elif args.auth:
+        # AES challenge-response: write 16 random bytes to CHALLENGE, read
+        # RESPONSE, verify AES-128-ECB(device_key, challenge) matches.
+        from cryptography.hazmat.primitives.ciphers import (
+            Cipher, algorithms, modes)
+        from cryptography.hazmat.backends import default_backend
+        import secrets
+
+        chal = secrets.token_bytes(TRES_AUTH_LEN)
+        print("[5] AES challenge-response: write 16 B to 0x{:02X}, "
+              "read from 0x{:02X}".format(TRES_REG_CHAL_BASE, TRES_REG_RESP_BASE))
+        t.bus.write_i2c_block_data(t.addr, TRES_REG_CHAL_BASE, list(chal))
+        resp = t.read_reg(TRES_REG_RESP_BASE, TRES_AUTH_LEN)
+
+        enc = Cipher(algorithms.AES(AES_DEVICE_KEY), modes.ECB(),
+                     backend=default_backend()).encryptor()
+        expect = enc.update(chal) + enc.finalize()
+        print("    challenge: {}".format(chal.hex().upper()))
+        print("    response : {}".format(bytes(resp).hex().upper()))
+        print("    expected : {}".format(expect.hex().upper()))
+        if bytes(resp) != expect:
+            sys.exit("    FAIL: response does not match AES(device_key, "
+                     "challenge) - wrong key, or firmware without "
+                     "TRES_AES_ENABLE")
+        print("    OK: device authenticated (AES-128-ECB matches)")
     elif args.reset or args.dfu:
         cmd = TRES_CMD_RESET if args.reset else TRES_CMD_ENTER_DFU
         state = status & 0x0F

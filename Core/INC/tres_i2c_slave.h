@@ -84,6 +84,19 @@ extern "C" {
 #define TRES_REG_NV_LEN     4u
 #define TRES_REG_NV_END     ( TRES_REG_NV_BASE + TRES_REG_NV_LEN * NVM_PARAM_COUNT )
 
+/* AES challenge-response authentication window (only when TRES_AES_ENABLE).
+ *   0xB0..0xBF  CHALLENGE (W) 16 bytes big-endian, assembled like the SDM845
+ *                              temp window; the 16th byte commits it.
+ *   0xC0..0xCF  RESPONSE (R)  16 bytes big-endian: AES-128-ECB(device_key,
+ *                              challenge), recomputed live on every read.
+ * The windows are only present in the register file when the feature is
+ * compiled in; with TRES_AES_ENABLE=0 these addresses read back 0 and
+ * writes are ignored, exactly like any other reserved address. */
+#define TRES_REG_CHAL_BASE   0xB0u
+#define TRES_REG_CHAL_LEN    16u
+#define TRES_REG_RESP_BASE   0xC0u
+#define TRES_REG_RESP_LEN    16u
+
 /* Exported functions --------------------------------------------------------*/
 /** Enable I2C1 slave interrupts (call after TRES_Cmd_Init). */
 void TRES_I2C_Slave_Init(void);

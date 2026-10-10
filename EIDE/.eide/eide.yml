@@ -47,6 +47,7 @@ virtualFolder:
                 - path: ../Core/SRC/tres_cmd.c
                 - path: ../Core/SRC/tres_i2c_slave.c
                 - path: ../Core/SRC/aht20_task.c
+                - path: ../Core/SRC/aes.c
               folders: []
     - name: Drivers
       files: []
@@ -99,6 +100,7 @@ targets:
         - PY32F030x8
         - USE_FULL_LL_DRIVER
         - HSE_VALUE=16000000U
+        - TRES_AES_ENABLE=1
       incList:
         - .
         - ../Core/INC

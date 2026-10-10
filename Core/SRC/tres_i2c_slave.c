@@ -19,6 +19,9 @@
 #include "aht20_task.h"
 #include "fan.h"
 #include "nv_params.h"
+#if ( TRES_AES_ENABLE == 1 )
+#include "aes.h"
+#endif
 
 /* Private define ------------------------------------------------------------*/
 #define CMD_WRITE_LEN   3u      /* [magic][cmd][param]                        */
@@ -42,6 +45,13 @@ static volatile uint8_t  s_temp_valid;
  * s_nvBuf indexed by their offset within the slot; the 4th byte commits the
  * assembled value into the NVRAM RAM cache. */
 static uint8_t  s_nvBuf[ TRES_REG_NV_LEN ];
+
+#if ( TRES_AES_ENABLE == 1 )
+/* AES challenge window staging (TRES_REG_CHAL_BASE, 16 bytes big-endian).
+ * Bytes accumulate in s_chalBuf; the 16th byte commits the challenge, and
+ * the response is recomputed live on every RESPONSE read (no stale copy). */
+static uint8_t  s_chalBuf[ TRES_REG_CHAL_LEN ];
+#endif
 
 /* Private function prototypes -----------------------------------------------*/
 static uint8_t Reg_Read(uint8_t addr);
@@ -86,6 +96,22 @@ static uint8_t Reg_Read(uint8_t addr)
         uint8_t  byte  = (uint8_t)( off % TRES_REG_NV_LEN );
         return (uint8_t)( NvParams_Get( slot ) >> ( 24u - 8u * byte ) );
     }
+
+#if ( TRES_AES_ENABLE == 1 )
+    /* AES response window (0xC0..0xCF): AES-128-ECB(device_key, challenge),
+     * computed live per byte so a fresh challenge always yields a fresh
+     * response. Reading before any challenge write returns the AES of an
+     * all-zero block (deterministic, but meaningless to the host). */
+    if ( ( addr >= TRES_REG_RESP_BASE ) &&
+         ( addr < ( TRES_REG_RESP_BASE + TRES_REG_RESP_LEN ) ) ) {
+        static const uint8_t s_key[ 16 ] = AES_DEVICE_KEY_BYTES;
+        uint8_t resp[ 16 ];
+        uint32_t off = (uint32_t)( addr - TRES_REG_RESP_BASE );
+
+        Aes128_Encrypt( s_key, s_chalBuf, resp );
+        return resp[ off ];
+    }
+#endif
 
     return 0u;   /* CMD is write-only          */
 }
@@ -208,6 +234,18 @@ void I2C1_IRQHandler(void)
                 }
                 /* auto-advance the register pointer for a burst write */
                 s_regPtr++;
+#if ( TRES_AES_ENABLE == 1 )
+            } else if ( ( s_regPtr >= TRES_REG_CHAL_BASE ) &&
+                        ( s_regPtr < ( TRES_REG_CHAL_BASE + TRES_REG_CHAL_LEN ) ) ) {
+                /* AES challenge window: 16 bytes big-endian. Bytes land in
+                 * s_chalBuf; the 16th commits (response is computed live on
+                 * the RESPONSE read, so no explicit "commit" action needed). */
+                uint32_t off = (uint32_t)( s_regPtr - TRES_REG_CHAL_BASE );
+
+                s_chalBuf[ off ] = b;
+                /* auto-advance the register pointer for a burst write */
+                s_regPtr++;
+#endif
             }
             /* writes to read-only registers are ignored                      */
         }
