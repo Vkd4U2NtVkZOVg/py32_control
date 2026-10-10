@@ -8,6 +8,9 @@ Exercises the PY32F030 TRES register file (tres_i2c_slave.c) end to end:
      (this path runs: I2C1 ISR -> mailbox -> parser task -> counter)
   3. optionally (--reset / --dfu) issue a real power command, which
      pulses the SDM845 reset line - off by default.
+  4. optionally (--params) exercise NVRAM persistence: write a probe value
+     into one slot, SAVE_PARAMS (RAM -> FLASH), DEFAULT_PARAMS (reload
+     firmware defaults) and restore the original value - off by default.
 
 Protocol (tres_i2c_slave.h):
   write: [regPtr] [data ...]      first byte selects the register pointer,
@@ -23,6 +26,10 @@ Registers:
   0x14 VERSION  0x02
   0x30-0x35 machine-state block: BOOTSTATE / BOOTRETRY / TECFLAGS /
                                  AHTSTAT / FANDUTY / TECDUTY
+  0x40-0xAF NVRAM parameter window: 28 slots x 4-byte big-endian values
+
+Commands (0x00 <- [0xA5][cmdId][param]):
+  1 RESET, 2 ENTER_DFU, 3 REPORT_FAIL, 4 SAVE_PARAMS, 5 DEFAULT_PARAMS
 
 States (STATUS bit[3:0], TRES_State_t):
   0 PWR_UP, 1 BOOT_WAIT_NORMAL, 2 RUNNING, 3 PULSE_RESET_NORMAL,
@@ -30,6 +37,7 @@ States (STATUS bit[3:0], TRES_State_t):
 
 Usage:
   python3 tres_i2c_probe.py [--bus N] [--addr 0x50] [--reset] [--dfu]
+                            [--params]
 """
 
 import argparse
@@ -54,6 +62,78 @@ TRES_CMD_MAGIC = 0xA5
 TRES_CMD_RESET = 1
 TRES_CMD_ENTER_DFU = 2
 TRES_CMD_REPORT_FAIL = 3
+TRES_CMD_SAVE_PARAMS = 4
+TRES_CMD_DEFAULT_PARAMS = 5
+
+# NVRAM parameter window: slot index -> (name, unit, scale-for-display)
+TRES_REG_NV_BASE = 0x40
+TRES_REG_NV_LEN = 4
+NVM_Q16_SCALE = 65536.0   # Q16 fixed point: raw = round(value * 65536)
+NV_PARAMS = [
+    ("PID_KP", "x1", 1 / 65536.0),
+    ("PID_KI", "x1", 1 / 65536.0),
+    ("PID_KD", "x1", 1 / 65536.0),
+    ("TARGET_BASE", "mC", 1),
+    ("HOT_OVERTEMP", "mC", 1),
+    ("HOT_DANGER", "mC", 1),
+    ("CUR_FEEDFORWARD", "mA", 1),
+    ("CUR_DANGER", "mA", 1),
+    ("FAN_MIN_RPM", "RPM", 1),
+    ("CONTROL_PERIOD", "ms", 1),
+    ("DAC_VREF", "mV", 1),
+    ("DAC_MAX_CTRL", "mV", 1),
+    ("FAN_TEMP_BASE", "mC", 1),
+    ("FAN_TEMP_FULL", "mC", 1),
+    ("FAN_DUTY_BASE", "%", 1),
+    ("CUR_SHUNT", "uOhm", 1),
+    ("CUR_AMP_GAIN", "x1", 1),
+    ("CUR_DIV_NUM", "x1", 1),
+    ("CUR_DIV_DEN", "x1", 1),
+    ("CUR_ADC_VREF", "mV", 1),
+    ("TEMP_VALID_MIN", "mC", 1),
+    ("TEMP_VALID_MAX", "mC", 1),
+    ("CUR_VALID_MAX", "mA", 1),
+    ("FAN_FAULT_MIN_DUTY", "%", 1),
+    ("ENV_COMP_TEMP", "mC", 1),
+    ("SOC_TIGHTEN_TEMP", "mC", 1),
+    ("SOC_TIGHTEN_DELTA", "mC", 1),
+    ("COLD_SOURCE", "-", 1),   # 0 = TEC_COLD ADC (PA4), 1 = SDM845
+]
+
+# Slot name -> index, case-insensitive (e.g. "target_base", "TARGET_BASE").
+NV_SLOT_BY_NAME = {name.lower(): i for i, (name, _, _) in enumerate(NV_PARAMS)}
+
+def nv_slot_index(s):
+    """Resolve a --set slot argument to an index: name (case-insensitive) or
+    a decimal/hex number. Returns the index or -1 if unknown."""
+    key = s.strip().lower()
+    if key in NV_SLOT_BY_NAME:
+        return NV_SLOT_BY_NAME[key]
+    try:
+        i = int(s, 0)
+        if 0 <= i < len(NV_PARAMS):
+            return i
+    except ValueError:
+        pass
+    return -1
+
+
+def nv_value_to_raw(text, scale):
+    """Convert a --set VALUE string to the raw uint32 stored in the slot.
+
+    For Q16 slots (scale < 1, i.e. PID_KP/KI/KD): a decimal literal such as
+    "2.0" is treated as the float value and converted with
+    raw = round(value * 65536); a plain integer literal is taken as the raw
+    Q16 code already (e.g. "131072"). For all other slots the value is the
+    raw code itself (decimal or 0x-hex). Returns -1 on invalid input.
+    """
+    s = text.strip()
+    try:
+        if scale < 1 and ('.' in s or 'e' in s.lower()):
+            return int(round(float(s) * NVM_Q16_SCALE))
+        return int(s, 0)
+    except ValueError:
+        return -1
 
 TRES_ERR_NAMES = {0: "NONE", 1: "ILLEGAL", 2: "MAGIC"}
 TRES_STATE_NAMES = {
@@ -96,6 +176,19 @@ class Tres:
         self.bus.write_i2c_block_data(self.addr, TRES_REG_CMD,
                                       [magic, cmd, param])
 
+    def read_slot(self, slot):
+        """Read one NVRAM slot as a big-endian uint32."""
+        raw = self.read_reg(TRES_REG_NV_BASE + slot * TRES_REG_NV_LEN,
+                            TRES_REG_NV_LEN)
+        return int.from_bytes(raw, "big")
+
+    def write_slot(self, slot, value):
+        """Write one NVRAM slot (4 bytes big-endian, commits on byte 4)."""
+        self.bus.write_i2c_block_data(
+            self.addr, TRES_REG_NV_BASE + slot * TRES_REG_NV_LEN,
+            [(value >> 24) & 0xFF, (value >> 16) & 0xFF,
+             (value >> 8) & 0xFF, value & 0xFF])
+
     def status(self):
         return self.read_reg(TRES_REG_STATUS)[0]
 
@@ -125,20 +218,95 @@ def fmt_pins(v):
 
 
 def main():
-    epilog = """
-Examples:
-  python3 tres_i2c_probe.py --bus 3
-      Read the register file and verify REPORT_FAIL handling (safe).
-  python3 tres_i2c_probe.py --bus 3 --reset
-      Request a normal SDM845 reset. Only valid in RUNNING/DFU_ACTIVE.
-  python3 tres_i2c_probe.py --bus 3 --dfu
-      Request DFU boot. Only valid in RUNNING.
+    description = """\
+Probe the TRES I2C1 slave register file on the PY32F030 from Linux.
 
-Exit status is non-zero when the bus cannot be opened, VERSION is wrong,
-a command path fails, or a real command is rejected by the TRES policy.
+The tool talks to the TRES MCU over Linux I2C (smbus2) and exercises the
+slave end to end, in three read-only steps plus one optional destructive
+step:
+
+  [1] probe:    read 0x10..0x14 (STATUS/RETRIES/PINS/LASTERR/VERSION)
+  [2] status:   read the machine-state block 0x30..0x35
+                (SDM845 boot state, TEC alarms, AHT20 status, fan/TEC duty)
+  [3] commands: CMD_REPORT_FAIL x2 and verify the RETRIES counter advances
+  [4] params:   dump the NVRAM parameter window 0x40..0xAF (28 slots x 4B)
+  [5] action:   one of --reset / --dfu / --params / --set, or skipped
+
+Protocol (write): first byte selects the register pointer, following bytes
+are data (register pointer auto-advances for burst writes). A command is
+three bytes at register 0x00: [0xA5][cmdId][param].
+"""
+    epilog = """\
+Modes (mutually exclusive, all off by default):
+  (none)       read-only probe: [1]..[4], then [5] skipped.
+  --set NAME V write NVRAM slot NAME (case-insensitive, or slot number
+               0..27) with value V into the RAM cache, then read it back.
+               For the Q16 gain slots PID_KP/PID_KI/PID_KD a decimal value
+               is converted automatically (e.g. 2.0 -> raw 131072); a plain
+               integer is taken as the raw Q16 code. Add --save to also
+               persist to FLASH.
+  --reset      issue CMD_RESET (pulses the SDM845 reset line). Allowed only
+               in RUNNING or DFU_ACTIVE; rejected otherwise.
+  --dfu        issue CMD_ENTER_DFU (reboots into DFU/USB). Allowed only in
+               RUNNING; rejected otherwise.
+  --params     NVRAM persistence round-trip: flip SOC_TIGHTEN_TEMP by +1,
+               SAVE_PARAMS (RAM -> FLASH), DEFAULT_PARAMS (reload firmware
+               defaults), then restore the original value. Writes FLASH once
+               per SAVE_PARAMS (page erase+program, ~10k cycles).
+
+Commands (register 0x00 <- [0xA5][cmdId][param]):
+  1 RESET          power-cycle pulse into normal boot (RUNNING/DFU_ACTIVE)
+  2 ENTER_DFU      reset pulse with BOOT0=1, USB DFU (RUNNING)
+  3 REPORT_FAIL    count-only failure report (any state)
+  4 SAVE_PARAMS    persist the NVRAM RAM cache to FLASH
+  5 DEFAULT_PARAMS reload firmware defaults into the NVRAM RAM cache
+
+NVRAM parameter window (0x40..0xAF, 4-byte big-endian per slot):
+  slot n lives at 0x40 + 4*n; the 4th byte written commits the value into
+  the RAM cache. Persist with SAVE_PARAMS. --set accepts any of these names
+  (case-insensitive); Q16 gain slots display as raw/65536:
+
+    PID_KP / PID_KI / PID_KD          PID gains (Q16: --set accepts float
+                                       e.g. 2.0 -> raw 131072; displays raw/65536)
+    TARGET_BASE (mC)                  base TEC target
+    HOT_OVERTEMP / HOT_DANGER (mC)    fan full-speed / TEC-off thresholds
+    CUR_FEEDFORWARD / CUR_DANGER (mA) current feedforward knee / overcurrent alarm
+    FAN_MIN_RPM (RPM)                 fan fault threshold
+    CONTROL_PERIOD (ms)               control task period
+    DAC_VREF / DAC_MAX_CTRL (mV)      DAC reference / control-window top
+    FAN_TEMP_BASE / FAN_TEMP_FULL (mC) fan ramp start / full-speed hot temp
+    FAN_DUTY_BASE (%)                 base airflow while TEC active
+    CUR_SHUNT (uOhm) / CUR_AMP_GAIN (x1)
+    CUR_DIV_NUM / CUR_DIV_DEN (x1)    current-sense divider
+    CUR_ADC_VREF (mV)                 ADC reference for the sense chain
+    TEMP_VALID_MIN / TEMP_VALID_MAX (mC)  temperature plausibility window
+    CUR_VALID_MAX (mA)                current plausibility window
+    FAN_FAULT_MIN_DUTY (%)            fan fault needs duty above this
+    ENV_COMP_TEMP (mC)                ambient above this raises the target
+    SOC_TIGHTEN_TEMP / SOC_TIGHTEN_DELTA (mC)  SoC compensation
+    COLD_SOURCE (-)                   cold-side source: 0=TEC_COLD ADC, 1=SDM845
+
+Examples:
+  python3 tres_i2c_probe.py --bus 3                      # safe read-only probe
+  python3 tres_i2c_probe.py --bus 3 --set TARGET_BASE 45000   # RAM only
+  python3 tres_i2c_probe.py --bus 3 --set COLD_SOURCE 1 --save  # SDM845, FLASH
+  python3 tres_i2c_probe.py --bus 3 --set PID_KP 2.0 --save       # KP=2.0 (auto Q16)
+  python3 tres_i2c_probe.py --bus 3 --set PID_KI 0.1 --save       # KI=0.1 (auto Q16)
+  python3 tres_i2c_probe.py --bus 3 --reset              # reset SDM845 (gated)
+  python3 tres_i2c_probe.py --bus 3 --dfu                # boot DFU (gated)
+  python3 tres_i2c_probe.py --bus 3 --params             # NVRAM SAVE round-trip
+
+Exit status:
+  0  all exercised steps passed
+  1  cannot open the I2C bus, VERSION mismatch, or a step failed
+  2  a real command was rejected by the TRES policy (illegal in state)
+
+Prerequisites:
+  smbus2 (pip3 install smbus2) and /dev/i2c-<bus> readable by the user.
+  The slave must be powered and the VERSION register must read 0x02.
 """
     ap = argparse.ArgumentParser(
-        description="Probe the TRES I2C1 slave register file from Linux.",
+        description=description,
         epilog=epilog,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--bus", type=int, default=3, metavar="N",
@@ -150,7 +318,27 @@ a command path fails, or a real command is rejected by the TRES policy.
                       help="issue CMD_RESET (pulses SDM845 reset; policy-gated)")
     mode.add_argument("--dfu", action="store_true",
                       help="issue CMD_ENTER_DFU (boots DFU/USB; policy-gated)")
+    mode.add_argument("--params", action="store_true",
+                      help="exercise NVRAM SAVE_PARAMS / DEFAULT_PARAMS "
+                           "(writes FLASH; restores the slot afterwards)")
+    mode.add_argument("--set", nargs=2, metavar=("NAME", "VALUE"),
+                      help="write one NVRAM slot into the RAM cache. NAME is a "
+                           "slot name from the list below (case-insensitive, "
+                           "e.g. TARGET_BASE) or a slot number 0..27; VALUE "
+                           "is decimal or hex. Persist with --save.")
+    ap.add_argument("--save", action="store_true",
+                    help="with --set: also send SAVE_PARAMS to persist the "
+                         "slot to FLASH (page erase+program)")
     args = ap.parse_args()
+    if args.save and args.set is None:
+        sys.exit("--save requires --set SLOT VALUE")
+    if args.set is not None:
+        slot = nv_slot_index(args.set[0])
+        if slot < 0:
+            sys.exit("unknown slot {!r}: use a name from --help "
+                     "(e.g. TARGET_BASE) or a number 0..{}".format(
+                         args.set[0], len(NV_PARAMS) - 1))
+        args.set_slot = slot   # pre-validated, reused in step [5]
     addr = int(args.addr, 0)
 
     try:
@@ -194,7 +382,93 @@ a command path fails, or a real command is rejected by the TRES policy.
         sys.exit("    FAIL: counter did not advance; "
                  "check STATUS bit7/LASTERR")
 
-    if args.reset or args.dfu:
+    print("[4] NVRAM parameter window: read 0x40..0x{:02X}".format(
+        TRES_REG_NV_BASE + TRES_REG_NV_LEN * len(NV_PARAMS) - 1))
+    raw = t.read_reg(TRES_REG_NV_BASE, TRES_REG_NV_LEN * len(NV_PARAMS))
+    for i, (name, unit, scale) in enumerate(NV_PARAMS):
+        val = int.from_bytes(raw[i * 4:(i + 1) * 4], "big")
+        disp = (val / scale) if scale < 1 else val
+        print("    [{:2}] {:<16} = {:<12} {}".format(
+            i, name, int(disp) if scale >= 1 else disp, unit))
+    print("    (Q16 slots PID_KP/KI/KD are stored as int(raw)/65536)")
+
+    if args.params:
+        # NVRAM persistence round-trip: pick a slot that is safe to disturb,
+        # write a probe value, SAVE_PARAMS (RAM -> FLASH), read back, then
+        # DEFAULT_PARAMS (reload firmware defaults) and restore the original.
+        # Uses slot 25 (SOC_TIGHTEN_TEMP, default 70000) and flips it to +1.
+        slot = 25
+        name, unit, _scale = NV_PARAMS[slot]
+        print("[5] NVRAM persistence: slot {} ({}) via SAVE/DEFAULT_PARAMS".
+              format(slot, name))
+        orig = t.read_slot(slot)
+        probe = orig + 1 if orig != 0 else 1
+        print("    original {} = {}".format(name, orig))
+
+        t.write_slot(slot, probe)
+        t.write_cmd(TRES_CMD_MAGIC, TRES_CMD_SAVE_PARAMS)
+        time.sleep(0.2)   # parser task persists RAM -> FLASH
+        saved = t.read_slot(slot)
+        print("    after SAVE_PARAMS: {} = {} (probe {})".format(
+            name, saved, probe))
+        if saved != probe:
+            sys.exit("    FAIL: SAVE_PARAMS did not persist the value")
+
+        t.write_cmd(TRES_CMD_MAGIC, TRES_CMD_DEFAULT_PARAMS)
+        time.sleep(0.2)   # parser task reloads firmware defaults into RAM
+        defaulted = t.read_slot(slot)
+        print("    after DEFAULT_PARAMS: {} = {}".format(name, defaulted))
+        if defaulted == probe:
+            sys.exit("    FAIL: DEFAULT_PARAMS did not reload defaults")
+
+        # restore the original value and persist it, leaving FLASH untouched
+        t.write_slot(slot, orig)
+        t.write_cmd(TRES_CMD_MAGIC, TRES_CMD_SAVE_PARAMS)
+        time.sleep(0.2)
+        restored = t.read_slot(slot)
+        print("    restored {} = {}".format(name, restored))
+        if restored != orig:
+            sys.exit("    FAIL: could not restore original slot value")
+
+        print("    OK: SAVE_PARAMS and DEFAULT_PARAMS both work")
+    elif args.set:
+        slot = args.set_slot
+        name, unit, scale = NV_PARAMS[slot]
+        value = nv_value_to_raw(args.set[1], scale)
+        if value < 0:
+            sys.exit("    FAIL: value {!r} is not a valid number for {}".format(
+                args.set[1], name))
+        if not (0 <= value <= 0xFFFFFFFF):
+            sys.exit("    FAIL: raw value {} out of range (0..0xFFFFFFFF)".format(
+                value))
+        # display: Q16 slots show the float equivalent alongside the raw code
+        if scale < 1:
+            print("[5] set {} = {} (Q16 raw {:#x}){}".format(
+                name, value / scale, value, " " + unit))
+        else:
+            print("[5] set {} = {} ({:#x}){}".format(
+                name, value, value, " " + unit))
+
+        t.write_slot(slot, value)
+        readback = t.read_slot(slot)
+        if readback != value:
+            sys.exit("    FAIL: write did not land in the RAM cache "
+                     "(read {} != {})".format(readback, value))
+        if scale < 1:
+            print("    written to RAM cache, read back {} "
+                  "(= {})".format(readback, readback / scale))
+        else:
+            print("    written to RAM cache, read back {} ({:#x})".format(
+                readback, readback))
+
+        if args.save:
+            t.write_cmd(TRES_CMD_MAGIC, TRES_CMD_SAVE_PARAMS)
+            time.sleep(0.2)
+            print("    SAVE_PARAMS sent - {} persisted to FLASH".format(name))
+        else:
+            print("    RAM cache only - send --save to persist to FLASH "
+                  "(or CMD_SAVE_PARAMS manually)")
+    elif args.reset or args.dfu:
         cmd = TRES_CMD_RESET if args.reset else TRES_CMD_ENTER_DFU
         state = status & 0x0F
         allowed = ((cmd == TRES_CMD_ENTER_DFU and state == 2) or
@@ -209,7 +483,7 @@ a command path fails, or a real command is rejected by the TRES policy.
             sys.exit(2)
 
         err_before = t.read_reg(TRES_REG_LASTERR)[0]
-        print("[4] real command 0x{:02X} -> then watch STATUS".format(cmd))
+        print("[5] real command 0x{:02X} -> then watch STATUS".format(cmd))
         t.write_cmd(TRES_CMD_MAGIC, cmd)
         last_status = status
         for _ in range(10):
@@ -230,8 +504,8 @@ a command path fails, or a real command is rejected by the TRES policy.
                   file=sys.stderr)
             sys.exit(2)
     else:
-        print("[4] skipped real power commands "
-              "(pass --reset / --dfu to exercise them)")
+        print("[5] skipped real power / NVRAM commands "
+              "(pass --reset / --dfu / --params to exercise them)")
 
     print("OK")
 
