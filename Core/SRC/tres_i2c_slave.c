@@ -98,10 +98,10 @@ static uint8_t Reg_Read(uint8_t addr)
     }
 
 #if ( TRES_AES_ENABLE == 1 )
-    /* AES response window (0xC0..0xCF): AES-128-ECB(device_key, challenge),
-     * computed live per byte so a fresh challenge always yields a fresh
-     * response. Reading before any challenge write returns the AES of an
-     * all-zero block (deterministic, but meaningless to the host). */
+    /* AES response window (TRES_REG_RESP_BASE..+15): AES-128-ECB(device_key,
+     * challenge), computed live per byte so a fresh challenge always yields
+     * a fresh response. Reading before any challenge write returns the AES
+     * of an all-zero block (deterministic, but meaningless to the host). */
     if ( ( addr >= TRES_REG_RESP_BASE ) &&
          ( addr < ( TRES_REG_RESP_BASE + TRES_REG_RESP_LEN ) ) ) {
         static const uint8_t s_key[ 16 ] = AES_DEVICE_KEY_BYTES;

@@ -33,12 +33,12 @@
  *   0x33 AHTSTAT   R  last AHT20 driver result code (0 OK, negative = error)
  *   0x34 FANDUTY   R  last fan duty commanded by any writer, percent
  *   0x35 TECDUTY   R  last TEC current command to the DAC, percent
- *   0x40..0xAF    RW  NVRAM parameter window: one 4-byte big-endian value per
+ *   0x40..0xC3    RW  NVRAM parameter window: one 4-byte big-endian value per
  *                     slot. Slot n of NvParamTecId_t (nv_params.h) lives at
  *                     0x40 + 4*n. Values are 32-bit big-endian; writing the
  *                     4th byte commits the value into the NVRAM RAM cache.
  *                     Persist with the SAVE_PARAMS command.
- *                     (0x40 + 4*28 = 0xB0, so the window is 0x40..0xAF.)
+ *                     (33 slots: 0x40 + 4*32 = 0xC0, so window 0x40..0xC3.)
  ******************************************************************************
  */
 #ifndef __TRES_I2C_SLAVE_H__
@@ -79,22 +79,23 @@ extern "C" {
 /* NVRAM parameter window: slot n (NvParamTecId_t) at 0x40 + 4*n, 4 bytes
  * big-endian. Reading any byte of a slot returns that byte; writing the 4th
  * byte commits the assembled value into the NVRAM RAM cache. The window is
- * 4 * NVM_PARAM_COUNT bytes, i.e. 0x40..0xAF. */
+ * 4 * NVM_PARAM_COUNT bytes. */
 #define TRES_REG_NV_BASE    0x40u
 #define TRES_REG_NV_LEN     4u
 #define TRES_REG_NV_END     ( TRES_REG_NV_BASE + TRES_REG_NV_LEN * NVM_PARAM_COUNT )
 
 /* AES challenge-response authentication window (only when TRES_AES_ENABLE).
- *   0xB0..0xBF  CHALLENGE (W) 16 bytes big-endian, assembled like the SDM845
+ *   0xD0..0xDF  CHALLENGE (W) 16 bytes big-endian, assembled like the SDM845
  *                              temp window; the 16th byte commits it.
- *   0xC0..0xCF  RESPONSE (R)  16 bytes big-endian: AES-128-ECB(device_key,
+ *   0xE0..0xEF  RESPONSE (R)  16 bytes big-endian: AES-128-ECB(device_key,
  *                              challenge), recomputed live on every read.
- * The windows are only present in the register file when the feature is
- * compiled in; with TRES_AES_ENABLE=0 these addresses read back 0 and
- * writes are ignored, exactly like any other reserved address. */
-#define TRES_REG_CHAL_BASE   0xB0u
+ * Placed above the NVRAM parameter window (0x40..0xC3 with 33 slots) so the
+ * two never overlap. The windows are only present in the register file when
+ * the feature is compiled in; with TRES_AES_ENABLE=0 these addresses read
+ * back 0 and writes are ignored, exactly like any other reserved address. */
+#define TRES_REG_CHAL_BASE   0xD0u
 #define TRES_REG_CHAL_LEN    16u
-#define TRES_REG_RESP_BASE   0xC0u
+#define TRES_REG_RESP_BASE   0xE0u
 #define TRES_REG_RESP_LEN    16u
 
 /* Exported functions --------------------------------------------------------*/

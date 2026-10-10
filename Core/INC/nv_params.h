@@ -58,9 +58,13 @@ extern "C" {
  *        NVM_VERSION instead on a layout change.
  */
 typedef enum {
-    NV_TEC_PID_KP_Q16 = 0u,            /**< PID proportional gain (Q16)         */
-    NV_TEC_PID_KI_Q16,                 /**< PID integral gain (Q16)             */
-    NV_TEC_PID_KD_Q16,                 /**< PID derivative gain (Q16)           */
+    NV_TEC_PID_KP_Q16 = 0u,            /**< PID P gain (Q16): %out per m°C      */
+    NV_TEC_PID_KI_Q16,                 /**< PID I gain (Q16): %out per m°C per
+                                            SECOND (scaled by loop period_s
+                                            inside TecPid_Init)                  */
+    NV_TEC_PID_KD_Q16,                 /**< PID D gain (Q16): %out per m°C per
+                                            SECOND (scaled by loop period_s
+                                            inside TecPid_Init)                  */
     NV_TEC_TARGET_BASE_MILLIC,         /**< base TEC target, milli-degC         */
     NV_TEC_HOT_OVERTEMP_MILLIC,        /**< hot > this: fan full speed (m°C)    */
     NV_TEC_HOT_DANGER_MILLIC,          /**< hot > this: TEC off + fan 100 (m°C) */
@@ -86,6 +90,19 @@ typedef enum {
     NV_TEC_SOC_TIGHTEN_DELTA_MILLIC,   /**< by how much it tightens (m°C)       */
     NV_TEC_COLD_SOURCE,                /**< cold-side temperature source select:
                                             0 = TEC_COLD ADC (PA4), 1 = SDM845   */
+    NV_TEC_DAC_STARTUP_PCT,            /**< first-enable startup point as % of
+                                            the calibrated full scale (0..100):
+                                            duty starts at this % of full cooling
+                                            and ramps to target. Default 60 (%).
+                                            See R3 / endpoint calibration in
+                                            WORKLOG "FB 注入标定".                */
+    NV_TEC_DAC_MIN_CTRL_MV,             /**< FB-injection window bottom: DAC mV
+                                            where FB sits at VFBTH (0.76 V), i.e.
+                                            max TEC voltage / no injection      */
+    NV_TEC_RAMP_STEP_PERCENT,          /**< max duty % change per control cycle*/
+    NV_TEC_DEWPOINT_MARGIN_MILLIC,     /**< target floor: dew point + this     */
+    NV_TEC_FF_GAIN_Q16,                /**< COMMON-MODE feedforward: % duty per
+                                            °C of (env - target) below knee    */
     NV_PARAM_COUNT_MARKER,             /**< sentinel: MUST stay last. NVM_PARAM_COUNT
                                             is derived from it, so adding a slot
                                             is just adding a line above.         */

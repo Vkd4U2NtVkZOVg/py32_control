@@ -35,8 +35,9 @@
 /* Config                                                                      */
 /*============================================================================*/
 #define NVM_BASE        (0x0800F000UL)  /**< last flash sector, page-aligned  */
-#define NVM_MAGIC       (0x4E564432u)   /**< 'NVD2' - non-volatile data v2     */
-#define NVM_VERSION     (4u)
+#define NVM_MAGIC       (0x4E564433u)   /**< 'NVD3' - NVM layout v3: two pages  */
+#define NVM_VERSION     (6u)
+#define NVM_PAGES       (2u)            /**< 2 x 128B pages (256B store)       */
 
 #define NVM_OK          (0)
 #define NVM_ERR_PARAM   (-1)
@@ -62,10 +63,12 @@ static const uint32_t s_flash_timing[ 5 ] = {
 /* Q16 fixed-point encoding for the float (PID gain) parameters. */
 #define NVM_Q16( x )    ( (uint32_t)( (x) * NVM_Q16_SCALE ) )
 
+#define NVM_BLOCK_SIZE  (128u * NVM_PAGES)   /**< 256B store = 2 flash pages    */
+
 /*============================================================================*/
-/* On-flash block layout (packed into exactly one 128-byte flash page). The   */
-/* union makes the reserved pad follow NVM_PARAM_COUNT automatically, so      */
-/* adding a parameter never needs manual byte bookkeeping.                    */
+/* On-flash block layout (two consecutive 128-byte flash pages). The union     */
+/* makes the reserved pad follow NVM_PARAM_COUNT automatically, so             */
+/* adding a parameter never needs manual byte bookkeeping.                     */
 /*============================================================================*/
 typedef struct {
     uint32_t magic;
@@ -76,10 +79,12 @@ typedef struct {
 
 typedef union {
     Nvm_Block_Data_t  data;             /**< magic+version+crc+params          */
-    uint8_t           page[ 128u ];     /**< whole flash page image            */
+    uint8_t           page[ NVM_BLOCK_SIZE ];
 } Nvm_Block_t;
-_Static_assert( sizeof( Nvm_Block_Data_t ) <= 128, "Nvm_Block_Data_t must fit one flash page" );
-_Static_assert( sizeof( Nvm_Block_t ) == 128, "Nvm_Block_t must be one flash page" );
+_Static_assert( sizeof( Nvm_Block_Data_t ) <= NVM_BLOCK_SIZE,
+                "Nvm_Block_Data_t must fit the NVM flash pages" );
+_Static_assert( sizeof( Nvm_Block_t ) == NVM_BLOCK_SIZE,
+                "Nvm_Block_t must equal the NVM flash pages" );
 
 /*============================================================================*/
 /* RAM cache + defaults                                                        */
@@ -118,6 +123,22 @@ static const uint32_t s_defaults[ NVM_PARAM_COUNT ] = {
     [NV_TEC_SOC_TIGHTEN_TEMP_MILLIC]   = 70000u,
     [NV_TEC_SOC_TIGHTEN_DELTA_MILLIC]  = 5000u,
     [NV_TEC_COLD_SOURCE]               = 0u,   /* 0 = TEC_COLD ADC (PA4), 1 = SDM845 */
+    [NV_TEC_DAC_STARTUP_PCT]            = 60u,  /* first-enable: start at 60 % of
+                                                  full cooling (duty domain), not 0.
+                                                  The calibrated full-scale endpoints
+                                                  (DAC_MIN_CTRL_MV / measured DAC_MAX)
+                                                  map this % to an absolute DAC mV;
+                                                  the DCDC's 1 ms soft start builds
+                                                  0 -> anchor, the ramp trims the rest.
+                                                  Change over NVRAM/probe, no rebuild. */
+    [NV_TEC_DAC_MIN_CTRL_MV]           = 0u,   /* FB-injection window bottom: DAC mV
+                                                  where FB sits at VFBTH with no
+                                                  injection current (VOUT = divider
+                                                  natural set point). Calibrate with
+                                                  R3/R1/R2 per WORKLOG.             */
+    [NV_TEC_RAMP_STEP_PERCENT]         = 5u,   /* 5 % duty per 1 s cycle            */
+    [NV_TEC_DEWPOINT_MARGIN_MILLIC]    = 2000u,/* 2 °C above dew point             */
+    [NV_TEC_FF_GAIN_Q16]               = NVM_Q16( 1.0f ),  /* 1 % duty per °C      */
 };
 
 /*============================================================================*/
@@ -232,49 +253,55 @@ int NvParams_Save( void )
      * nv_flash_timing_config; selected at runtime, not tied to SYSCLK). */
     nv_flash_timing_config();
 
-    /*--- page erase (official LL sequence) ----------------------------------*/
-    while ( LL_FLASH_IsActiveFlag_BUSY( FLASH ) != 0u ) {
-        /* wait Busy = 0 */
-    }
-    FLASH->SR = ( FLASH_SR_EOP | FLASH_SR_WRPERR );   /* clear status        */
-    LL_FLASH_EnablePageErase( FLASH );
-    LL_FLASH_SetEraseAddress( FLASH, NVM_BASE );      /* start the erase      */
-    timeout = NVM_FLASH_TIMEOUT;
-    while ( LL_FLASH_IsActiveFlag_BUSY( FLASH ) != 0u ) {
-        if ( timeout-- == 0u ) {
+    /*--- page erase (official LL sequence), NVM_PAGES pages -----------------*/
+    for ( uint32_t page = 0u ; page < NVM_PAGES ; ++page ) {
+        while ( LL_FLASH_IsActiveFlag_BUSY( FLASH ) != 0u ) {
+            /* wait Busy = 0 */
+        }
+        FLASH->SR = ( FLASH_SR_EOP | FLASH_SR_WRPERR );   /* clear status    */
+        LL_FLASH_EnablePageErase( FLASH );
+        LL_FLASH_SetEraseAddress( FLASH, NVM_BASE + page * 128u ); /* erase   */
+        timeout = NVM_FLASH_TIMEOUT;
+        while ( LL_FLASH_IsActiveFlag_BUSY( FLASH ) != 0u ) {
+            if ( timeout-- == 0u ) {
+                LL_FLASH_DisablePageErase( FLASH );
+                __set_PRIMASK( primask );
+                return NVM_ERR_FLASH;
+            }
+        }
+        if ( LL_FLASH_IsActiveFlag_WRPERR( FLASH ) != 0u ) {
             LL_FLASH_DisablePageErase( FLASH );
             __set_PRIMASK( primask );
             return NVM_ERR_FLASH;
         }
-    }
-    if ( LL_FLASH_IsActiveFlag_WRPERR( FLASH ) != 0u ) {
         LL_FLASH_DisablePageErase( FLASH );
-        __set_PRIMASK( primask );
-        return NVM_ERR_FLASH;
     }
-    LL_FLASH_DisablePageErase( FLASH );
 
-    /*--- page program (official LL sequence) --------------------------------*/
-    while ( LL_FLASH_IsActiveFlag_BUSY( FLASH ) != 0u ) {
-        /* wait Busy = 0 */
-    }
-    FLASH->SR = ( FLASH_SR_EOP | FLASH_SR_WRPERR );
-    LL_FLASH_EnablePageProgram( FLASH );
-    LL_FLASH_PageProgram( FLASH, NVM_BASE, (uint32_t *)&block );
-    timeout = NVM_FLASH_TIMEOUT;
-    while ( LL_FLASH_IsActiveFlag_BUSY( FLASH ) != 0u ) {
-        if ( timeout-- == 0u ) {
+    /*--- page program (official LL sequence), NVM_PAGES pages ----------------*/
+    for ( uint32_t page = 0u ; page < NVM_PAGES ; ++page ) {
+        uint8_t *src = (uint8_t *)&block + page * 128u;
+
+        while ( LL_FLASH_IsActiveFlag_BUSY( FLASH ) != 0u ) {
+            /* wait Busy = 0 */
+        }
+        FLASH->SR = ( FLASH_SR_EOP | FLASH_SR_WRPERR );
+        LL_FLASH_EnablePageProgram( FLASH );
+        LL_FLASH_PageProgram( FLASH, NVM_BASE + page * 128u, (uint32_t *)src );
+        timeout = NVM_FLASH_TIMEOUT;
+        while ( LL_FLASH_IsActiveFlag_BUSY( FLASH ) != 0u ) {
+            if ( timeout-- == 0u ) {
+                LL_FLASH_DisablePageProgram( FLASH );
+                __set_PRIMASK( primask );
+                return NVM_ERR_FLASH;
+            }
+        }
+        if ( LL_FLASH_IsActiveFlag_WRPERR( FLASH ) != 0u ) {
             LL_FLASH_DisablePageProgram( FLASH );
             __set_PRIMASK( primask );
             return NVM_ERR_FLASH;
         }
-    }
-    if ( LL_FLASH_IsActiveFlag_WRPERR( FLASH ) != 0u ) {
         LL_FLASH_DisablePageProgram( FLASH );
-        __set_PRIMASK( primask );
-        return NVM_ERR_FLASH;
     }
-    LL_FLASH_DisablePageProgram( FLASH );
 
     /* Re-lock the flash interface. */
     LL_FLASH_Lock( FLASH );

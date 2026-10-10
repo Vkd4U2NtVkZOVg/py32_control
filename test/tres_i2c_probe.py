@@ -71,10 +71,11 @@ TRES_REG_NV_LEN = 4
 NVM_Q16_SCALE = 65536.0   # Q16 fixed point: raw = round(value * 65536)
 
 # AES challenge-response authentication window (firmware: TRES_AES_ENABLE).
-#   0xB0..0xBF  CHALLENGE (W) 16 bytes big-endian
-#   0xC0..0xCF  RESPONSE (R)  AES-128-ECB(device_key, challenge)
-TRES_REG_CHAL_BASE = 0xB0
-TRES_REG_RESP_BASE = 0xC0
+#   Placed above the NVRAM parameter window (0x40..0xC3 for 33 slots).
+#   0xD0..0xDF  CHALLENGE (W) 16 bytes big-endian
+#   0xE0..0xEF  RESPONSE (R)  AES-128-ECB(device_key, challenge)
+TRES_REG_CHAL_BASE = 0xD0
+TRES_REG_RESP_BASE = 0xE0
 TRES_AUTH_LEN = 16
 # Must match AES_DEVICE_KEY_BYTES in Core/INC/aes.h (same per-product key).
 AES_DEVICE_KEY = bytes.fromhex(
@@ -107,6 +108,11 @@ NV_PARAMS = [
     ("SOC_TIGHTEN_TEMP", "mC", 1),
     ("SOC_TIGHTEN_DELTA", "mC", 1),
     ("COLD_SOURCE", "-", 1),   # 0 = TEC_COLD ADC (PA4), 1 = SDM845
+    ("DAC_STARTUP", "%", 1),  # first-enable startup point, % of full scale
+    ("DAC_MIN_CTRL", "mV", 1), # FB-injection window bottom (FB=VFBTH point)
+    ("RAMP_STEP", "%", 1),     # max duty change per control cycle
+    ("DEWPOINT_MARGIN", "mC", 1),  # target floor = dew point + this
+    ("FF_GAIN", "x1", 1 / 65536.0),  # COMMON-MODE feedforward %/°C (Q16)
 ]
 
 # Slot name -> index, case-insensitive (e.g. "target_base", "TARGET_BASE").
@@ -162,6 +168,8 @@ TEC_FLAG_NAMES = (
     (0x04, "OVERCURRENT"),
     (0x08, "FAN_FAULT"),
     (0x10, "THERMAL_WAIT"),
+    (0x20, "DEWPOINT"),
+    (0x40, "DAC_FAULT"),
     (0x80, "SENSOR"),
 )
 
