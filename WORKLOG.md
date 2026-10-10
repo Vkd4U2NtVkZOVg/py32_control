@@ -41,49 +41,7 @@
 **（5）main.c 精简**
 移除调度前的同步测试 `Main_AHT20_DewPointTest`，改为在 TRES 之后注册 `AHT20_Task_Init()`。因为初始化已收进状态机，main 中不再需要调度前的 AHT20 初始化逻辑。
 
-### 核心流程（最终状态机，Mermaid）
 
-```mermaid
-stateDiagram-v2
-    direction TB
-
-    [*] --> PWUP_WAIT
-    PWUP_WAIT --> INIT : t_pwup (100 ms) — 上电稳定, 期间不访问传感器
-    INIT --> IDLE : t_init (30 ms) — 校准 settle, 一次性
-    IDLE --> MEAS_SEND : t_cycle (10 s)
-    MEAS_SEND --> ST_READ : t_conv (80 ms)
-    MEAS_SEND --> IDLE : StartMeasure 失败(总线错误)
-    ST_READ --> IDLE : 完成 / 失败
-
-    note right of PWUP_WAIT
-        entry: 仅等待, 不访问传感器
-        满足手册上电 >=100ms 要求
-        t_pwup 超时后让出
-    end note
-
-    note right of INIT
-        entry: AHT20_Init() 读状态字判 Bit[3]
-        未校准才下发 0xBE 校准命令
-        无忙等, 校准落地由 t_init 让出
-    end note
-
-    note right of IDLE
-        entry: 空闲, 10 s 周期计时
-        露点缓存保持上一周期值
-    end note
-
-    note right of MEAS_SEND
-        entry: AHT20_StartMeasure() 发 0xAC
-        t_conv 到后由 timeout 唤醒, 完全让出
-    end note
-
-    note right of ST_READ
-        entry: AHT20_ReadResult() 读7字节+CRC+换算
-        成功 → 算露点写 s_latest_dew_point
-        失败 → 记 last_status, 缓存保旧值
-        立即回 IDLE, 等下个 10 s
-    end note
-```
 
 ### 时间常量
 
@@ -141,29 +99,7 @@ QuarkTS 状态机引擎中，**进入状态的 entry 动作由 `qStateMachine_St
 - 全状态机所有 `h->NextState` 只出现在 `AHT20_TIMEOUT` 分支（经 `StateOnSignal`，迁移生效）；
 - 在 `aht20_task.c` 头部注释记下该坑，防止回归。
 
-### 修正后状态机（Mermaid）
 
-```mermaid
-stateDiagram-v2
-    direction TB
-
-    [*] --> PWUP_WAIT
-    PWUP_WAIT --> INIT : t_pwup (100 ms) — 上电稳定
-    INIT --> IDLE : t_init (30 ms) — 校准 settle, 一次性
-    IDLE --> MEAS_SEND : t_cycle (10 s)
-    MEAS_SEND --> IDLE : t_conv (80 ms) — 读取+算露点+缓存, 成败均回
-
-    note right of PWUP_WAIT
-        entry: 仅等待, 不访问传感器
-    end note
-    note right of INIT
-        entry: AHT20_Init() 读状态字判 Bit[3], 未校准才下发 0xBE
-    end note
-    note right of MEAS_SEND
-        entry: StartMeasure() 发 0xAC (不迁移)
-        t_conv 超时: 成功→读取+算露点+缓存, 失败→跳过读取; 均回 IDLE
-    end note
-```
 
 ### 验证
 
@@ -446,28 +382,7 @@ flowchart LR
 - `Core/SRC/tres_seq.c`：状态对象/回调/订阅/超时拆分；`st_Running` 的 `CMD_RESET→NORMAL`、`CMD_ENTER_DFU→DFU`；`st_DfuActive` 退出 DFU → `PULSE_RESET_NORMAL`（entry 负责清 BOOT0/USB）。
 - `tres_sequencer_state_diagram.md`：状态图、关键设计决策、状态-引脚矩阵、命令合法性矩阵、时间常量均已同步。
 
-### 更新后状态机（Mermaid）
 
-```mermaid
-stateDiagram-v2
-    direction TB
-    [*] --> PWR_UP
-    PWR_UP --> BOOT_WAIT_NORMAL : t_rail
-    BOOT_WAIT_NORMAL --> RUNNING : SOM_BOOTED 上升沿
-    BOOT_WAIT_NORMAL --> RUNNING : SOM_BOOTED 已高 / t_appboot
-    RUNNING --> PULSE_RESET_NORMAL : CMD_RESET
-    RUNNING --> PULSE_RESET_DFU    : CMD_ENTER_DFU
-    DFU_ACTIVE --> PULSE_RESET_NORMAL : CMD_RESET
-    PULSE_RESET_NORMAL --> BOOT_WAIT_NORMAL : t_rst
-    PULSE_RESET_DFU    --> BOOT_WAIT_DFU    : t_rst
-    BOOT_WAIT_DFU      --> DFU_ACTIVE       : t_enum
-    note right of PULSE_RESET_NORMAL
-        entry: BOOT0=0, VDD33USB=0, RST=0; 超时释放, 唯一去向 BOOT_WAIT_NORMAL
-    end note
-    note right of PULSE_RESET_DFU
-        entry: BOOT0=1, VDD33USB=1, RST=0; 超时释放, 唯一去向 BOOT_WAIT_DFU
-    end note
-```
 
 ### 验证
 
@@ -516,130 +431,6 @@ stateDiagram-v2
 - 全项目（代码/头文件）`TRES_ST_` 无残留；AHT20 现存状态 `ST_*` 无残留。
 - 枚举数值不变，主机接口兼容。
 - 待 PY32Studio/EIDE 编译烧录验证。
-
----
-
-## 2026-09-22 — 状态机状态图风格统一（`STATE_*` + 复合子状态）
-
-### 工作时间
-
-2026-09-22。
-
-### 变更内容
-
-将状态机的**可视化状态图**统一为「`STATE_*` 前缀 + 复合子状态（`state { ... }`）」风格。**仅修改文档图，不改动任何状态机代码逻辑**。
-
-- **AHT20 状态图**（`Core/SRC/aht20.mmd`）：按数据手册测量流程展开为 `STATE_*` + 复合子状态，见下图。
-- **TRES 时序层状态图**（`tres_sequencer_state_diagram.md`）：改为 `STATE_*` + 复合子状态风格，迁移逻辑不变（7 个 enum 状态对应 `STATE_*` 顶层状态）。
-
-### AHT20 状态图（Mermaid，示例风格）
-
-```mermaid
-stateDiagram-v2
-    [*] --> STATE_POWER_ON_WAIT : 上电启动
-    STATE_POWER_ON_WAIT --> STATE_CHECK_STATUS : 延时 >= 100ms
-
-    state STATE_CHECK_STATUS {
-        [*] --> Send_0x71
-        Send_0x71 --> Judge : 读取1字节状态字
-        Judge --> Need_Init : (状态字 & 0x18) != 0x18
-        Judge --> Normal : (状态字 & 0x18) == 0x18
-    }
-    STATE_CHECK_STATUS --> STATE_SPECIAL_INIT : 未通过(需初始化寄存器)
-    STATE_CHECK_STATUS --> STATE_PRE_TRIGGER : 已通过(状态正常)
-    STATE_SPECIAL_INIT --> STATE_PRE_TRIGGER : 寄存器初始化完成
-    STATE_PRE_TRIGGER --> STATE_TRIGGER : 延时 10ms
-
-    state STATE_TRIGGER {
-        [*] --> Send_AC
-        Send_AC --> [*] : 发送 0xAC 及其参数 0x33, 0x00
-    }
-    STATE_TRIGGER --> STATE_WAIT_MEASURE : 触发命令发送成功
-
-    state STATE_WAIT_MEASURE {
-        [*] --> Check_Busy
-        Check_Busy --> Check_Busy : 状态字 Bit[7] == 1 (忙)
-        Check_Busy --> Ready : 状态字 Bit[7] == 0 (闲)
-    }
-    STATE_WAIT_MEASURE --> STATE_READ_DATA : 测量完成 (>=80ms 且 Bit[7]=0)
-
-    state STATE_READ_DATA {
-        [*] --> Read_Bytes
-        Read_Bytes --> [*] : 读取6字节数据及可选CRC
-    }
-    STATE_READ_DATA --> STATE_PARSE : 读取成功
-
-    state STATE_PARSE {
-        [*] --> Calculate
-        Calculate --> [*] : 计算温湿度值
-    }
-    STATE_PARSE --> STATE_TRIGGER : 采样间隔延时到达 (周期 > 1秒)
-```
-
-### TRES 状态图（Mermaid，STATE_* + 复合风格）
-
-```mermaid
-stateDiagram-v2
-    direction TB
-    [*] --> STATE_POWER_ON
-    state STATE_POWER_ON {
-        [*] --> Rail_Up
-        Rail_Up --> [*] : t_rail, PWR_EN=1, BOOT0=0, USB=0
-    }
-    STATE_POWER_ON --> STATE_BOOT_WAIT_NORMAL : 主电源爬升完成
-
-    state STATE_BOOT_WAIT_NORMAL {
-        [*] --> Release_RST
-        Release_RST --> Check_SOM : 释放 RST, BOOT0=0 已采样
-        Check_SOM --> Check_SOM : SOM_BOOTED 未拉高(无超时, 一直等)
-        Check_SOM --> Booted : SOM_BOOTED 上升沿
-    }
-    STATE_BOOT_WAIT_NORMAL --> STATE_RUNNING : 启动链确认
-
-    state STATE_RUNNING {
-        [*] --> Idle
-        Idle --> Do_Reset : CMD_RESET
-        Idle --> Do_DFU : CMD_ENTER_DFU
-    }
-    STATE_RUNNING --> STATE_RESET_PULSE : CMD_RESET
-    STATE_RUNNING --> STATE_RESET_PULSE_DFU : CMD_ENTER_DFU
-
-    state STATE_RESET_PULSE {
-        [*] --> Assert
-        Assert --> [*] : BOOT0=0, USB=0, RST=0, t_rst 后释放
-    }
-    STATE_RESET_PULSE --> STATE_BOOT_WAIT_NORMAL : 复位完成
-
-    state STATE_RESET_PULSE_DFU {
-        [*] --> Assert
-        Assert --> [*] : BOOT0=1, USB=1, RST=0, t_rst 后释放
-    }
-    STATE_RESET_PULSE_DFU --> STATE_BOOT_WAIT_DFU : 复位完成
-
-    state STATE_BOOT_WAIT_DFU {
-        [*] --> Enumerate
-        Enumerate --> [*] : H7 进系统 DFU, 等 t_enum 枚举
-    }
-    STATE_BOOT_WAIT_DFU --> STATE_DFU_ACTIVE : USB 枚举完成
-
-    state STATE_DFU_ACTIVE {
-        [*] --> Wait_Dfu
-        Wait_Dfu --> [*] : 等 dfu-util, USB=1, CMD_RESET 后退出
-    }
-    STATE_DFU_ACTIVE --> STATE_RESET_PULSE : CMD_RESET(退出DFU, BOOT0=0, USB=0)
-```
-
-### 影响文件
-
-| 文件 | 改动 |
-|---|---|
-| `Core/SRC/aht20.mmd` | AHT20 状态图 → `STATE_*` + 复合子状态风格 |
-| `tres_sequencer_state_diagram.md` | TRES 时序层状态图 → `STATE_*` + 复合子状态风格 |
-| `WORKLOG.md` | 本节记录 |
-
-### 验证
-
-- 仅改文档图（`.mmd`、`.md`）；**未改任何 `.c`/`.h` 代码文件**，状态机逻辑无任何变动。
 
 ---
 
@@ -821,80 +612,7 @@ stateDiagram-v2
 
 本修订版针对初稿的 3 处逻辑缺陷做了修复（**无重试上限**、**释放按键依赖 exit**、**成功判据与超时纠缠**）；缺陷 4"成功即 `[*]` 一次性结束"为刻意设计，予以保留。
 
-### 修订后状态机（Mermaid）
 
-```mermaid
-stateDiagram-v2
-    direction TB
-
-    [*] --> THERMAL_PRECHECK
-    state "THERMAL\nPRECHECK" as THERMAL_PRECHECK
-    THERMAL_PRECHECK : entry / read AHT20 ambient, cooling=0
-    THERMAL_PRECHECK : do / poll every 1s
-    THERMAL_PRECHECK --> POWER_ON_WAIT : [ambient <= 70°C && !cooling]
-    THERMAL_PRECHECK --> POWER_ON_WAIT : [ambient <= 60°C && cooling]
-    THERMAL_PRECHECK --> POWER_ON_WAIT : [timeout 300s, fail open]
-    THERMAL_PRECHECK --> THERMAL_PRECHECK : [ambient > 70°C, fan 100%, cooling=1]
-
-    POWER_ON_WAIT : entry / release PWRKEY, release RST_KEY, retry=0
-    POWER_ON_WAIT --> BOOT_SUCCESS: if SOM_BOOTED == HIGH
-    POWER_ON_WAIT --> PWR_PRESS : [100 ms]
-
-    PWR_PRESS : entry / press PWRKEY, release RST_KEY
-    PWR_PRESS --> BOOT_CHECK : [hold 3 s]
-
-    state "STAGE 1\nBootloader" as BOOT_CHECK
-    BOOT_CHECK : entry / release both keys
-    BOOT_CHECK : do / match "Loader Build Info"
-    BOOT_CHECK --> STAGE2_WAIT : [stage1 matched]
-    BOOT_CHECK --> BOOT_RESET : [15 s timeout && retry < MAX]
-    BOOT_CHECK --> STRAP_FAIL : [15 s timeout && retry >= MAX]
-
-    state "STAGE2\nWait for login" as STAGE2_WAIT
-    STAGE2_WAIT : entry / keep both keys released
-    STAGE2_WAIT : do / match "login:" and wait idle >= 2 s
-    STAGE2_WAIT --> STAGE3_WAIT : [stage2 matched && idle >= 2 s]
-    %% STAGE2_WAIT --> BOOT_RESET : [60 s timeout && retry < MAX]
-    STAGE2_WAIT --> STRAP_FAIL : [60 s timeout && retry >= MAX]
-
-    state "STAGE3\nLogin account" as STAGE3_WAIT
-    STAGE3_WAIT : entry / usart2_SetLineMode(TX_RX)
-    STAGE3_WAIT : entry / usart2_send("user account\n")
-    STAGE3_WAIT : do / match "password:"
-    STAGE3_WAIT --> STAGE4_WAIT : [password prompt seen]
-    %% STAGE3_WAIT --> BOOT_RESET : [15 s timeout && retry < MAX]
-    STAGE3_WAIT --> STRAP_FAIL : [15 s timeout && retry >= MAX]
-
-    state "STAGE4\nPassword" as STAGE4_WAIT
-    STAGE4_WAIT : entry / usart2_send("password\n")
-    STAGE4_WAIT : do / match shell prompt "#"
-    STAGE4_WAIT --> STAGE5_WAIT : [prompt seen]
-    %% STAGE4_WAIT --> BOOT_RESET : [15 s timeout && retry < MAX]
-    STAGE4_WAIT --> STRAP_FAIL : [15 s timeout && retry >= MAX]
-
-    state "STAGE5\nCMD1 amixer" as STAGE5_WAIT
-    STAGE5_WAIT : entry / usart2_send("amixer set PCM 100%\n")
-    STAGE5_WAIT : do / match command echo
-    STAGE5_WAIT --> BOOT_SUCCESS : [echo seen]
-    %%STAGE5_WAIT --> BOOT_RESET : [15 s timeout && retry ]
-    STAGE5_WAIT --> STRAP_FAIL : [15 s timeout && retry >= MAX]
-
-    state "BOOT_SUCCESS" as BOOT_SUCCESS
-    BOOT_SUCCESS : entry / usart2_SetLineMode(RX_ONLY), stop FSM
-    BOOT_SUCCESS --> [*]
-
-    state "BOOT RESET " as BOOT_RESET
-    BOOT_RESET : entry / retry++, press PWRKEY + RST_KEY
-    BOOT_RESET --> PMIC_SETTLE : [hold 15 s]
-
-    state "PMIC_SETTLE" as PMIC_SETTLE
-    PMIC_SETTLE : entry / release PWRKEY + RST_KEY
-    PMIC_SETTLE --> PWR_PRESS : [settle 3 s]
-
-    state "BOOT_FAILED" as STRAP_FAIL
-    STRAP_FAIL : entry / release PWRKEY + RST_KEY
-    STRAP_FAIL : do / halt and wait for external recovery
-```
 
 ### 修复点
 
@@ -1527,176 +1245,184 @@ TEC（半导体制冷片）散热风扇需根据多个温度源动态调速，�
 flowchart TB
     subgraph ACQ["采集层（已就位 · 缓存 getter 单向通信）"]
         A1["AHT20 环境温湿度<br/>aht20_task 10s 周期"]
-        A2["NTC 热端/冷端<br/>ADC1 IN5/IN4"]
-        A3["TEC 电流<br/>ADC1 IN6 INA181A2"]
-        A4["风扇 RPM<br/>fan_task 2s 周期"]
-        A5["SDM845 SoC 温度<br/>I2C 0x20 host write"]
+        A2["NTC 热端<br/>ADC1 IN5 NTC3950"]
+        A3["冷端温度<br/>多源开关 NV_TEC_COLD_SOURCE:<br/>0=TEC_COLD NTC (PA4) / 1=SDM845"]
+        A4["TEC 电流<br/>ADC1 IN6 INA181A2"]
+        A5["风扇 RPM<br/>fan_task 2s 周期"]
     end
 
-    subgraph CTRL["控制层 tec_control.c · QuarkTS 周期任务 1s"]
+    subgraph CTRL["控制层 tec_control.c · QuarkTS 周期任务 (NVRAM 周期)"]
         C1["读 getter + 有效性窗口检查<br/>-20~120 °C"]
         C2["温度融合<br/>hot*0.5 + sdm*0.3 + env*0.2"]
-        C3["动态目标温度<br/>45°C + env补偿 − SoC补偿"]
-        C4["PID 主回路<br/>TecPid 方向反转"]
-        C5["电流前馈<br/>>2A 每10mA +1%"]
-        C6["故障保护<br/>优先级判定"]
-        C7["合并限幅<br/>0~100% duty"]
+        C3["动态目标温度<br/>base + env补偿 − SoC补偿"]
+        C4["故障保护 ①<br/>危险超温 → 关TEC+DAC0+风扇100<br/>热预检未过 → 关TEC+DAC0(不抢风扇)"]
+        C5["PID 主回路<br/>TecPid 方向反转(制冷语义)"]
+        C6["电流前馈<br/>cur>FF阈值 每10mA +1%<br/>cur>danger 额外+50%"]
+        C7["合并限幅<br/>0~100% duty, HOT_WARNING 强制100"]
+        C8["风扇斜坡<br/>hot 线性 ramp base→100%"]
     end
 
     subgraph ACT["执行层（已就位）"]
-        D1["Fan_SetDutyPercent<br/>TIM3_CH2 PWM 25kHz"]
-        D2["TEC_VEN PA12<br/>TEC 使能"]
+        D1["Fan_SetDutyPercent<br/>TIM3_CH2 PWM 25kHz<br/>跟随热端斜坡"]
+        D2["tec_dac_set / MCP4725<br/>TEC 电流命令 (0~100% duty)"]
+        D3["TEC_VEN PA12<br/>TEC 使能"]
     end
 
     A1 --> C1
     A2 --> C1
     A3 --> C1
-    A4 --> C6
-    A5 --> C1
-    C1 --> C2 --> C3 --> C4 --> C7
-    C1 --> C5 --> C7
-    C1 --> C6
-    C6 -.->|危险超温| D2
-    C6 --> C7
-    C7 --> D1
+    A4 --> C1
+    A5 --> C8
+    C1 --> C2 --> C3 --> C5 --> C7
+    C1 --> C4
+    C4 -->|危险/预检不过| D2
+    C4 -->|危险超温| D3
+    C1 --> C6 --> C7
+    C1 --> C8
+    C7 --> D2
+    C8 --> D1
+    C8 --> C7
 ```
 
 ### 控制任务数据流
 
 ```mermaid
 flowchart LR
-    A["读 getter"] --> B["有效性检查<br/>-20~120°C"]
-    B --> C["温度融合<br/>hot*0.5 + sdm*0.3 + env*0.2"]
-    C --> D["动态目标<br/>45°C + env补偿"]
-    D --> E["PID 计算<br/>TecPid_Update"]
-    E --> F["前馈补偿<br/>电流 >2A"]
-    F --> G["故障检测<br/>温度/电流/RPM"]
-    G --> H["合并限幅<br/>0~100%"]
-    H --> I["Fan_SetDutyPercent"]
+    A["读 getter<br/>hot / sdm(多源) / env / cur"] --> B["有效性检查<br/>-20~120°C 越界回退base"]
+    B --> C["故障保护<br/>危险超温/热预检未过 → 关TEC返回"]
+    C --> D["温度融合<br/>hot*0.5 + sdm*0.3 + env*0.2"]
+    D --> E["动态目标<br/>base + env补偿 − SoC补偿"]
+    E --> F["PID 计算<br/>TecPid_Update 方向反转"]
+    F --> G["前馈补偿<br/>cur>FF阈值 每10mA+1%<br/>cur>danger +50%"]
+    G --> H["合并限幅<br/>0~100%, HOT_WARNING强制100"]
+    H --> I["tec_dac_set → MCP4725<br/>TEC 电流命令"]
+    C -->|危险超温| J["风扇100% + TEC_VEN关 + DAC0"]
+
 ```
 
 ### 故障保护决策树
 
 ```mermaid
 flowchart TD
-    START["故障检测开始"] --> T1{"热端 >70°C?"}
-    T1 -->|是| A1["关闭 TEC_VEN<br/>风扇全速<br/>置 OVERTEMP"]
-    T1 -->|否| T2{"热端 >60°C?"}
-    T2 -->|是| A2["风扇全速<br/>置 HOT_WARNING"]
-    T2 -->|否| T3{"电流 >3A?"}
-    T3 -->|是| A3["前馈 +50%<br/>置 OVERCURRENT"]
-    T3 -->|否| T4{"RPM <500 且 duty >30%?"}
-    T4 -->|是| A4["置 FAN_FAULT"]
-    T4 -->|否| A5["无故障"]
-    A1 --> END["继续控制循环"]
+    START["故障保护开始"] --> T1{"热端 > danger<br/>(默认70000 m°C)?"}
+    T1 -->|是| A1["关 TEC_VEN + DAC0<br/>风扇 100%<br/>置 OVERTEMP + HOT_WARNING<br/>提前返回"]
+    T1 -->|否| T2{"热预检通过?<br/>Sdm845_Boot_IsThermalReady()"}
+    T2 -->|否| A2["关 TEC_VEN + DAC0<br/>不抢风扇(预检拥有)<br/>置 THERMAL_WAIT<br/>提前返回"]
+    T2 -->|是| T3{"热端 > overtemp<br/>(默认60000 m°C)?"}
+    T3 -->|是| A3["置 HOT_WARNING<br/>duty 强制 100 (TEC 全速)"]
+    T3 -->|否| T4{"电流 > danger<br/>(默认3000 mA)?"}
+    T4 -->|是| A4["前馈 +50%<br/>置 OVERCURRENT"]
+    T4 -->|否| T5{"电流 > FF 阈值<br/>(默认2000 mA)?"}
+    T5 -->|是| A5["前馈 +(cur-FF)/10"]
+    T5 -->|否| A6["无电流前馈"]
+    T3 -->|是| T6{"风扇故障<br/>duty>min 且 RPM<min?"}
+    T3 -->|否| T6
+    T6 -->|是| A7["置 FAN_FAULT"]
+    T6 -->|否| A8["无风扇故障"]
+    A1 --> END["输出: Fan_SetDutyPercent + tec_dac_set"]
     A2 --> END
     A3 --> END
     A4 --> END
     A5 --> END
+    A6 --> END
+    A7 --> END
+    A8 --> END
+
 ```
-
-### 代码最终形成的状态图
-
-虽然 `tec_control.c` 实现为普通周期任务而非显式状态机，但其运行逻辑可抽象为以下状态图，反映系统在不同条件下的实际运行状态：
 
 ```mermaid
 stateDiagram-v2
     [*] --> START : 初始化完成
-    
-    START --> READ_SENSORS : 1s 周期触发
-    READ_SENSORS --> CHECK_FAULTS : 读取所有 getter
-    
-    CHECK_FAULTS --> DANGER_EXIT : 热端 >70°C
-    CHECK_FAULTS --> THERMAL_GATE : 热端 <=70°C
-    
-    DANGER_EXIT --> OUTPUT_FULL : 关闭 TEC_VEN<br/>风扇 100%
-    OUTPUT_FULL --> START : return 提前退出
-    
-    THERMAL_GATE --> HOLD_OFF : 热预检未通过
+
+    START --> READ_SENSORS : 周期触发 (NVRAM control_period_ms)
+
+    READ_SENSORS --> CHECK_DANGER : 读 hot / sdm(多源) / env / cur
+
+    CHECK_DANGER --> DANGER_EXIT : 热端 > danger (默认70000 m°C)
+    CHECK_DANGER --> THERMAL_GATE : 热端 <= danger
+
+    DANGER_EXIT --> OUTPUT_FULL : 关 TEC_VEN + DAC0<br/>风扇 100%
+    OUTPUT_FULL --> START : return 提前退出 (跳过 PID)
+
+    THERMAL_GATE --> HOLD_OFF : 热预检未通过<br/>Sdm845_Boot_IsThermalReady()==0
     THERMAL_GATE --> PID_CALC : 热预检通过
-    
-    HOLD_OFF --> START : return 提前退出<br/>TEC 关闭，不抢风扇
-    
-    PID_CALC --> FEEDFORWARD : PID 计算完成
-    FEEDFORWARD --> OUTPUT : 合并限幅 0~100%
-    OUTPUT --> START : 1s 周期结束
-    
+
+    HOLD_OFF --> START : return 提前退出<br/>TEC 关 + DAC0, 不抢风扇
+
+    PID_CALC --> FEEDFORWARD : 融合→目标→PID(方向反转)
+    FEEDFORWARD --> OUTPUT : 电流前馈 + 合并限幅 0~100%<br/>HOT_WARNING 强制100
+
+    OUTPUT --> START : 周期结束
+
     state READ_SENSORS {
-        [*] --> READ_AHT20
-        READ_AHT20 --> READ_NTC
-        READ_NTC --> READ_CURRENT
-        READ_CURRENT --> READ_RPM
-        READ_RPM --> READ_SDM845
-        READ_SDM845 --> [*]
+        [*] --> READ_HOT
+        READ_HOT --> READ_SDM : NTC IN5
+        READ_SDM --> READ_ENV : 冷端多源开关 (NTC PA4 / SDM845)
+        READ_ENV --> READ_CUR : AHT20 环境温度
+        READ_CUR --> [*] : INA181A2 IN6
     }
-    
-    state CHECK_FAULTS {
-        [*] --> CHECK_OVERTEMP
-        CHECK_OVERTEMP --> CHECK_OVERCURRENT : 热端 <=70°C
-        CHECK_OVERCURRENT --> CHECK_FAN_FAULT : 电流 <=3A
-        CHECK_FAN_FAULT --> [*]
-    }
-    
+
     state PID_CALC {
-        [*] --> FUSE_TEMP : 温度融合
-        FUSE_TEMP --> DYNAMIC_TARGET : 动态目标
-        DYNAMIC_TARGET --> PID_UPDATE : TecPid_Update
+        [*] --> FUSE_TEMP : hot*0.5 + sdm*0.3 + env*0.2
+        FUSE_TEMP --> DYNAMIC_TARGET : base + env补偿 − SoC补偿
+        DYNAMIC_TARGET --> PID_UPDATE : TecPid_Update (setpoint/measure 取负)
         PID_UPDATE --> [*]
     }
-    
+
     state OUTPUT {
-        [*] --> SET_DUTY : Fan_SetDutyPercent
-        SET_DUTY --> [*]
+        [*] --> SET_FAN : Fan_SetDutyPercent (热端斜坡)
+        SET_FAN --> SET_DAC : tec_dac_set → MCP4725
+        SET_DAC --> [*]
     }
-    
+
     note right of DANGER_EXIT
         危险超温提前退出
-        跳过 PID 和后续计算
-        风扇强制全速
+        跳过 PID 避免积分饱和
+        风扇强制 100%
     end note
-    
+
     note right of THERMAL_GATE
         检查 Sdm845_Boot_IsThermalReady()
-        未通过时 TEC 保持关闭
-        不抢占风扇控制权
+        未通过时 TEC 保持关闭 + DAC0
+        不抢占风扇控制权 (预检拥有)
     end note
-    
-    note right of CHECK_FAULTS
-        并发标志位（非互斥）：
-        - HOT_WARNING: 热端 >60°C
-        - OVERCURRENT: 电流 >3A
-        - FAN_FAULT: RPM <500 且 duty >30%
+
+    note right of CHECK_DANGER
+        并发标志位 (非互斥):
+        - HOT_WARNING: 热端 > overtemp
+          duty 强制 100 (TEC 全速)
+        - OVERCURRENT: 电流 > danger
+          前馈 +50%
+        - FAN_FAULT: duty>min 且 RPM<min
         - THERMAL_WAIT: 热预检未通过
-        这些标志位可同时置位
     end note
 ```
-
 **状态说明**：
 
 | 状态 | 触发条件 | 动作 | 持续时间 |
 |------|----------|------|----------|
 | **START** | 周期开始 | 清零 alarm 标志 | 瞬时 |
-| **READ_SENSORS** | 1s 周期触发 | 读取 5 个 getter | ~10ms |
-| **CHECK_FAULTS** | 读取完成 | 按优先级检测故障 | ~1ms |
-| **DANGER_EXIT** | 热端 >70°C | 关闭 TEC，风扇全速 | 瞬时 |
-| **THERMAL_GATE** | 热端 <=70°C | 检查热预检状态 | ~1ms |
-| **HOLD_OFF** | 热预检未通过 | TEC 关闭，不抢风扇 | 瞬时 |
-| **PID_CALC** | 热预检通过 | 融合→目标→PID | ~5ms |
-| **FEEDFORWARD** | PID 完成 | 电流前馈补偿 | ~1ms |
-| **OUTPUT** | 计算完成 | 输出 duty 到风扇 | ~1ms |
+| **READ_SENSORS** | NVRAM 周期触发 (默认1s) | 读 hot/sdm(多源)/env/cur | ~10ms |
+| **CHECK_DANGER** | 读取完成 | 危险超温/热预检门控 | ~1ms |
+| **DANGER_EXIT** | 热端 > danger (NVRAM, 默认70°C) | 关 TEC+DAC0, 风扇100%, 置 OVERTEMP | 瞬时 |
+| **THERMAL_GATE** | 热端 <= danger | 检查 Sdm845_Boot_IsThermalReady() | ~1ms |
+| **HOLD_OFF** | 热预检未通过 | TEC 关 + DAC0, 不抢风扇, 置 THERMAL_WAIT | 瞬时 |
+| **PID_CALC** | 热预检通过 | 融合→目标→PID(方向反转) | ~5ms |
+| **FEEDFORWARD** | PID 完成 | 电流前馈 (FF/danger 阈值, NVRAM) | ~1ms |
+| **OUTPUT** | 计算完成 | 风扇斜坡 + tec_dac_set(MCP4725) | ~1ms |
 
 **关键特性**：
-1. **周期任务**：1s 固定周期，非事件驱动
-2. **危险超温提前退出**：>70°C 时 `return` 跳过 PID，避免积分饱和
-3. **热预检门控**：SDM845 启动前需通过热预检（AHT20 温度 <60°C），未通过时 TEC 保持关闭且不抢占风扇控制权
+1. **周期任务**：周期来自 NVRAM `CONTROL_PERIOD`（默认 1s），非事件驱动
+2. **危险超温提前退出**：热端 > danger（NVRAM 默认 70°C）时 `return` 跳过 PID，避免积分饱和
+3. **热预检门控**：SDM845 启动前需通过热预检（AHT20 温度安全），未通过时 TEC 保持关闭 + DAC0，且不抢占风扇控制权
 4. **并发标志位**：HOT_WARNING/OVERCURRENT/FAN_FAULT/THERMAL_WAIT 可同时置位，非互斥
 5. **无显式状态存储**：每个周期重新评估，无历史状态依赖
 
 ### 关键数据流说明
 
 1. **采集层**：各传感器任务周期性更新缓存，控制任务通过 getter 读取，无阻塞
-2. **控制层**：1s 周期执行，融合多源温度 → 动态目标 → PID 计算 → 前馈补偿 → 故障保护 → 输出 duty
-3. **执行层**：`Fan_SetDutyPercent` 驱动 PWM，`TEC_VEN` 控制 TEC 使能（仅危险超温时关闭）
+2. **控制层**：NVRAM 周期执行（默认1s），读源 → 故障保护(危险/预检) → 融合 → 动态目标 → PID → 前馈 → 合并限幅 → 输出
+3. **执行层**：`Fan_SetDutyPercent` 驱动 PWM（跟随热端斜坡），`tec_dac_set`→MCP4725 输出 TEC 电流命令，`TEC_VEN` 控制 TEC 使能（危险超温/热预检未过时关闭）
 4. **反馈路径**：风扇 RPM 用于故障检测，TEC 电流用于前馈补偿，形成闭环
 
 
@@ -2340,3 +2066,220 @@ TEC_VEN(PA12)   = 使能
 - 全仓重编 + 全图链接 0 错（待执行）。
 - 映射边界（Python 离线校验）：duty 0%/100%、窗口缩放、钳制；风扇温度线性段。
 - **遗留**：`TEC_DAC_MAX_CTRL_MV` 需按实际功率级控制输入标定（若功率级满程就是 3.3V，直接改 3300 即满量程映射）；风扇温度阈值/PID 增益按真机散热系统标定；MCP4725 上电默认 0V 已由 `MCP4725_Init()` 保证（不写 EEPROM，防磨损）。
+
+---
+
+## 2026-10-09 — TEC 全部可调参数迁入 NVRAM（具名参数表 + I2C 读写窗口）
+
+### 背景
+
+上一节把 MCP4725 落地为 TEC 执行器时，可调参数仍是 `tec_control.h` 里的宏。用户要求：**所有 TEC 可调参数存入 NVRAM，上电自动读取，不再用宏设置**——因为会有多套不同的参数（不同 TEC 功率级 / 散热系统 / 传感器标定）。
+
+原 `nv_params` 只是 29 个无名槽位（默认值全 0），且 `NvParams_Save()` 依赖 HAL flash 驱动（工程是纯 LL 构建，HAL 层未拉入，之前因 `--gc-sections` 裁掉才侥幸链过）。
+
+### 改动
+
+| 文件 | 改动 |
+|---|---|
+| `Core/INC/nv_params.h` | 槽位改为**具名 TEC 参数表** `NvParamTecId_t`（27 项）；float 增益用 Q16 定点存（×65536，宏 `NVM_Q16_SCALE`）；`NVM_PARAM_COUNT=27`；注释说明 I2C 窗口布局 |
+| `Core/SRC/nv_params.c` | `s_defaults[]` 填齐 27 项生产默认值（与旧宏一致）；`NVM_VERSION 1→2`（失效旧布局）；`NvParams_Save()` 改写为 **LL 风格 FLASH 操作**（`FLASH_KEY1/KEY2` 解锁 → 按 HSI 频率档位运行时选时序（`nv_flash_timing_config()`，镜像 HAL `__HAL_FLASH_TIMMING_SEQUENCE_CONFIG` 逻辑）→ 页擦除 `CR.PER` + 写 0xFF → 页编程 `CR.PG` + 32 字 + `CR.PGSTRT` 闩锁 → 重锁），去掉 `HAL_FLASH_*` 依赖 |
+
+#### FLASH 时序选择的依据（重要）
+
+FLASH 擦/写的**时序参数由 HSI 频率档位（`RCC->ICSCR.HSI_FS`）决定，与 SYSCLK 无关**。HAL 的 `__HAL_FLASH_TIMMING_SEQUENCE_CONFIG()` 就是读 `ICSCR.HSI_FS` 作索引、从 `_FlashTimmingParam[8]` 选行。
+
+本工程 `rcc.c`：HSE 16M → PLL 固定 ×2 → **SYSCLK = 32 MHz**，但 **HSI 停在 8M 档**（`LL_RCC_HSI_SetCalibFreq(LL_RCC_HSICALIBRATION_8MHz)`，`HSI_FS=1`）。所以时序选 **8 MHz 行**（0x1FFF0F30 组），而不是 32M（LL flash 头里根本没有 32M 宏，只有 4/8/16/22.12/24M 五档，且它们对应的是 HSI 档位）。
+
+`nv_flash_timing_config()` 镜像 HAL：读 `ICSCR.HSI_FS`（4M=0/8M=1/16M=2/22.12M=3/24M=4，≥5 兜底用 8M 行），把对应 option-byte 组写进 `FLASH->TS0/TS1/TS3/TS2P/TPS3/PERTPE/SMERTPE/PRGTPE/PRETPE`。若以后改 HSI 档位，FLASH 擦写自动跟随。
+| `Core/INC/tec_control.h` | 删除全部可调宏（`TEC_PID_KP/KI/KD`、`TEC_TARGET_BASE`、`TEC_HOT_*`、`TEC_CURRENT_*`、`FAN_MIN_RPM`、`TEC_CONTROL_PERIOD`、`TEC_DAC_*`、`TEC_FAN_*`）；保留报警位定义；头注释同步 |
+| `Core/SRC/tec_control.c` | 新增 `Tec_Params_t` 结构 + `tec_params_load()`（`TecControl_Init()` 时从 NVRAM 快照一次）；控制循环全部用 `s_p.*`；周期改 NVRAM `control_period_ms` |
+| `Core/INC/adc.h` | 删除 `TEC_CURRENT_SHUNT/AMP_GAIN/DIVIDER/ADC_VREF` 宏（INA181A2 链标定数据迁入 NVRAM） |
+| `Core/SRC/adc.c` | `Studio_ADC1_ReadCurrentMilliamp()` 首次调用时从 NVRAM 快照 4 个电流链参数（静态缓存 + 防 0 兜底） |
+| `Core/SRC/tres_i2c_slave.c` / `.h` | 新增 **NVRAM 参数窗口 0x40..0xAB**：槽 n 在 `0x40+4n`，4 字节大端；读按字节返回，写第 4 字节时提交到 NVRAM RAM 缓存；写支持自动递增（块写 108 字节一气呵成） |
+| `Core/INC/tres_cmd.h` / `Core/SRC/tres_cmd.c` | 新命令 `TRES_CMD_SAVE_PARAMS(4)` 持久化、`TRES_CMD_DEFAULT_PARAMS(5)` 恢复默认（仅 RAM）；任一状态合法、不动 FSM |
+| `test/tres_i2c_probe.py` | 新增 [4] 步连读 0x40..0xAB 并解码 27 槽（含 Q16 转浮点显示） |
+
+### 参数槽位表（槽号 = I2C 窗口 `0x40 + 4×槽`）
+
+| 槽 | 参数 | 默认 | 单位 |
+|---|---|---|---|
+| 0 | PID_KP | 2.0 (Q16) | — |
+| 1 | PID_KI | 0.1 (Q16) | — |
+| 2 | PID_KD | 0.5 (Q16) | — |
+| 3 | TARGET_BASE | 45000 | m°C |
+| 4 | HOT_OVERTEMP | 60000 | m°C |
+| 5 | HOT_DANGER | 70000 | m°C |
+| 6 | CUR_FEEDFORWARD | 2000 | mA |
+| 7 | CUR_DANGER | 3000 | mA |
+| 8 | FAN_MIN_RPM | 500 | RPM |
+| 9 | CONTROL_PERIOD | 1000 | ms |
+| 10 | DAC_VREF | 3300 | mV |
+| 11 | DAC_MAX_CTRL | 1200 | mV |
+| 12 | FAN_TEMP_BASE | 40000 | m°C |
+| 13 | FAN_TEMP_FULL | 60000 | m°C |
+| 14 | FAN_DUTY_BASE | 30 | % |
+| 15 | CUR_SHUNT | 20000 | µOhm |
+| 16 | CUR_AMP_GAIN | 50 | V/V |
+| 17 | CUR_DIV_NUM | 1 | — |
+| 18 | CUR_DIV_DEN | 2 | — |
+| 19 | CUR_ADC_VREF | 1800 | mV |
+| 20 | TEMP_VALID_MIN | −20000 | m°C |
+| 21 | TEMP_VALID_MAX | 120000 | m°C |
+| 22 | CUR_VALID_MAX | 5000 | mA |
+| 23 | FAN_FAULT_MIN_DUTY | 30 | % |
+| 24 | ENV_COMP_TEMP | 35000 | m°C |
+| 25 | SOC_TIGHTEN_TEMP | 70000 | m°C |
+| 26 | SOC_TIGHTEN_DELTA | 5000 | m°C |
+
+### 主机侧流程（多套参数灌装）
+
+```
+读窗口:  I2C 从 0x40 连读 108B（或逐槽 4B）
+改参数:  写 0x40+4n <- [val >> 24][val >> 16][val >> 8][val]（第 4 字节提交）
+持久化:  0x00 <- [0xA5][0x04][0x00]   (SAVE_PARAMS，RAM→FLASH)
+恢复默认: 0x00 <- [0xA5][0x05][0x00]   (DEFAULT_PARAMS，RAM 层；再 SAVE 才落 FLASH)
+生效:    参数在 TecControl_Init()/首次电流采样时快照 → 重启后按新 NVRAM 运行
+```
+
+### 验证
+
+- 全仓 CLI 重编 + 链接 0 错；RAM 54.59% / FLASH 49.45%（基线 53%/46.5%）。
+- Python 离线校验：27 槽默认值 == 旧宏全部一致；电流链满量程 4095 → 3600 mA；DAC 0%/100% → 0/1200 mV；风扇斜坡 40/50/60°C → 30/65/100%。
+- 槽位表顺序：C enum ↔ probe.py 表 ↔ defaults 三者对齐。
+
+### 遗留
+
+- `NvParams_Save()` 的 LL FLASH 写尚未上真机验证（页擦除/页编程序列）。首版可先在调试器里改一个槽 → SAVE → 读回对比，再下电重启验证持久化。
+- `NVM_VERSION` 已升 2；若以后增删槽位须再升版本，否则旧 FLASH 内容被当作默认值丢弃（安全）。
+- Q16 定点：`(float)raw / 65536.0f` 还原，PID 增益分辨率 ~1.5e-5，足够。
+
+## 2026-10-09 — ADC 固定 2048 修复 + NVRAM FLASH 写入静默失败修复 + 冷端源开关
+
+### 背景
+
+上一节的 NVRAM 参数化上线后有两个未决问题，本次一并解决并拆分提交：
+
+1. **ADC `DR` 卡在 2048**：复位后第一次读正常，之后全部固定 2048（12-bit 中点值 = VREF/2，采样保持无刷新的特征值）。
+2. **NVRAM 写入静默失败**：`NvParams_Save()` 返回 OK，但 FLASH 里没有任何数据（页读回全 0xFF）。
+
+### 一、ADC 修复（commit `801af5f`）
+
+#### 根因
+
+`Studio_ADC1_ReadChannel()` 每次读取都 **`LL_ADC_Disable → 再 Enable`**，而 Puya AN1011（`datasheet/AN1011_..._ADC应用注意事项V1.1.pdf`）第 1 节明确：**ADC 使能后软件不能禁能**，只能整模块复位重初始化。每次 Disable/Enable 把 ADC 推到不确定状态，后续转换不再真正采样 → DR 残留，2048 为电容上残留半量程电荷的特征值。
+
+叠加因素：`Studio_RCC_Init` 把 SYSCLK 拉到 32 MHz（`rcc.c`），而 ADC 时钟用 `PCLK_DIV1` = 32 MHz，**超 ADC 时钟上限**；采样时间 `3.5 cycles` 对 NTC/INA 高阻源不足。
+
+#### 改动
+
+| 文件 | 改动 |
+|---|---|
+| `Core/SRC/adc.c` | `Studio_ADC1_ReadChannel()` 重写为官方 LL `ADC_MultichannelSwitch` 例程的 `APP_AdcConvert` 模式：**清 CHSELR → 设单通道 → Enable + 1ms 稳定延时 → Start → 等 EOC → 读 DR → 清 CHSELR，全程不 Disable** |
+| `Core/SRC/adc.c` | `Studio_ADC1_Init()`：时钟 `PCLK_DIV1→DIV4`（32M/4=8M 回到规格内）、低功耗 `LL_ADC_LP_MODE_NONE→LL_ADC_LP_AUTOWAIT`、采样时间 `3.5→239.5 cycles`、删除 Init 里预注册 3 通道（read 时全权管理 CHSELR） |
+
+官方例程参考：`example/PY32F0xx_Firmware-master/Projects/PY32F030-STK/Example_LL/ADC/ADC_MultichannelSwitch/`。
+
+### 二、NVRAM FLASH 写入静默失败修复（commit `6b13f62` 的一部分）
+
+#### 根因（时序参数误用）
+
+`NvParams_Save()` 里 `nv_flash_timing_config()` 的 `s_flash_timing[5][5]` **把信息区地址（0x1FFF0F1C 等）当成了数值本身**：
+
+- 官方 LL 宏（`py32f0xx_ll_flash.h`）`LL_FLASH_TIMMING_SEQUENCE_CONFIG_8M()` 的做法是 `FLASH->TS0 = (*(uint32_t*)0x1FFF0F30) & 0xFF` —— **先从信息区解引用出真实时序值，再写 FLASH 时序寄存器**；
+- 旧代码 `row[0]` 直接取到 `0x1FFF0F1C`，于是 `TS0=0x1C`、`TS1=0x0F`、`TS3=0xFF`…… 全写错。
+
+FLASH 时序寄存器全乱 → **页擦除/页编程静默失效**，但 BSY 位仍正常走过（HAL 注释："即使操作失败 BSY 也会清零"），所以返回 OK 而 FLASH 无数据。
+
+#### 改动（`Core/SRC/nv_params.c`）
+
+- `s_flash_timing` 改为一维地址表，`nv_flash_timing_config()` 从信息区按 `base+0x00/0x04/0x08/0x0C/0x10` 解引用出 5 个时序值写入 `FLASH->TS0/TS1/TS3/TS2P/TPS3/PERTPE/SMERTPE/PRGTPE/PRETPE`（与官方 LL 宏逐位一致；`PRETPE` 掩码用 0x3FFF=14bit 是寄存器实际位宽，LL 宏的 0xFFF 是官方 bug，不影响本项目 HSI=8M 档）。
+- `NvParams_Save()` 整体移植为官方 LL 例程序列：`LL_FLASH_Unlock → 等 BSY → 清 SR → EnablePageErase + SetEraseAddress → 等 BSY → **查 WRPERR** → DisablePageErase → 编程同构 → LL_FLASH_Lock`。
+- 新增防护：每步检查 `WRPERR`，编程后 **read-back 校验** magic/version/crc/params，失败返回 `NVM_ERR_FLASH`，不再静默 OK。
+- 确认无问题点：擦除位 `FLASH_CR_PER`（HAL PageErase 同款，非 SER 混用）、解锁 KEY 序列、锁定时序、页地址 0x0800F000（链接脚本 `PY32F030K28U6-E.ld` 显式保留最后 4KB 给 NVM）。
+
+### 三、NVRAM 布局变成"加参数无脑"（commit `6b13f62`）
+
+原痛点：加一个参数要改 5+ 处（enum、`NVM_PARAM_COUNT`、`reserved` 字节手算、布局注释、I2C 窗口注释）。
+
+新方案（轻量版，按用户选择 B 方案）：
+- **enum 哨兵自动计数**：`NvParamTecId_t` 末尾加 `NV_PARAM_COUNT_MARKER`，`NVM_PARAM_COUNT = (uint8_t)NV_PARAM_COUNT_MARKER`；
+- **union 自动补满整页**：`Nvm_Block_t` = `union { Nvm_Block_Data_t data; uint8_t page[128]; }`，编译器算 pad，删掉手写 `reserved[]`；
+- 两条 `_Static_assert`：`sizeof(data) <= 128`（参数超一个页就编译报错）、`sizeof(block) == 128`。
+
+**以后加参数 = enum 加一行 + `s_defaults` 加一行**，计数/块大小/I2C 窗口全自动。唯一保留的手工动作：布局改变时 bump `NVM_VERSION`。
+
+### 四、冷端温度源开关（commit `9cf47b5`）
+
+需求：TEC 冷端温度可切换来源，默认用 TEC_COLD 的 ADC 值，可选 SDM845。
+
+- 新 NVRAM 参数 `NV_TEC_COLD_SOURCE`：`0`= TEC_COLD ADC（PA4 NTC3950，默认），`1`= SDM845 host 上报温度。
+- `Studio_ADC1_ReadColdMilliCelsius()` 按该参数选源（`adc.c`）。
+- 通过 I2C 窗口槽 27（`0x40 + 4*27 = 0xAC`）写 4 字节大端 `1` 并 `SAVE_PARAMS` 切换；写 `0` 回切。
+- 该参数定义在 commit2（参数表一份 hunk 无法拆分）、消费逻辑在 commit3。
+
+### 提交拆分（test/tres-sequencer 分支）
+
+| commit | 主题 | 内容 |
+|---|---|---|
+| `801af5f` | feat(adc) | ADC 修复（ReadChannel 不 Disable / 时钟 DIV4 / AUTOWAIT / 239.5 采样） |
+| `6b13f62` | feat(nvram) | TEC 参数表 + FLASH 写入修复 + 哨兵/union 布局 + I2C 窗口 + SAVE/DEFAULT 命令 + 首启默认落盘 + 电流链参数迁 NVRAM |
+| `9cf47b5` | feat(nvram) | 冷端源开关消费逻辑（`ReadColdMilliCelsius` 选源 5 行） |
+
+曾尝试用 `git add -p` 管道逐 hunk 拆分 `adc.c`（文件内混了修复/电流/源开关三处），成功；`nv_params` 无法在"参数化"与"源开关"间切 hunk（同 hunk），故 `NV_TEC_COLD_SOURCE` 定义留在 commit2、消费在 commit3。三个 commit 分别从 `git archive` 解出后独立编译验证，全部 `-Wall` 0 错（含 QuarkTS/Embedded-PID include 路径）。
+
+### 验证
+
+- 三个 commit 逐一 `git archive` + CLI 编译：`adc`/`nv_params`/`tec_control`/`tres_i2c_slave`/`tres_cmd`/`fan_task` 均 0 错 0 警。
+- FLASH 写链路的 WRPERR 检查 + read-back 校验已内置：若仍写不进，`NvParams_Save()` 会返回 `-3` 而非 OK（调试器可查 `FLASH->SR.WRPERR` 与 `OB->WRP`）。
+
+### 遗留
+
+- FLASH 写入修复仍建议真机验证一次：改槽 → SAVE → 读回 → 下电重启。
+- 若下一步仍报"写入无效果"而 code 返回 OK，优先查 **WRP/RDP（option bytes 写保护）**——这是 WRPERR 但曾被静默吞掉的典型场景。
+- 参数上限 29 个（超一页 `_Static_assert` 编译报错）；超过需迁多页/扇区方案。
+
+## 2026-10-10 — tres_i2c_probe.py 增强：--set 名字化 + Q16 自动转换 + --params + --help
+
+### 背景
+
+`tres_i2c_probe.py` 原来只有只读探测 + `--reset/--dfu` 电源命令。用户用上位机改 NVRAM 参数时，只能裸写 0x40+4n 地址 + 4 字节大端，槽号/地址/Q16 都要手算，易错。
+
+### 改动（test/tres_i2c_probe.py）
+
+| 功能 | 说明 |
+|---|---|
+| `--set NAME VALUE` | 写单个 NVRAM 槽。NAME 接受**参数名**（大小写不敏感，如 `TARGET_BASE`/`pid_kp`）或槽号数字 0..27（脚本化兼容）；写后读回校验。未知名字/越界槽号在打开总线前即报错 |
+| `--save` | 配合 `--set` 追加 `SAVE_PARAMS` 命令落 FLASH（整页擦写一次）；无 `--set` 单独用报错 |
+| Q16 自动转换 | 槽 `PID_KP/PID_KI/PID_KD`（Q16 存 raw = round(值×65536)）：写小数（`2.0`/`0.1`）自动转 raw；写纯整数视为已转好的 raw（如 `131072`）直通；hex 同样直通。普通槽整数/hex 原样。显示时 Q16 槽同时给出浮点 + raw |
+| `--params` | 实测 NVRAM 持久化闭环：翻 `SOC_TIGHTEN_TEMP` +1 → `SAVE_PARAMS` → 读回校验 → `DEFAULT_PARAMS` → 校验回默认 → 还原原值再 SAVE。与 `--reset/--dfu/--set` 互斥 |
+| `--help` | 重写：5 步流程、I2C 协议、三种互斥模式、5 条命令表、**28 参数全名表**（含单位/含义/Q16 说明）、examples、退出码、前置依赖 |
+| 参数表同步 | `NV_PARAMS` 从 27 槽补到 **28 槽**（新增 `COLD_SOURCE`，槽 27），窗口注释 `0x40..0xAB → 0x40..0xAF` |
+
+### 实现细节
+
+- `nv_slot_index(s)`：名字（lower 后查表）优先，失败回退数字 `int(s,0)`，返回 -1 表示未知。
+- `nv_value_to_raw(text, scale)`：`scale<1`（Q16 槽）且值含 `.`/`e` 时按浮点 ×65536 取整；否则原样 `int(s,0)`。
+- `args.set_slot`：parse 后立即预校验，`[5]` 分支复用，未知槽名在总线打开前就退出（省得白跑）。
+- 新辅助 `Tres.read_slot/write_slot`：按槽读写 4 字节大端。
+
+### 验证
+
+- `python3 -m py_compile` 通过。
+- Q16 转换单元测试 7 项全过：`2.0→131072`、`0.1→6554`、整数 raw 直通、hex 直通、普通槽整数/hex、非法输入 -1。
+- 名字解析：`TARGET_BASE`/`target_base`/`25` 均通过槽解析；`FOO`/`99` 提前报错。
+- `--help` 输出核对：modes/参数名表/examples 均含 Q16 自动转换说明。
+
+### 使用示例
+
+```bash
+python3 tres_i2c_probe.py --bus 3 --set PID_KP 2.0 --save   # KP=2.0，自动 Q16
+python3 tres_i2c_probe.py --bus 3 --set COLD_SOURCE 1 --save # 冷端源切 SDM845
+python3 tres_i2c_probe.py --bus 3 --set TARGET_BASE 45000    # 只改 RAM，掉电丢失
+python3 tres_i2c_probe.py --bus 3 --params                    # 持久化闭环自测
+python3 tres_i2c_probe.py --bus 3                             # 安全只读
+```
+
+### 遗留
+
+- `--set` 只支持单槽；批量改多参数仍是"逐个 --set + 最后一次 --save"（避免多次整页擦写磨损 FLASH）。
+- `tec_control.c` 中 `sdm_mc` 已改为读 `Studio_ADC1_ReadColdMilliCelsius()`（多源开关 API），含一处双分号笔误（`hot_mc, sdm_mc;;`），待下次提交清理。
