@@ -90,7 +90,7 @@ static Tec_Params_t s_p;
 static uint8_t     s_alarm;
 static uint8_t     s_tec_enabled;
 static uint8_t     s_dac_percent;      /* last TEC duty written to the MCP4725 */
-static volatile int32_t hot_mc;        /* last hot-side temperature reading */
+static volatile int32_t hot_mc, sdm_mc;   /* last hot/cold temperature readings */
 /*============================================================================*/
 /* Helpers                                                                     */
 /*============================================================================*/
@@ -155,7 +155,7 @@ static void TecControl_Cb( qEvent_t e )
 {
     //int32_t hot_mc;
     int32_t env_mc;
-    int32_t sdm_mc;
+    //int32_t sdm_mc;
     uint32_t cur_ma;
     int32_t composite_mc;
     int32_t target_mc;
@@ -170,7 +170,7 @@ static void TecControl_Cb( qEvent_t e )
     /*--- 1. read all sources ------------------------------------------------*/
     hot_mc = Studio_ADC1_ReadHotMilliCelsius();
     env_mc = AHT20_Get_LastTempMilliCelsius();   /* ambient, not dew point */
-    sdm_mc = TRES_I2C_Slave_GetSdm845TempMilliC();
+    sdm_mc = Studio_ADC1_ReadColdMilliCelsius();
     cur_ma = Studio_ADC1_ReadCurrentMilliamp();
 
     if ( is_temp_valid( env_mc ) == 0 ) {
