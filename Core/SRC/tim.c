@@ -99,8 +99,11 @@ void Studio_TIM3_Init(void)
 
   TIM_InitStruct.Prescaler = 0;
   TIM_InitStruct.CounterMode = LL_TIM_COUNTERMODE_UP;
-  /* 8 MHz / 25 kHz = 320 timer ticks, suitable for a 4-wire fan. */
-  TIM_InitStruct.Autoreload = 319U;
+  /* 32 MHz timer clock (SYSCLK 32 MHz, APB1 DIV1) / 25 kHz = 1280 ticks,
+   * suitable for a 4-wire fan. Must match FAN_PWM_PERIOD_TICKS in fan.h -
+   * Fan_Init() reprograms ARR from that macro anyway; this init value only
+   * covers the window before the fan task starts. */
+  TIM_InitStruct.Autoreload = 1279U;
   TIM_InitStruct.ClockDivision = LL_TIM_CLOCKDIVISION_DIV1;
   TIM_InitStruct.RepetitionCounter = 0;
   /* Initialize TIM3 */
