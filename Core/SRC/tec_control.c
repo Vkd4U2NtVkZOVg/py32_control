@@ -455,10 +455,12 @@ static void TecControl_Cb( qEvent_t e )
         /* Overcurrent: cutting COOLING, not adding it. The old
          * `feedforward += 50` was a positive-feedback loop: higher current
          * -> higher duty -> more TEC current -> trip the power stage. Force
-         * the TEC drive to 0 (stop cooling) so the current decays back below
-         * the limit, and reset the PID so the integrator does not wind up
-         * while we are clamped (recovery restarts clean). */
+         * the TEC drive to 0 (stop cooling) AND drop the enable line, so a
+         * never-decaying overcurrent (short, PSU fault) does not keep the
+         * power stage driving a suspected-short load. Recovery goes through
+         * the normal startup path (FB anchor + ramp) next cycle. */
         s_alarm |= TEC_ALARM_OVERCURRENT;
+        tec_set_enabled( 0u );
         TecPid_Reset( &s_pid, -(float)sdm_mc );
         duty = 0;
         (void)tec_dac_set( 0u );   /* immediate: drop TEC drive this cycle */
