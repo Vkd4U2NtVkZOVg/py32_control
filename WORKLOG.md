@@ -2401,3 +2401,529 @@ python3 tres_i2c_probe.py --bus 3 --auth
 - 全库 grep：无 `NV_TEC_DAC_VREF_MV` / `dac_vref` / `DAC_VREF` 代码残留。
 - CLI 语法编译 `nv_params.c` + `tec_control.c`：项目代码 0 错 0 警。
 - 探针 `py_compile` 通过，`NV_PARAMS` 计为 27 槽、无 DAC_VREF。
+
+---
+
+## 2026-10-10 — TEC 控制四改：启动斜坡 / 露点保护 / COMMON-MODE 前馈 / 条件积分（TPS565201 单向制冷落地）
+
+### 工作内容（背景与目标）
+
+对照 TI 三份资料（SNVAA70 双向 40W TEC、TIDUEN2A 3.3V 参考设计、AFE639D2 数据手册）审查当前 TEC 控制，并澄清硬件事实：功率级是 **TPS565201DDCR 纯降压 buck**（4.5–17V 输入、5A、FB 基准 0.6V），本机是**单向制冷**，无 H 桥、无方向位。因此：
+
+1. **上电 DAC 不是 0 也不是满量程**：纯降压下 FB 稳压会先把 TEC 电压钳在接近 0 的区域，DAC 必须越过功率级设定点 TEC 电流才建立。SNVAA70 §3.3 建议"启动先接近、再缓慢调节"。落地为 **NVRAM 启动锚点 + 每周期限步斜坡**。
+2. **撤掉调试残留**：`MCP4725_Init()` 里未提交的 `SetVoltage_mV(2250)` 是用户调试值，与控制无关，已还原为 0V 语义。
+3. **露点保护**：AHT20 已算露点，若目标温度低于露点+余量，冷端会结露。落地为 **target clamp**。
+4. **COMMON-MODE 前馈**：TI AFE 的"每设定点给基准输出、PI 只纠偏"思想，用 env-target 温差线性前馈替代积分从零爬。
+5. **条件积分**：输出饱和且误差同向时冻结 I 项（EPID 是增量式，累加时跳过 I）。
+
+### 设计关键点与实现方式
+
+**NVM 存储扩 2 页**（29 槽 128B 已满，新增 4 槽必须扩）：
+
+- `nv_params.c`：`NVM_BASE` 不变（0x0800F000），块扩为 `NVM_PAGES=2` 页（256B）；erase/program/校验循环按页遍历 `NVM_BASE + page*128`；`NVM_MAGIC` 改 'NVD3'、`NVM_VERSION` 4→5（布局变必须升版本，设备下次上电重建参数区）。
+- `_Static_assert` 同步：`<= NVM_BLOCK_SIZE`、`== NVM_BLOCK_SIZE`。
+
+**新增 4 个 NVRAM 槽**（slot 29..32，`NvParamTecId_t` 在 marker 前）：
+
+| 槽 | 默认值 | 含义 |
+|---|---|---|
+| `NV_TEC_DAC_STARTUP_MV` | 0 | TEC 首次使能瞬间的 DAC 启动锚点（≈0 电流处 mV，需真机标定） |
+| `NV_TEC_RAMP_STEP_PERCENT` | 5 | 每 1s 控制周期最大 duty 变化（软启动限速） |
+| `NV_TEC_DEWPOINT_MARGIN_MILLIC` | 2000 | 目标温度下限 = 露点 + 2°C |
+| `NV_TEC_FF_GAIN_Q16` | 1.0 | COMMON-MODE 前馈：env−target 每 °C 给 %duty（Q16） |
+
+**控制环改动（tec_control.c）**：
+
+- 目标计算后新增 3b 露点 clamp：`AHT20_Get_LastDewPointMilliCelsius()`，有效（≠INT32_MIN）时 `target = max(target, dew+margin)`。
+- PID 后新增 5b COMMON-MODE 前馈：`ff_base = clamp((env−target)×ff_gain, 0..100)`，再叠电流前馈（原第 6 节改为 += 不覆盖）。
+- 第 7 节新增软启动斜坡：`duty` 相对 `s_dac_percent` 每周期最多走 `ramp_step_percent`。
+- 首次使能（`s_tec_enabled==0` → 1）时，若 `DAC_STARTUP_MV>0` 先把 DAC 打到对应 duty 再进入斜坡。
+
+**条件积分（tec_pid.c）**：`TecPid_Update` 中在 `epid_pid_sum` 前判断：`(y_out≥out_max && error>0) || (y_out≤out_min && error<0)` 时清 `i_term=0`（增量式累加跳过 I 增量），配合原有 `epid_util_ilim` 双保险。
+
+**上电顺序（main.c）**：`NvParams_Init()` 提前到 `SoftI2C_Init()`/`MCP4725_Init()` 之前，让 MCP4725 上电值（现为 0V）能读参数（当前 MCP4725_Init 本身固定 0V，顺序调整是为后续 DAC 上电值参数化做准备）。
+
+**I2C 寄存器文件重排（tres_i2c_slave.h/.c、tres_i2c_probe.py）**：
+
+- NVRAM 窗口随槽数扩到 `0x40..0xC3`（33 槽）。
+- **AES 窗口与 NVRAM 窗口冲突**：原 AES challenge 0xB0..0xBF / response 0xC0..0xCF 被扩大的 NVRAM 窗口覆盖。AES 上移到 **challenge 0xD0..0xDF / response 0xE0..0xEF**，固件头、驱动注释、probe.py 三处同步。
+- probe.py 的 `NV_PARAMS` 补 4 个新条目（DAC_STARTUP/RAMP_STEP/DEWPOINT_MARGIN/FF_GAIN）。
+
+### 验证
+
+- 全量 54 个 C 文件 CLI 编译 0 错 0 警（-Wall），链接成功，`size` 检查通过（text=32268 data=248 bss=4272）。
+- `tres_i2c_probe.py` `py_compile` 通过。
+- 改动文件：nv_params.c/h、tec_control.c、tec_pid.c、mcp4725.c、main.c、tres_i2c_slave.c/h、test/tres_i2c_probe.py。
+
+### 遗留
+
+- **`DAC_STARTUP_MV` 默认值修正为 1200mV(窗口顶)**:用户确认 FB 为**标准分压+注入拓扑**(R1 到 VOUT、R2 到 GND、DAC 经 R3 注入 FB)。TPS565201 规格书(SLVSE71)关键数字:`VFBTH = 760mV`(753~767)、`UVP = 65%×参考 ≈ 494mV`、`tSS = 1ms`、`VOUT = 0.76×(1+R1/R2)`。注入式下 **DAC 高 → FB 高 → 输出低**,所以 0 电流方向在**控制窗口顶**,启动锚点=1200mV 让 FB 一开始就落在参考附近,利用 pre-biased soft start(参考爬升超过 FB 前转换器不开关)平滑建立输出;FB 若落在 <494mV 会触发 UVP hiccup(24µs 关断 / 14.9ms 重启),所以锚点必须标定到 0.76V 附近,不能默认 0。`RAMP_STEP_PERCENT` 按真机热惯性调整;`FF_GAIN` 按环境-目标温差实测调参。
+- **使能顺序修正**:首次使能先写 DAC 锚点、再拉 TEC_VEN(原为先拉 VEN 再写 DAC)。注入式下先让 FB 就绪再开 EN,避免 EN 一拉高 FB 处于失控态。
+- 上电 `MCP4725_Init` 输出 0V 是 MCU 上电瞬间的保守态;真正让功率级工作的启动锚点由 `DAC_STARTUP_MV`(NVRAM 标定)在 TEC 首次使能时写入。
+
+---
+
+## 2026-10-10 — 修正 FB 注入映射极性（低电压起步）+ R3 计算推导（6V/15W TEC）
+
+### 背景
+
+用户提出关键疑问："上电时 FB 能设 0V 吗？不行吧"，并说明 TEC 是 **6V / 15W**（额定电流 ≈ 2.5A），开机应从低电压缓慢上升，防止浪涌冲击。复查发现上一轮"上电 0V 安全"假设在注入式 FB 拓扑下是错的，且**当前固件的 duty→mV 映射极性反了**，会直接导致"低电压起步"在硬件上变成"满压起步"。
+
+### 规格书关键数字（TPS565201, SLVSE71）
+
+- `VFBTH = 760mV`（753~767mV）：D-CAP2 比较器参考，FB 被调节在此附近。
+- `UVP = 65% × 参考 ≈ 494mV`：FB 低于此 → 24µs 关断 + 14.9ms hiccup 重启（打嗝）。
+- `tSS = 1ms` 内部软启动：参考爬升**超过 FB 前转换器不开关**（pre-biased soft start）。
+- `VOUT = 0.76 × (1 + R1/R2)` 分压设定。
+
+### 极性反转（本次核心修正）
+
+注入式 FB 拓扑（VOUT—R1—FB—R2—GND，DAC 经 R3 注入 FB）下，**DAC 电压越高 → FB 被拉得越高 → 输出越低**，即 TEC 输出电压与 DAC 电压**反比**。原 `tec_dac_set` 是正比映射（duty 高→mV 高），写反了。
+
+修正后映射（`Core/SRC/tec_control.c`）：
+
+```
+duty 0%   (不制冷/TEC关)  -> DAC dac_max_ctrl_mv(1200) -> VOUT ≈ 0        (低电压起步端)
+duty 100% (满制冷)        -> DAC dac_min_ctrl_mv(0)      -> VOUT = 分压自然点 ≈ 6V
+```
+
+- **新增 `NV_TEC_DAC_MIN_CTRL_MV` 槽**（默认 0mV）：注入窗口底 = FB 恰在 VFBTH 的 DAC 电压。
+- `tec_dac_set` 改为反向插值：`mv = dac_max_ctrl_mv - (duty × span / 100)`。
+- **启动锚点重写**：首次使能先写"0 电流端"（duty=0 → DAC 1200mV，VOUT≈0），再拉 TEC_VEN，之后斜坡逐周期上调 duty → TEC 从 0V 缓升。
+- **故障/等待路径修正**：OVERTEMP、THERMAL_WAIT 的 `tec_dac_set(0u)` 在反向映射下等于满制冷输出（危险），改为 0 duty = DAC 窗口顶 = VOUT≈0。
+
+### 6V/15W TEC 的 R3 计算推导
+
+**拓扑**：VOUT—R1—FB—R2—GND，DAC(Vdac)—R3—FB。FB 被闭环钳在 0.76V。
+
+**第 1 步：R1/R2（满载自然点）**
+$$VOUT = 0.76 × (1 + R1/R2) = 6V \Rightarrow R1/R2 ≈ 6.89$$
+取 R2 = 10k → R1 ≈ 68k（VOUT_max ≈ 5.93V）。
+
+**第 2 步：R3（注入满量程）**
+FB 恒 = 0.76V，DAC 满量程注入电流 = (Vdac_max − 0.76)/R3。要压到 VOUT≈0，注入电流须抵消 R2 电流：
+$$I_{R3} = I_{R2} = 0.76/10k = 76µA \Rightarrow R3 = (V_{dac\_max} − 0.76)/76µA$$
+取 DAC 满量程 3.3V → R3 ≈ 20k（注入 ≈127µA，压到 0 有余量，留线性区）。
+
+**推荐值（6V/15W）**：R2 = 10k、R1 = 68k、**R3 = 20k**。DAC≈2.6V 即可压到 0V，留 20% 线性余量。
+
+**固件换算**：`DAC_MAX_CTRL_MV = 1200` 不变（注入窗口顶 = 0 电流端），启动锚点 1200mV 对应 VOUT≈0，从 0V 起步 + 每周期 5% duty 缓升 = 低电压软启动。
+
+### 验证
+
+- 全量 54 C 文件编译 0 错 0 警（-Wall），链接成功：FLASH 32296B / RAM 4280B。
+- 改动：`nv_params.h/c`（新增 `DAC_MIN_CTRL_MV` 槽 + 默认值）、`tec_control.c`（反向映射、启动锚点重写、故障路径改 0 duty）、`tres_i2c_probe.py` 参数表同步。
+
+### 遗留
+
+- R1/R2/R3 为**理论值**，真机需示波器在 FB 端标定：DAC=1200mV 时 VOUT≈0、DAC=0 时 VOUT≈6V，必要时微调 R 值。
+- `DAC_MIN_CTRL_MV` 标定 = 实测"DAC 输出让 FB 恰在 0.76V、TEC 电流≈0"的电压；`DAC_STARTUP_MV` 标定 = 启动锚点（默认 1200mV 窗口顶）。
+- 上电 `MCP4725_Init` 输出 0V 是 MCU 上电瞬间的保守态（此时 TEC_VEN 未拉高，FB 由分压网络决定，无电流）；真正启动由锚点 + 斜坡承担。
+
+---
+
+## 2026-10-10 — 启动锚点修正：不从 0V 起步（目标附近起步 + DCDC 软启动负责大范围建立）
+
+### 背景
+
+上一轮"锚点=窗口顶=0V 端起步"的策略经用户质疑后确认是错的。用户指出：**启动时不能从 0V 开始调，调整范围过大 DCDC 控制环路会不稳定**。TPS565201 是 D-CAP2 自适应导通控制：占空比 `D = VOUT/VIN`，输出压到很低时占空比极小（如 VIN=12V、VOUT=0.5V 时 D≈4%），逼近最小导通时间，环路线性变差。固件斜坡若从 0 扫到 6V 满量程，会拖 DCDC 扫过整个低占空比不稳定区。
+
+### 修正后的启动策略
+
+1. **启动锚点 = 目标工作点附近**（`DAC_STARTUP_MV` 默认 **240mV** ≈ 6V 目标的 ~80% = 4.8V 端），而非 0V 端。
+2. **0 → 锚点的大范围电压建立交给 TPS565201 的 1ms 内部软启动**（参考爬升超过 FB 才开始开关，输出平滑建立），固件不参与全量程爬升。
+3. **固件斜坡只做小范围收敛**（4.8V → 6V），每周期 5% duty 限速，环路始终在小工作区稳定运行。
+4. 使能时锚点已让 FB 高于 UVP 阈值（65% × 0.76V），不会触发 hiccup。
+
+### 实现变更
+
+| 文件 | 改动 |
+|---|---|
+| `Core/SRC/nv_params.c` | `NV_TEC_DAC_STARTUP_MV` 默认 **1200 → 240mV**，注释更新为"目标附近起步"语义 |
+| `Core/SRC/tec_control.c` | `tec_dac_set` 注释补充启动策略说明；首次使能锚点块注释重写（目标附近 + 软启动负责大范围 + 无 UVP hiccup） |
+| `test/tres_i2c_probe.py` | 补 `DAC_MIN_CTRL` 槽（固件已加，探针同步，槽序对齐） |
+
+### 验证
+
+- 全量 54 C 文件编译 0 错 0 警（-Wall），链接成功：FLASH 32296B / RAM 4280B。
+- `tres_i2c_probe.py` py_compile 通过。
+
+### 遗留
+
+- `DAC_STARTUP_MV`=240mV 是 6V TEC 的理论起点（≈80%），真机按实测标定：锚点应为"目标电压的 70~90%"处，避免扫过不稳定低占空比区。
+- `DAC_MIN_CTRL_MV`（默认 0mV）标定 = FB 恰在 0.76V 时的 DAC 电压；`RAMP_STEP_PERCENT`（默认 5%）按小收敛范围的热惯性调整。
+
+---
+
+## 2026-10-10 — 满量程改为可标定 + 启动百分比参数化（用户反馈修正）
+
+### 结论
+
+- `1200mV` **不是 TI 文档给出的 TPS565201 满量程**，而是早期按 TPS63802/VSET 假设写入项目的默认 `DAC_MAX_CTRL_MV`。TI 文档使用 LM5176/TPS63802，不适用于本板的 TPS565201 FB 注入网络。
+- MCP4725 本身的 DAC 电气满量程是 VDD=3300mV；但 TEC 功率级的**有效控制窗口**由实际 R1/R2/R3、TPS565201 `VFBTH=760mV` 和目标 VOUT 决定，必须由本板计算并用示波器/万用表标定。
+- FB 注入 KCL（忽略 FB 输入电流）：
+  ```
+  (VOUT - VFB)/R1 + (VDAC - VFB)/R3 = VFB/R2
+  VOUT = VFB + R1 * (VFB/R2 - (VDAC - VFB)/R3)
+  ```
+  因此 DAC 端点不能照搬 1200mV，`DAC_MIN_CTRL_MV` / `DAC_MAX_CTRL_MV` 都是本板标定值。
+
+### 启动点参数化
+
+- `NV_TEC_DAC_STARTUP_MV` 改名为 `NV_TEC_DAC_STARTUP_PCT`，语义从固定 mV 改为**起调点占满量程的百分比**，默认 `60%`。
+- 启动时直接以 `start_duty = DAC_STARTUP_PCT` 起调，DAC mV 由已标定的 DAC 控制窗口自动换算，不再每次改 mV 宏或重烧固件。
+- NVM 版本从 5 bump 到 6，避免旧的 mV 值被误读成百分比。
+- probe 槽同步改为 `DAC_STARTUP_PCT`，单位 `%`。
+
+### 低电压起步策略
+
+- 不再把启动点放在 0V 端。TPS565201 的 D-CAP2 在低占空比/低 VOUT 区域接近最小导通时间，固件扫完整个 0..6V 范围会让环路穿越不理想工作区。
+- 默认 60% 起调（对 6V TEC 约 3.6V 的目标比例），由 TPS565201 内部 1ms soft-start 完成 0→锚点的建立，固件只在锚点附近做每周期限步的微调。
+- 真机若目标工作点不同，只需写 `DAC_STARTUP_PCT`，不再改代码。
+
+### 验证
+
+- 全量 54 C 文件编译 0 错 0 警，链接成功：FLASH 32268B / RAM 4280B。
+- `tres_i2c_probe.py` py_compile 通过。
+
+---
+
+## 2026-10-10 — 勘误：TEC 启动/满量程结论的最终状态（用户三轮反馈后）
+
+本节汇总前几条（2460 行起）中**已被后续修正推翻的结论**，避免误读；最终实现以本节为准。
+
+### 已被推翻的旧结论（勿再参考）
+
+| 旧结论 | 出处 | 为何被推翻 |
+|---|---|---|
+| `DAC_STARTUP_MV` 默认 1200mV = 窗口顶 = 0V 起步 | "TEC 控制四改" 遗留段 | 用户指出不能从 0V 起步：D-CAP2 低占空比区（D=VOUT/VIN，如 12V→0.5V 时 D≈4%）逼近最小导通时间，环路不稳定；且 1200mV 只是早期 TPS63802/VSET 假设 |
+| `DAC_MAX_CTRL_MV=1200` 是满量程 | 同上 | 1200mV **不是** TI 给的 TPS565201 值。TI 文档用 LM5176/TPS63802，不适用本板 FB 注入网络。按 R1=68k/R2=10k/R3=20k + VFBTH=760mV 的 KCL 推导，真实工作区约 **740mV(↔5.9V) ~ 2360mV(↔~0.5V)** |
+| 启动锚点用固定 mV 表达 | "修正 FB 注入映射极性" 条目 | 每次标定要改 mV/重烧，改为**百分比**表达，自动化换算 |
+| 起调 80%（240mV ≈ 4.8V） | "启动锚点修正" 条目 | 用户觉得 4.8V 偏高，改为 **60%** 起调 |
+
+### 当前最终状态（以此为准）
+
+- **启动点**：`NV_TEC_DAC_STARTUP_PCT`（**百分比**，默认 `60`），即满制冷量的 60%（对 6V TEC 约 3.6V 目标比例）。启动时 `start_duty = DAC_STARTUP_PCT`，由已标定的 DAC 控制窗口自动换算成 mV；改百分比只写 NVRAM（`probe --set DAC_STARTUP 60`），不重烧固件。
+- **满量程两端点需真机标定**（勿用默认值上产线）：
+  - `DAC_MIN_CTRL_MV`：FB=0.76V、TEC≈0 电流时的 DAC mV（≈740mV 量级，按 R 网络）。
+  - `DAC_MAX_CTRL_MV`：VOUT 压到最低时需要的 DAC mV（≈2360mV 量级）。当前代码默认仍是 1200mV，标定后通过 probe 覆盖。
+- **映射方向**：FB 注入式下 DAC 高 → FB 高 → 输出低，`tec_dac_set` 按反向映射：
+  - duty 0%（TEC off）→ DAC max → VOUT 低
+  - duty 100%（满制冷）→ DAC min → VOUT = 分压自然点
+- **启动时序**：锚点先落（60%）→ 拉 TEC_VEN → TPS565201 1ms 内部软启动完成 0→锚点建立 → 固件每周期限步（5%）微调至目标。FB 在锚点处已高于 UVP（65%×0.76V），无 hiccup。
+- **R3 推荐值**：20k（DAC 满量程 3.3V 注入 ≈127µA，压到 0 有余量），理论值，真机按 KCL 公式 `(VOUT−VFB)/R1 + (VDAC−VFB)/R3 = VFB/R2` 复核。
+
+### 真机标定清单（上产线前必须完成）
+
+1. 示波器测 FB 端：确定 `DAC_MIN_CTRL_MV`（FB=0.76V 时）与 `DAC_MAX_CTRL_MV`（VOUT 最低时）。
+2. 标定后写入 NVRAM 并 `SAVE_PARAMS`。
+3. 确认 60% 起调对应的实际 VOUT 符合散热需求，必要时调 `DAC_STARTUP_PCT`。
+4. `RAMP_STEP_PERCENT`（默认 5%）按真机热惯性调整；`FF_GAIN`（默认 1%/°C）按 env−target 温差实测。
+
+---
+
+## 2026-10-10 — 修复 PID 初始化零误差满输出缺陷（seed 符号域 + D-LPF 种子）
+
+### 缺陷确认
+
+用户指出："PID 初始化会在零误差时产生满输出请求"。复查确认**存在,且是两处叠加**:
+
+**根因 1（严重）：初始化 seed 与运行时符号域不一致**
+- `TecControl_Init` 用 `+(float)target_base_millic`（正）作 EPID seed（xk_1/xk_2）。
+- `TecControl_Cb` 每次 `TecPid_Update(-composite)` 注入**负**值（EPID 加热语义取负翻转成制冷语义）。
+- 第一次 Update 即使 zero error（composite == target），`P = kp×(xk_1−measure) = 2.0×(45000+composite)` ≈ 180000 → clamp 100%，D 项同被带飞。
+
+**根因 2：D 项 LPF 用 `measure` 做初始状态**
+- `epid_util_lpf_init(&s_lpf, a=0.3, measure=45000)` → LPF `y[0] = 0.3×45000 = 13500`。
+- 首次 D 项真值为 0，但 LPF 输出从 13500 按 `y×0.7^n` 衰减，首次 `d_term≈9450` 直接累加 → 满输出，且 1s 周期下约 **27 个周期**才衰减干净。
+
+### 修复
+
+| 文件 | 改动 |
+|---|---|
+| `Core/SRC/tec_control.c` | `TecPid_Init` 种子改为 `-(float)target_base_millic`，与运行时负域注入一致；注释说明符号域要求 |
+| `Core/SRC/tec_pid.c` | D 项 LPF 初始状态改为 `0.0f`（D 项在 init 时 xk_1==xk_2==measure，真值就是 0），不再用 `measure` 做种子 |
+
+### 修复后行为（零误差）
+
+- 第一次 Update：`P = kp×(xk_1−measure) = kp×(−target + composite) = 0`，`D = 0 → LPF 从 0 → 0`，`I = 0` → 输出 0，不再 slam 到 100%。
+
+### 验证
+
+- 全量 54 C 文件编译 0 错 0 警，链接成功：FLASH 32268B / RAM 4280B。
+
+### 遗留
+
+- `TecPid_Reset` 仍以调用方传入的 `measure` 作种子且不重置 LPF——当前无调用者，保持不动；若未来启用需同步改。
+
+---
+
+## 2026-10-10 — 修复过流正反馈：过流时切制冷而非加制冷（优先项）
+
+### 缺陷
+
+原第 6 节过流分支：
+
+```c
+if ( cur_ma > cur_danger_ma ) { feedforward += 50; alarm |= OVERCURRENT; }
+```
+
+电流越大 → 前馈 duty +50 → 制冷输出更强 → TEC 电流更大 → **正反馈**，会一直推到电源保护/跳闸为止，是危险缺陷。
+
+### 修复
+
+过流时改为**停止制冷**（电流必然回落），并重置 PID 防积分饱和：
+
+- `tec_control.c` 第 6 节过流分支：`feedforward += 50` → `TecPid_Reset()` + `duty=0` + `tec_dac_set(0)` + `Fan_SetDutyPercent(100)` + 早退等待电流回落到限值以下。
+- `tec_pid.c` `TecPid_Reset`：顺带重置 D 项 LPF 状态（种子 0），避免故障前的大 D 值残留泄漏到恢复后的输出。
+
+### 行为
+
+过流 → 本周期 TEC duty 立即归 0（DAC 反向映射下=停止制冷）→ 电流衰减 → 下周期恢复正常控制。恢复时 PID 积分从零重新积累，无过冲。
+
+### 验证
+
+- 全量 54 C 文件编译 0 错 0 警，链接成功：FLASH 32364B / RAM 4280B。
+
+---
+
+## 2026-10-10 — 修复热端过热正反馈：过热时降载而非强制满功率（用户反馈 #2）
+
+### 缺陷
+
+原第 7 节 HOT_WARNING 分支：
+
+```c
+if ( s_alarm & TEC_ALARM_HOT_WARNING ) {
+    if ( duty < 100 ) { duty = 100; }   /* "overtemp: full speed" */
+}
+```
+
+热端过热时强制 `duty=100` = 最大制冷。但 TEC 是把热量**泵向热端**的：热端已经过热说明散热片/风扇跟不上，此时继续满功率制冷只会往热端注入更多废热 → 热端更热 → 正反馈，与过流 bug 同类。
+
+### 修复
+
+HOT_WARNING 分支改为**降载**：
+
+- `duty = 0`（停止 TEC 制冷，不再往热端泵热），由第 8 节风扇全速（hot >= fan_temp_full → 100%）把热端热量散掉。
+- 首次降载时 `TecPid_Reset`（积分清零，恢复干净）。
+- 软启动斜坡限制 duty 下降速率，功率级无硬台阶。
+
+行为：热端过热 → TEC 停 → 风扇全速散热 → 热端回落 → 下周期恢复正常控制。
+
+### 验证
+
+- 全量 54 C 文件编译 0 错 0 警，链接成功：FLASH 32376B / RAM 4280B。
+
+---
+
+## 2026-10-10 — 修复风扇通道归属：TEC 环路从未取得 PWM 通道控制权（用户反馈 #3）
+
+### 缺陷
+
+- `fan.h`/`fan.c` 设计：`FAN_CH_SW`(PA11) 切换风扇 PWM 来源——PY32(TIM3 CH2) / SDM845(SoC)。`Fan_SetSource(FAN_SOURCE_PY32)` 把 PA11 拉高才让 PY32 驱动,默认 `Fan_Init()` 交给 **SDM845**。
+- `tec_control.c` 只调 `Fan_SetDutyPercent()`(写 TIM3 CH2 比较值),**从未调 `Fan_SetEnabled(1)`/`Fan_SetSource(FAN_SOURCE_PY32)` 取得通道归属**。
+- 结果:PA11 保持低 → 风扇 PWM 一直由 SoC 驱动 → TEC 环路的全部风扇控制(过温全速、热端斜坡、降温)全是空操作。
+
+### 修复
+
+`tec_control.c` 首次 TEC 使能处(预检通过、`tec_set_enabled(1u)` 后)补 `Fan_SetEnabled(1u)`——把风扇通道归属切到 PY32,后续所有 `Fan_SetDutyPercent()` 才真正生效。早退路径(过流/过热)不释放归属,风扇保持 PY32 全速散热。
+
+### 验证
+
+- 全量 54 C 文件编译 0 错 0 警,链接成功：FLASH 32428B / RAM 4280B。
+
+---
+
+## 2026-10-10 — 修复露点保护：改为直接监测冷端温度（用户反馈 #4）
+
+### 缺陷
+
+原露点保护 clamp 的是 **composite 目标值**（温度融合 `hot*0.5 + sdm*0.3 + env*0.2` 的目标），但**不成立**：
+
+- 融合权重里热端占 50%，热端很热时 composite 被拉高，PID 无需制冷到露点以下就满足目标。
+- 例：hot=80°C、env=25°C、target=45°C → 要 composite=45 需 `0.3×sdm = 45-40-5 = 0` → 冷端被制冷到 ~0°C，而 composite 显示 45°C → 露点 clamp 不触发，冷端结露。
+- 融合温度无法保证冷端控温，露点保护因此失效。
+
+### 修复
+
+- 露点保护从"clamp composite target"改为**直接监测冷端读数 `sdm_mc`**（NVRAM 可切换 TEC_COLD ADC / SDM845）。
+- 冷端 <（露点 + `DEWPOINT_MARGIN_MILLIC`）→ `tec_set_enabled(0)` + DAC 归零 + 风扇全速 + `TEC_ALARM_DEWPOINT` + 早退。
+- 新增 `TEC_ALARM_DEWPOINT (0x20)` 报警位（tec_control.h）。
+
+行为：冷端降到露点+余量以下 → 切 TEC 制冷 → 冷端回温到安全区 → 下周期恢复正常控制。
+
+### 验证
+
+- 全量 54 C 文件编译 0 错 0 警，链接成功：FLASH 32456B / RAM 4280B。
+
+---
+
+## 2026-10-10 — 统一 PID 单位 / 采样周期 / 抗饱和约定（用户反馈 #7）
+
+### 缺陷
+
+原实现三者脱节：
+
+1. **单位不统一**：NVRAM 存 `KP=2.0 KI=0.1 KD=0.5`（Q16），但 EPID 是增量式，`I[k]=Ki×e[k]` 是**每周期新增量**——Ki 物理单位隐含"每周期"，改周期后行为漂移。
+2. **采样周期未入 PID**：`TecPid_Init` 走 `epid_init()`（无周期版），周期只存在 QuarkTS 调度（`control_period_ms`），增益不随周期归一。
+3. **抗饱和对象错误**：`epid_util_ilim(i_min..i_max)` 钳的是**每周期 I 增量**，不是真积分器 `y_out`；恢复仍可能过冲（此前加的条件积分是补丁）。
+
+### 统一约定（写入 tec_pid.h 头注释 + NVRAM 槽注释）
+
+- 输入：温度 milli-degC；输出：duty 0..100%。
+- `kp`：%out per m°C。
+- `ki`：**%out per m°C per SECOND**（每秒积分速率）。
+- `kd`：**%out per m°C per SECOND**（每秒微分速率）。
+- `period_s`：控制环周期（秒），Init 时传入，内部 `ki_eff=ki×Ts`、`kd_eff=kd×Ts` 归一为每周期量，同时用于 QuarkTS 调度——**改周期不用重调增益**。
+- 抗饱和：`i_min/i_max` 语义 = 每周期 I 增量窗口；输出饱和同向冻结 I（条件积分）保留。
+
+### 实现变更
+
+| 文件 | 改动 |
+|---|---|
+| `tec_pid.h` | `TecPid_Init` 增加 `period_s` 参数；头注释重写单位/周期/抗饱和约定 |
+| `tec_pid.c` | Init 内 `kp_eff=kp, ki_eff=ki×period_s, kd_eff=kd×period_s` 再传 `epid_init` |
+| `tec_control.c` | `period_s` 计算提前到 Init 之前并传入；调用处注释同步 |
+| `nv_params.h` | PID_KI/PID_KD 槽注释改为"每秒速率"语义 |
+
+### 验证
+
+- 全量 54 C 文件编译 0 错 0 警，链接成功：FLASH 32516B / RAM 4280B。
+- 1s 默认周期下 `ki_eff=ki×1`，行为与改动前一致；周期改 500ms 时积分速率自动减半，无需重调增益。
+
+---
+
+## 2026-10-10 — 修复环境温差前馈 1000 倍放大（用户反馈 #5）
+
+### 缺陷
+
+COMMON-MODE 前馈（第 5b 节）：
+
+```c
+int32_t gradient_mc = env_mc - target_mc;        // 单位 milli-degC（如 10000 = 10°C）
+int32_t ff_base     = (int32_t)( gradient_mc * s_p.ff_gain );  // ff_gain 是 % per °C
+```
+
+`gradient_mc` 是 **milli-degC**（45000−35000=10000 = 10°C），`ff_gain` 定义是 "% per °C"。两者直接相乘 = 10000×1.0 = 10000%，clamp 到 100 → **任何 >0.1°C 的温差前馈都直接饱和到 100%**，把 PID 完全淹没，前馈失效。
+
+### 修复
+
+```c
+int32_t gradient_c = gradient_mc / 1000;   // milli-degC -> degC
+int32_t ff_base    = (int32_t)( gradient_c * s_p.ff_gain );
+```
+
+10°C 温差 × 1.0%/°C = 10% 前馈（合理），不再饱和。`FF_GAIN` 槽语义（% per °C）不变，默认 1.0。
+
+### 验证
+
+- 全量 54 C 文件编译 0 错 0 警，链接成功：FLASH 32524B / RAM 4280B。
+- 电流前馈（第 6 节）单位已核对：`cur_ma` 是 mA、`/10` 是显式缩放，无同类问题。
+
+---
+
+## 2026-10-10 — 修复 DAC 写失败仍使能 TEC + 把失败值当已执行（用户反馈 #8）
+
+### 缺陷
+
+原 `tec_dac_set()` 两个安全问题：
+
+1. **先更新 `s_dac_percent` 再写 DAC**（`s_dac_percent = duty; MCP4725_SetVoltage_mV(mv)`）——写失败也把失败值当成已执行，控制环以为 TEC 电压已变，实际 DAC 停在旧值 → 静默错误执行。
+2. **`(void)` 丢弃写结果**——完全不知道失败。
+3. **使能路径不检查 DAC 写状态**——`tec_set_enabled(1)` 照常拉高 TEC_VEN，即使 DAC 写失败、FB 节点未settle到启动锚点，转换器可能满占空/hiccup。
+
+### 修复
+
+| 文件 | 改动 |
+|---|---|
+| `tec_control.c` | `tec_dac_set` 返回 `int`（MCP4725_Status_t），**只在写成功后才更新 `s_dac_percent`**；调用处全部处理返回值 |
+| `tec_control.c` 首次使能 | `tec_dac_set(start_duty)` 失败 → **不使能 TEC**（`tec_set_enabled(0)` + `TEC_ALARM_DAC_FAULT` + 早退，下周期重试） |
+| `tec_control.c` 主输出 | `tec_dac_set(duty)` 失败 → `TEC_ALARM_DAC_FAULT`（下周期重试，s_dac_percent 保持 last-good） |
+| `tec_control.c` 早退路径 | `(void)tec_dac_set(0)`——关闭语义下写失败不改变安全态 |
+| `tec_control.h` | 新增 `TEC_ALARM_DAC_FAULT (0x40)` |
+
+### 行为
+
+- 启动：DAC 写入失败 → TEC 保持禁用 → 重试，直到锚点真正落在 DAC 输出上才使能。
+- 运行：DAC 写失败 → 报警位暴露 mis-actuation，下周期重试，状态不假装成功。
+
+---
+
+## 2026-10-10 — PID 控制对象改为冷端（器件温度），废除温度融合（用户确认方向）
+
+### 背景与决策
+
+原结构：PID 控制融合温度 `composite = hot*0.5 + sdm*0.3 + env*0.2`，露点保护单独看冷端。物理上两套目标打架——热端权重 50% 使热端很热时 composite 达标、冷端却可能已被推到 ~0°C 结露（即旧露点保护失效的根本原因）。
+
+用户确认被控对象 = **冷端/被冷却器件温度**。据此重构：
+
+| 信号 | 新职责 |
+|---|---|
+| `sdm_mc`（冷端） | **PID 反馈** + 露点保护 + SoC 收紧目标输入 |
+| `hot_mc`（热端） | 保护输入：危险切断、过热警告、风扇斜坡/故障判断——**不进 PID 误差** |
+| `env_mc`（环境） | 目标补偿 + COMMON-MODE 前馈——不进 PID 误差 |
+| `composite` | 融合公式**删除** |
+
+### 实现方式
+
+- `tec_control.c`：删除融合计算与 `composite_mc` 变量；`TecPid_Update(-sdm_mc)`；过流/过热警告两处 `TecPid_Reset(-sdm_mc)`；`TecPid_Init` 种子仍用 `-target_base`（无测量时最接近的域内种子，首个真实测量下周期替换）。
+- 动态目标逻辑保留：`env` 补偿 + `sdm > soc_tighten` 收紧（现在是"冷端过热收紧目标"，语义自洽）。
+- 露点保护注释改写：它守护的变量与 PID 同一个（冷端），是 PID 之上的独立硬保护层，不再存在"两套目标"。
+- `tec_control.h` 文件头文档同步（职责分离表 + Init 流程编号）。
+
+### 验证
+
+- CLI 编译 `tec_control.c`：0 错 0 警。
+- 全库 grep：Core/ 无 `composite`/`fusion` 残留（历史 WORKLOG 记录不动，按"不修改已记录历史"约定）。
+
+### 验证
+
+- 全量 54 C 文件编译 0 错 0 警，链接成功：FLASH 32580B / RAM 4280B。
+
+---
+
+## 2026-10-10 — 安全审查修复轮：NVRAM 校验 / 传感器失效保护 / 状态机超时 / ADC 超时 / SoftI2C 上限 / 过流关使能
+
+### 背景
+
+四路子代理 + 人工逐条核验全库后，确认修复 7 项（编号对应审查报告）。另核验排除 4 个子代理误报（详见"误报澄清"），上一轮报告的 #5（TIM3 PWM 频率）经核验为误报——`Fan_Init()` 会用 `FAN_PWM_PERIOD_TICKS=1279` 覆盖 `tim.c` 的初始 `ARR=319`，实际运行 PWM = 25 kHz 正确。
+
+### 修复清单
+
+| # | 文件 | 改动 |
+|---|---|---|
+| 1 | `tec_control.c` | `tec_params_load()` 末尾校验 DAC 窗口：`dac_min >= dac_max` 或越界 `[0, 3300]` 时回落出厂默认（0/1200），防 `span` 无符号翻转致 DAC 输出失控 |
+| 2 | `adc.c` | 电流换算守卫补 `shunt_uohm==0`（此前漏检，除零使电流恒 0 → 过流保护静默失效）；回落默认 `20000 uOhm` |
+| 3 | `tec_control.c` + `.h` + `probe.py` | 热端 NTC 无效（开路→-40°C / 短路→+200°C / ADC 超时→0）时 fail-safe：关 TEC、DAC 归零、风扇 100%、置 `TEC_ALARM_SENSOR(0x80)`、return。探针 `TEC_FLAG_NAMES` 补 SENSOR/DEWPOINT/DAC_FAULT |
+| 4 | `sdm845_boot.c` | 热预检超时加 `QSM_TSOPT_PERIODIC`：高温/传感器无效时不再一次性超时后卡死，持续轮询直到 `proceed` 或 5 分钟 fail-open |
+| 6 | `adc.c` | EOC 等待加超时（100 万次循环），超时返回 0 → 上游读作传感器故障而非永久阻塞 |
+| 7 | `soft_i2c.c` | 四事务函数加 `SOFT_I2C_MAX_TRANSFER(64)` 长度上限，超限在关中断前拒绝（防异常长事务饿死调度/ISR） |
+| 9 | `tec_control.c` | 过流分支加 `tec_set_enabled(0)`，与过热保护对称——疑似短路负载不再持续供电 |
+
+### 误报澄清（子代理报告但经人工/手册核验不成立）
+
+- **MCP4725 fast-write 命令字节（H1）**：`data[0] = 0x00 | ((code>>8)&0x0F)` 正确——fast-write 首字节低 4 位即 D11..D8（RobTillaart 库按手册第 18 页实现完全一致），PD 位默认 0。非"把 PD 填入数据位"。
+- **NVRAM FLASH 解锁失败 PRIMASK 泄漏（S2）**：`LL_FLASH_Unlock` 失败路径已 `__set_PRIMASK(primask)` 恢复，非裸 return。
+- **AHT20 温度符号解析（H4）**：AHT20 温度原始值为**无符号 20 位**，公式 `T=S/2^20×200−50`，`0x80000`=+50°C 解析正确；子代理误用 AHT10 补码语义。
+- **TIM3 PWM 频率（上一轮 #5）**：`tim.c` 初始 ARR=319 被 `Fan_Init()` 覆盖为 1279（32MHz/1280=25kHz），注释与运行一致，非 100kHz。
+
+### 遗留（未修复，供后续评估）
+
+- **NVRAM 撕裂写（S1，真实）**：`NvParams_Save()` 两页 erase+program 中途掉电产生撕裂块 → 上电 CRC 失败回默认值，标定丢失。修复需双槽方案或写后读回校验，改动面大，本轮未做。
+- **AHT20 初始化无重试上限（H3，真实）**：传感器故障时每 10s 无限重发 0xBE/0xAC，无降级/告警。
+- **`NvParams_Save()` 两处 `while(BUSY)` 无超时（与 #6 同族）**。
+
+### 验证
+
+- 改动 4 文件 CLI 编译 0 错 0 警；全量 Core/SRC 编译 0 错。
+- `tres_i2c_probe.py` `py_compile` 通过。
+
+### 补充：#5（TIM3 PWM）与 #8（NVRAM 参数关系校验）收尾
+
+| # | 文件 | 改动 |
+|---|---|---|
+| 5 | `tim.c` | 初始 `ARR` 从 319（按错误的 8 MHz 注释写的死值）改为 1279，与 `fan.h` 的 `FAN_PWM_PERIOD_TICKS`（32 MHz/25 kHz）一致。运行行为不变（`Fan_Init()` 本来就会用 1279 覆盖），消除误导注释与初始/运行值不一致 |
+| 8 | `tec_control.c` | `tec_params_load()` 校验从"仅 DAC 窗口"扩展为全套关系/范围校验，任一违反回落出厂默认：风扇斜坡 `base<full`（除零/反转防护）、`hot_overtemp<hot_danger`（警告先于危险）、`cur_ff_knee<cur_danger`、PID 增益 `kp>0,ki>0,kd>=0`（防 `TecPid_Init` 静默失败）、`0<ramp_step<=100`、`0<=fan_duty_base<=100`、`dewpoint_margin>=0`、`temp_valid_min<max`、`current_valid_max>0` |
+
+编译 0 错 0 警。
