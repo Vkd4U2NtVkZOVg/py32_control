@@ -111,6 +111,11 @@ typedef enum {
     NV_TEC_DEWPOINT_MARGIN_MILLIC,     /**< target floor: dew point + this     */
     NV_TEC_FF_GAIN_Q16,                /**< COMMON-MODE feedforward: % duty per
                                             °C of (env - target) below knee    */
+    NV_TEC_HOT_FB_GAIN_Q16,            /**< hot-side foldback gain: cold-target
+                                            lift in m°C per m°C of hot excess
+                                            over the overtemp knee (Q16)       */
+    NV_TEC_HOT_FB_MAX_MILLIC,          /**< hot-side foldback: max cold-target
+                                            lift (m°C)                         */
     NV_PARAM_COUNT_MARKER,             /**< sentinel: MUST stay last. NVM_PARAM_COUNT
                                             is derived from it, so adding a slot
                                             is just adding a line above.         */

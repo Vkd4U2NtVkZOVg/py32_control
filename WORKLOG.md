@@ -2958,3 +2958,32 @@ v6 的 `NvParams_Save()` 单块顺序擦写 2 页（erase p0 → erase p1 → pr
 
 - CRC 仍只覆盖 `params[]`（S3）：magic/version/seq 有独立比较兜底，位翻转走安全降级；扩 CRC 到 header 需两段 CRC 改造，收益有限，暂不做。
 - 擦写耗时翻倍（4 页 vs 2 页），SAVE_PARAMS 的关中断窗口相应变长——soft-I2C/调度器在 Save 期间被推迟属已知代价。
+
+---
+
+## 2026-10-10 — 热端过热改热折返（foldback）：抬冷端目标卸负荷，不再压 duty=0 / 一刀切关断（v8）
+
+### 背景与决策
+
+原策略：热端 > 60°C（HOT_WARNING）把 duty 压 0 并清 PID；热端 > 70°C（HOT_DANGER）直接关 TEC_VEN。物理上不对：热端负荷 = 泵热 + TEC 电功率，正确缓解方式是**降低制冷强度**；且关断后热端被风扇吹回阈值以下时，重新使能路径从 60% 锚点猛拉制冷 → 热端再次过热 → bang-bang 振荡，冷端温度完全失控反弹。
+
+用户确认方案：**热折返**——过热时抬高冷端目标，PID 自动减小制冷、热端负荷随之下降；软降级 + 硬关断两级，danger 阈值改 80°C（NVRAM 可设）作最后防线。
+
+### 实现（NVM_VERSION 7 → 8）
+
+| 项 | 内容 |
+|---|---|
+| 新参数 | `NV_TEC_HOT_FB_GAIN_Q16`（折返增益，默认 2.0：热端每超 1°C 冷端目标抬 2°C）、`NV_TEC_HOT_FB_MAX_MILLIC`（抬升上限，默认 +30°C） |
+| `HOT_DANGER` 默认 | 70000 → **80000**（本来就是 NVRAM 参数，只改默认） |
+| `tec_control.c` | 动态目标后新增折返块：`lift = (excess × gain_q16) >> 16`（int64 定点，M0+ 无 FPU），clamp 上限后 `target_mc += lift`；`HOT_WARNING` 置位移至 `s_alarm=NONE` 后；**删除**原 warning 的 `duty=0 + TecPid_Reset`（PID 连续运行、积分器保留，duty 随目标抬升平滑滑落） |
+| 加载校验 | gain==0 / max<=0 回落默认；danger 校验回落值同步 80000 |
+
+### 附带修正：参数窗口注释全面过时
+
+用编译期 `_Static_assert(NVM_PARAM_COUNT == N)` 权威确认实际 **34 槽**（此前注释在 33/32/27 间漂移）。统一 `0x40..0xC7`：`tres_i2c_slave.h`（3 处）、`tres_cmd.h`、`probe.py`（3 处帮助文本）、`WORKLOG_CURRENT`（2 处）。窗口宏 `TRES_REG_NV_END` 本身自动派生，仅注释错。
+
+### 验证
+
+- 全量 Core/SRC 编译 0 错 0 警；probe `py_compile` 通过（34 槽）；
+- `nv_dualslot_sim.py` 232 项断言通过（NVM_PARAM_COUNT 同步 34，块 152B 仍 2 页）；
+- 折返行为：60°C→+0、65°C→+10、75°C→+30（封顶）；danger 80°C 硬关断正常 foldback 到不了。

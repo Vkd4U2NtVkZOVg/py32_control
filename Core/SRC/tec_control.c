@@ -68,6 +68,9 @@ typedef struct {
     int32_t ramp_step_percent;      /* max duty change per cycle (soft start)   */
     int32_t dewpoint_margin_millic; /* target floor = dew point + this          */
     float   ff_gain;                /* COMMON-MODE feedforward %/°C (Q16 NVRAM) */
+    uint32_t hot_fb_gain_q16;       /* hot foldback: cold-target lift per hot
+                                       excess, Q16 (2.0 = +2 °C per 1 °C)      */
+    int32_t hot_fb_max_millic;      /* hot foldback: max cold-target lift       */
 } Tec_Params_t;
 
 static void tec_params_load( Tec_Params_t *p )
@@ -98,6 +101,8 @@ static void tec_params_load( Tec_Params_t *p )
     p->ramp_step_percent      = (int32_t)NvParams_Get( NV_TEC_RAMP_STEP_PERCENT );
     p->dewpoint_margin_millic = (int32_t)NvParams_Get( NV_TEC_DEWPOINT_MARGIN_MILLIC );
     p->ff_gain                = (float)NvParams_Get( NV_TEC_FF_GAIN_Q16 ) / NVM_Q16_SCALE;
+    p->hot_fb_gain_q16        = NvParams_Get( NV_TEC_HOT_FB_GAIN_Q16 );
+    p->hot_fb_max_millic      = (int32_t)NvParams_Get( NV_TEC_HOT_FB_MAX_MILLIC );
 
     /* Sanity-check the DAC FB-injection window: tec_dac_set() computes
      * span = dac_max - dac_min and multiplies duty*span, so a corrupt
@@ -130,7 +135,7 @@ static void tec_params_load( Tec_Params_t *p )
     }
     if ( p->hot_overtemp_millic >= p->hot_danger_millic ) {
         p->hot_overtemp_millic = 60000u;
-        p->hot_danger_millic   = 70000u;
+        p->hot_danger_millic   = 80000u;
     }
     if ( p->cur_feedforward_ma >= p->cur_danger_ma ) {
         p->cur_feedforward_ma = 2000u;
@@ -156,6 +161,10 @@ static void tec_params_load( Tec_Params_t *p )
     }
     if ( p->current_valid_max_ma <= 0 ) {
         p->current_valid_max_ma = 5000u;
+    }
+    if ( ( p->hot_fb_gain_q16 == 0u ) || ( p->hot_fb_max_millic <= 0 ) ) {
+        p->hot_fb_gain_q16   = NVM_Q16( 2.0f );
+        p->hot_fb_max_millic = 30000u;
     }
 }
 
@@ -268,6 +277,7 @@ static void TecControl_Cb( qEvent_t e )
     int32_t sdm_mc;
     uint32_t cur_ma;
     int32_t target_mc;
+    int32_t hot_lift;
     int32_t pid_out;
     int32_t feedforward;
     int32_t duty;
@@ -314,8 +324,39 @@ static void TecControl_Cb( qEvent_t e )
         target_mc -= s_p.soc_tighten_delta_millic;
     }
 
+    /*--- 2b. hot-side foldback: lift the cold target to shed TEC load ------*/
+    /* A TEC pumps waste heat into its hot side, so the way to relieve an
+     * overheating heatsink is to cool LESS, not harder. Instead of dropping
+     * the duty to 0 (bang-bang: cold-side rebounds, then the re-enabled TEC
+     * slams back and the cycle repeats), lift the cold-side target above
+     * its base by a gain proportional to the hot excess and let the PID
+     * glide the duty down smoothly. Recovery is automatic: once the hot
+     * side cools below the knee the lift decays back to zero. */
+    hot_lift = 0;
+    if ( hot_mc > s_p.hot_overtemp_millic ) {
+        int32_t excess = hot_mc - s_p.hot_overtemp_millic;
+        int32_t lift;
+
+        lift = (int32_t)( ( (int64_t)excess * (int64_t)s_p.hot_fb_gain_q16 ) >> 16 );
+        if ( lift > s_p.hot_fb_max_millic ) {
+            lift = s_p.hot_fb_max_millic;
+        }
+        if ( lift < 0 ) {
+            lift = 0;
+        }
+        target_mc += lift;
+        hot_lift = lift;
+    }
+
     /*--- 4. fault protection (highest priority first) ----------------------*/
     s_alarm = TEC_ALARM_NONE;
+
+    if ( hot_lift > 0 ) {
+        /* Foldback active: the elevated cold target is doing the load
+         * shedding - keep the PID running (no duty clamp, no integrator
+         * reset), just report the derating to the host. */
+        s_alarm |= TEC_ALARM_HOT_WARNING;
+    }
 
     /* Condensation protection - the controlled variable IS the cold side
      * (sdm_mc), and this guard is the independent hard protection layer on
@@ -407,10 +448,6 @@ static void TecControl_Cb( qEvent_t e )
         Fan_SetEnabled( 1u );
     }
 
-    if ( hot_mc > s_p.hot_overtemp_millic ) {
-        s_alarm |= TEC_ALARM_HOT_WARNING;
-    }
-
     /*--- 5. PID main loop --------------------------------------------------*/
     /* The controlled variable is the COLD side (sdm_mc); the hot side and
      * ambient never enter the PID error. EPID is "heating semantics"
@@ -470,19 +507,6 @@ static void TecControl_Cb( qEvent_t e )
 
     /*--- 7. combine, clamp, soft-start ramp --------------------------------*/
     duty = pid_out + feedforward;
-    if ( s_alarm & TEC_ALARM_HOT_WARNING ) {
-        /* Hot-side overtemperature warning: DO NOT push more cooling. A TEC
-         * pumps waste heat into its hot side, so forcing duty=100 here would
-         * add more heat to an already-too-hot heatsink - same positive-
-         * feedback class as the overcurrent bug. Drop the TEC drive instead
-         * and let the full-speed fan (section 8: hot >= fan_temp_full ->
-         * 100 %) shed the heat; the soft-start ramp limits how fast the duty
-         * falls, avoiding a hard step on the power stage. */
-        if ( duty > 0 ) {
-            TecPid_Reset( &s_pid, -(float)sdm_mc );
-        }
-        duty = 0;
-    }
     if ( duty > 100 ) {
         duty = 100;
     }

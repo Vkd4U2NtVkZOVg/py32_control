@@ -33,12 +33,12 @@
  *   0x33 AHTSTAT   R  last AHT20 driver result code (0 OK, negative = error)
  *   0x34 FANDUTY   R  last fan duty commanded by any writer, percent
  *   0x35 TECDUTY   R  last TEC current command to the DAC, percent
- *   0x40..0xC3    RW  NVRAM parameter window: one 4-byte big-endian value per
+ *   0x40..0xC7    RW  NVRAM parameter window: one 4-byte big-endian value per
  *                     slot. Slot n of NvParamTecId_t (nv_params.h) lives at
  *                     0x40 + 4*n. Values are 32-bit big-endian; writing the
  *                     4th byte commits the value into the NVRAM RAM cache.
  *                     Persist with the SAVE_PARAMS command.
- *                     (33 slots: 0x40 + 4*32 = 0xC0, so window 0x40..0xC3.)
+ *                     (34 slots: 0x40 + 4*34 = 0xC8, so window 0x40..0xC7.)
  ******************************************************************************
  */
 #ifndef __TRES_I2C_SLAVE_H__
@@ -89,7 +89,7 @@ extern "C" {
  *                              temp window; the 16th byte commits it.
  *   0xE0..0xEF  RESPONSE (R)  16 bytes big-endian: AES-128-ECB(device_key,
  *                              challenge), recomputed live on every read.
- * Placed above the NVRAM parameter window (0x40..0xC3 with 33 slots) so the
+ * Placed above the NVRAM parameter window (0x40..0xC7 with 34 slots) so the
  * two never overlap. The windows are only present in the register file when
  * the feature is compiled in; with TRES_AES_ENABLE=0 these addresses read
  * back 0 and writes are ignored, exactly like any other reserved address. */

@@ -26,7 +26,7 @@ Registers:
   0x14 VERSION  0x02
   0x30-0x35 machine-state block: BOOTSTATE / BOOTRETRY / TECFLAGS /
                                  AHTSTAT / FANDUTY / TECDUTY
-  0x40-0xAB NVRAM parameter window: 27 slots x 4-byte big-endian values
+  0x40-0xC7 NVRAM parameter window: 34 slots x 4-byte big-endian values
 
 Commands (0x00 <- [0xA5][cmdId][param]):
   1 RESET, 2 ENTER_DFU, 3 REPORT_FAIL, 4 SAVE_PARAMS, 5 DEFAULT_PARAMS
@@ -71,7 +71,7 @@ TRES_REG_NV_LEN = 4
 NVM_Q16_SCALE = 65536.0   # Q16 fixed point: raw = round(value * 65536)
 
 # AES challenge-response authentication window (firmware: TRES_AES_ENABLE).
-#   Placed above the NVRAM parameter window (0x40..0xC3 for 33 slots).
+#   Placed above the NVRAM parameter window (0x40..0xC7 for 34 slots).
 #   0xD0..0xDF  CHALLENGE (W) 16 bytes big-endian
 #   0xE0..0xEF  RESPONSE (R)  AES-128-ECB(device_key, challenge)
 TRES_REG_CHAL_BASE = 0xD0
@@ -113,6 +113,8 @@ NV_PARAMS = [
     ("RAMP_STEP", "%", 1),     # max duty change per control cycle
     ("DEWPOINT_MARGIN", "mC", 1),  # target floor = dew point + this
     ("FF_GAIN", "x1", 1 / 65536.0),  # COMMON-MODE feedforward %/°C (Q16)
+    ("HOT_FB_GAIN", "x1", 1 / 65536.0),  # hot foldback: target lift per hot excess (Q16)
+    ("HOT_FB_MAX", "mC", 1),   # hot foldback: max cold-target lift
 ]
 
 # Slot name -> index, case-insensitive (e.g. "target_base", "TARGET_BASE").
@@ -247,7 +249,7 @@ step:
   [2] status:   read the machine-state block 0x30..0x35
                 (SDM845 boot state, TEC alarms, AHT20 status, fan/TEC duty)
   [3] commands: CMD_REPORT_FAIL x2 and verify the RETRIES counter advances
-  [4] params:   dump the NVRAM parameter window 0x40..0xAB (27 slots x 4B)
+  [4] params:   dump the NVRAM parameter window 0x40..0xC7 (34 slots x 4B)
   [5] action:   one of --reset / --dfu / --params / --set, or skipped
 
 Protocol (write): first byte selects the register pointer, following bytes
@@ -284,7 +286,7 @@ Commands (register 0x00 <- [0xA5][cmdId][param]):
   4 SAVE_PARAMS    persist the NVRAM RAM cache to FLASH
   5 DEFAULT_PARAMS reload firmware defaults into the NVRAM RAM cache
 
-NVRAM parameter window (0x40..0xAB, 4-byte big-endian per slot):
+NVRAM parameter window (0x40..0xC7, 4-byte big-endian per slot):
   slot n lives at 0x40 + 4*n; the 4th byte written commits the value into
   the RAM cache. Persist with SAVE_PARAMS. --set accepts any of these names
   (case-insensitive); Q16 gain slots display as raw/65536:

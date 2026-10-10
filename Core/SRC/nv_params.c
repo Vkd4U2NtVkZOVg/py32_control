@@ -36,7 +36,7 @@
 /*============================================================================*/
 #define NVM_BASE        (0x0800F000UL)  /**< last flash sector, page-aligned  */
 #define NVM_MAGIC       (0x4E564433u)   /**< 'NVD3'                            */
-#define NVM_VERSION     (7u)            /**< v7: dual-slot power-fail layout  */
+#define NVM_VERSION     (8u)            /**< v8: + hot-side foldback slots     */
 #define NVM_PAGE_BYTES  (128u)          /**< PY32F030 flash page size          */
 #define NVM_SLOTS       (2u)            /**< A/B slots; Save flips between them*/
 
@@ -120,7 +120,7 @@ static const uint32_t s_defaults[ NVM_PARAM_COUNT ] = {
     [NV_TEC_PID_KD_Q16]                = NVM_Q16( 0.5f ),
     [NV_TEC_TARGET_BASE_MILLIC]        = 45000u,
     [NV_TEC_HOT_OVERTEMP_MILLIC]       = 60000u,
-    [NV_TEC_HOT_DANGER_MILLIC]         = 70000u,
+    [NV_TEC_HOT_DANGER_MILLIC]         = 80000u,
     [NV_TEC_CURRENT_FEEDFORWARD_MA]    = 2000u,
     [NV_TEC_CURRENT_DANGER_MA]         = 3000u,
     [NV_TEC_FAN_MIN_RPM]               = 500u,
@@ -158,6 +158,11 @@ static const uint32_t s_defaults[ NVM_PARAM_COUNT ] = {
     [NV_TEC_RAMP_STEP_PERCENT]         = 5u,   /* 5 % duty per 1 s cycle            */
     [NV_TEC_DEWPOINT_MARGIN_MILLIC]    = 2000u,/* 2 °C above dew point             */
     [NV_TEC_FF_GAIN_Q16]               = NVM_Q16( 1.0f ),  /* 1 % duty per °C      */
+    [NV_TEC_HOT_FB_GAIN_Q16]           = NVM_Q16( 2.0f ),  /* cold target +2 °C
+                                                              per 1 °C of hot
+                                                              excess over the
+                                                              overtemp knee     */
+    [NV_TEC_HOT_FB_MAX_MILLIC]         = 30000u,/* foldback lift cap: +30 °C        */
 };
 
 /*============================================================================*/
