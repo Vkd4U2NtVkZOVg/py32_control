@@ -279,18 +279,32 @@ uint32_t Studio_ADC1_ReadCurrentMilliamp(void)
   uint64_t shunt_voltage_uV;
   uint64_t current_mA;
 
-  if ( shunt_uohm == 0u ) {
-    shunt_uohm  = NvParams_Get( NV_TEC_CURRENT_SHUNT_UOHM );
-    amp_gain    = NvParams_Get( NV_TEC_CURRENT_AMP_GAIN );
-    div_num     = NvParams_Get( NV_TEC_CURRENT_DIVIDER_NUM );
-    div_den     = NvParams_Get( NV_TEC_CURRENT_DIVIDER_DEN );
-    adc_vref_mv = NvParams_Get( NV_TEC_CURRENT_ADC_VREF_MV );
+  if ( ( shunt_uohm == 0u ) || ( amp_gain == 0u ) || ( div_num == 0u ) ||
+       ( div_den == 0u ) || ( adc_vref_mv == 0u ) ) {
+    if ( shunt_uohm == 0u ) {
+      shunt_uohm = NvParams_Get( NV_TEC_CURRENT_SHUNT_UOHM );
+    }
+    if ( amp_gain == 0u ) {
+      amp_gain = NvParams_Get( NV_TEC_CURRENT_AMP_GAIN );
+    }
+    if ( div_num == 0u ) {
+      div_num = NvParams_Get( NV_TEC_CURRENT_DIVIDER_NUM );
+    }
+    if ( div_den == 0u ) {
+      div_den = NvParams_Get( NV_TEC_CURRENT_DIVIDER_DEN );
+    }
+    if ( adc_vref_mv == 0u ) {
+      adc_vref_mv = NvParams_Get( NV_TEC_CURRENT_ADC_VREF_MV );
+    }
+    /* Guard against corrupt NVRAM values (including a zero shunt, which
+     * would make the denominator below 0 and silently kill overcurrent
+     * protection): fall back to a sane default. */
     if ( ( amp_gain == 0u ) || ( div_num == 0u ) || ( div_den == 0u ) ||
-         ( adc_vref_mv == 0u ) ) {
-      /* Guard against corrupt NVRAM values: fall back to a sane default. */
-      amp_gain    = 50u;
-      div_num     = 1u;
-      div_den     = 2u;
+         ( adc_vref_mv == 0u ) || ( shunt_uohm == 0u ) ) {
+      shunt_uohm = 20000u;   /* 20 mOhm, NVRAM factory default */
+      amp_gain   = 50u;
+      div_num    = 1u;
+      div_den    = 2u;
       adc_vref_mv = 1800u;
     }
   }
