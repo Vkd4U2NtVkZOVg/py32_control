@@ -15,8 +15,11 @@ static MCP4725_Status_t mcp_status(SoftI2C_Status_t status)
 
 MCP4725_Status_t MCP4725_Init(void)
 {
-    /* Power-on default is 0 V: no TEC current until the TEC control task
-     * explicitly commands it (startup anchor from NVRAM + ramp). */
+    /* Move the DAC off its EEPROM power-up value to a known code. NOTE: in
+     * the inverted FB-injection topology 0 V is the FULL-cooling code, so
+     * this alone is not a safe park position - it is covered by TEC_VEN=0
+     * here, and TecControl_Init() later parks the DAC on the zero-current
+     * end (DAC_MAX_CTRL_MV) once the NVRAM window is loaded. */
     return MCP4725_SetVoltage_mV(0U);
 }
 

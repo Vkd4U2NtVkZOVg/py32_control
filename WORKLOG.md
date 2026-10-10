@@ -2987,3 +2987,22 @@ v6 的 `NvParams_Save()` 单块顺序擦写 2 页（erase p0 → erase p1 → pr
 - 全量 Core/SRC 编译 0 错 0 警；probe `py_compile` 通过（34 槽）；
 - `nv_dualslot_sim.py` 232 项断言通过（NVM_PARAM_COUNT 同步 34，块 152B 仍 2 页）；
 - 折返行为：60°C→+0、65°C→+10、75°C→+30（封顶）；danger 80°C 硬关断正常 foldback 到不了。
+
+---
+
+## 2026-10-11 — DAC 上电预置零流端 + 校验回落单源化（NvParams_GetDefault）
+
+### 1. DAC 上电预置（用户质疑 MCP4725_Init()=0V 引出）
+
+`MCP4725_Init()` 的 0V 写发生在 `TEC_VEN=0` 窗口内（60% 锚点是首次使能前才写，TEC 带电第一刻即 60% 制冷）——时序本身正确。但 FB 注入反向拓扑下 **DAC=0V 恰是满制冷端码**（无注入 → VOUT 自然点），且低于理论 `DAC_MIN_CTRL`（≈740mV）会造成反向注入、VOUT 超自然点：上电到首写之间 DAC 停在最危险的码上，安全完全依赖 `TEC_VEN` 单点。
+
+修复：`TecControl_Init()` 读完 NVRAM 窗口后，强制把 DAC 预置到**零流端** `DAC_MAX_CTRL_MV`。实现细节：`s_dac_percent` 初始化改为 `0xFF` 哨兵（合法 duty 域外），否则 `tec_dac_set(0)` 会被 `duty == s_dac_percent` 短路跳过。此后整个等待期 DAC 都在零流码，即使 enable 线意外断言也是零 TEC 电流。`MCP4725_Init` 注释同步（0V 只是清 EEPROM 恢复码 + 探活，非安全位）。
+
+### 2. 校验回落单源化（用户质疑回落值为何硬编码）
+
+#8 校验块的回落值此前是 `s_defaults` 的手工镜像（已踩过一次不同步坑：defaults 90000 / 回落 80000）。且不能用 `NvParams_Get()` 回落——cache 正是被判定坏值的来源。新增 `NvParams_GetDefault(id)`（读 `s_defaults`，独立于 cache 与 FLASH），`tec_control.c` 全部校验回落与 `adc.c` 电流链 guard 改为经它取默认——单一事实来源，defaults 改动零同步负担。
+
+### 验证
+
+- 全量 Core/SRC 编译 0 错 0 警（全部项目警告可见，非仅 error）；
+- `nv_dualslot_sim.py` 232 项通过。

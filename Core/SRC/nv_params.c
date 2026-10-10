@@ -265,6 +265,14 @@ uint32_t NvParams_Get( uint8_t id )
     return s_cache[ id ];
 }
 
+uint32_t NvParams_GetDefault( uint8_t id )
+{
+    if ( id >= NVM_PARAM_COUNT ) {
+        return 0u;
+    }
+    return s_defaults[ id ];
+}
+
 void NvParams_Set( uint8_t id, uint32_t val )
 {
     if ( id >= NVM_PARAM_COUNT ) {

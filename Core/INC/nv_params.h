@@ -138,6 +138,16 @@ void  NvParams_Init(void);
 uint32_t NvParams_Get(uint8_t id);
 
 /**
+ * @brief Read the factory default of a parameter (independent of the RAM
+ *        cache and of the FLASH store, so it stays trustworthy even when
+ *        the cached value has been judged corrupt). Use this - not a
+ *        hand-copied constant - as the fallback in sanity checks.
+ * @param id  Parameter slot (0..NVM_PARAM_COUNT-1).
+ * @return The s_defaults value, or 0 if `id` is out of range.
+ */
+uint32_t NvParams_GetDefault(uint8_t id);
+
+/**
  * @brief Write a parameter to the RAM cache (RAM only; call #NvParams_Save to
  *        persist to FLASH).
  * @param id  Parameter slot (0..NVM_PARAM_COUNT-1).

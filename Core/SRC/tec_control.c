@@ -108,13 +108,17 @@ static void tec_params_load( Tec_Params_t *p )
      * span = dac_max - dac_min and multiplies duty*span, so a corrupt
      * window (host-written NVRAM or a FLASH bit flip) where min >= max
      * would wrap span to ~2^32 and make the DAC output an arbitrary
-     * voltage. Fall back to the factory defaults on any violation. */
+     * voltage. Fall back to the factory defaults on any violation. All
+     * fallbacks read s_defaults via NvParams_GetDefault() - a single
+     * source of truth that follows the defaults table automatically
+     * (NvParams_Get() itself is NOT usable here: it returns the very
+     * cache values these checks just rejected). */
     if ( ( p->dac_min_ctrl_mv < 0 ) || ( p->dac_max_ctrl_mv < 0 ) ||
          ( p->dac_min_ctrl_mv > (int32_t)MCP4725_VDD_MV ) ||
          ( p->dac_max_ctrl_mv > (int32_t)MCP4725_VDD_MV ) ||
          ( p->dac_min_ctrl_mv >= p->dac_max_ctrl_mv ) ) {
-        p->dac_min_ctrl_mv = 0;
-        p->dac_max_ctrl_mv = 1200;   /* NVRAM factory default (NV_TEC_DAC_MAX_CTRL_MV) */
+        p->dac_min_ctrl_mv = (int32_t)NvParams_GetDefault( NV_TEC_DAC_MIN_CTRL_MV );
+        p->dac_max_ctrl_mv = (int32_t)NvParams_GetDefault( NV_TEC_DAC_MAX_CTRL_MV );
     }
 
     /* Relation/range sanity for the rest of the parameter set (same threat
@@ -130,41 +134,41 @@ static void tec_params_load( Tec_Params_t *p )
      *  - plausibility window: min < max, or is_temp_valid() rejects
      *    everything and every cycle falls back to the target            */
     if ( p->fan_temp_base_millic >= p->fan_temp_full_millic ) {
-        p->fan_temp_base_millic = 40000u;
-        p->fan_temp_full_millic = 60000u;
+        p->fan_temp_base_millic = (int32_t)NvParams_GetDefault( NV_TEC_FAN_TEMP_BASE_MILLIC );
+        p->fan_temp_full_millic = (int32_t)NvParams_GetDefault( NV_TEC_FAN_TEMP_FULL_MILLIC );
     }
     if ( p->hot_overtemp_millic >= p->hot_danger_millic ) {
-        p->hot_overtemp_millic = 60000u;
-        p->hot_danger_millic   = 80000u;
+        p->hot_overtemp_millic = (int32_t)NvParams_GetDefault( NV_TEC_HOT_OVERTEMP_MILLIC );
+        p->hot_danger_millic   = (int32_t)NvParams_GetDefault( NV_TEC_HOT_DANGER_MILLIC );
     }
     if ( p->cur_feedforward_ma >= p->cur_danger_ma ) {
-        p->cur_feedforward_ma = 2000u;
-        p->cur_danger_ma      = 3000u;
+        p->cur_feedforward_ma = (int32_t)NvParams_GetDefault( NV_TEC_CURRENT_FEEDFORWARD_MA );
+        p->cur_danger_ma      = (int32_t)NvParams_GetDefault( NV_TEC_CURRENT_DANGER_MA );
     }
     if ( ( p->pid_kp <= 0.0f ) || ( p->pid_ki <= 0.0f ) || ( p->pid_kd < 0.0f ) ) {
-        p->pid_kp = 2.0f;
-        p->pid_ki = 0.1f;
-        p->pid_kd = 0.5f;
+        p->pid_kp = (float)NvParams_GetDefault( NV_TEC_PID_KP_Q16 ) / NVM_Q16_SCALE;
+        p->pid_ki = (float)NvParams_GetDefault( NV_TEC_PID_KI_Q16 ) / NVM_Q16_SCALE;
+        p->pid_kd = (float)NvParams_GetDefault( NV_TEC_PID_KD_Q16 ) / NVM_Q16_SCALE;
     }
     if ( ( p->ramp_step_percent <= 0 ) || ( p->ramp_step_percent > 100 ) ) {
-        p->ramp_step_percent = 5u;
+        p->ramp_step_percent = (int32_t)NvParams_GetDefault( NV_TEC_RAMP_STEP_PERCENT );
     }
     if ( ( p->fan_duty_base < 0 ) || ( p->fan_duty_base > 100 ) ) {
-        p->fan_duty_base = 30u;
+        p->fan_duty_base = (int32_t)NvParams_GetDefault( NV_TEC_FAN_DUTY_BASE );
     }
     if ( p->dewpoint_margin_millic < 0 ) {
-        p->dewpoint_margin_millic = 2000u;
+        p->dewpoint_margin_millic = (int32_t)NvParams_GetDefault( NV_TEC_DEWPOINT_MARGIN_MILLIC );
     }
     if ( p->temp_valid_min_millic >= p->temp_valid_max_millic ) {
-        p->temp_valid_min_millic = (int32_t)( -20000 );
-        p->temp_valid_max_millic = 120000u;
+        p->temp_valid_min_millic = (int32_t)NvParams_GetDefault( NV_TEC_TEMP_VALID_MIN_MILLIC );
+        p->temp_valid_max_millic = (int32_t)NvParams_GetDefault( NV_TEC_TEMP_VALID_MAX_MILLIC );
     }
     if ( p->current_valid_max_ma <= 0 ) {
-        p->current_valid_max_ma = 5000u;
+        p->current_valid_max_ma = (int32_t)NvParams_GetDefault( NV_TEC_CURRENT_VALID_MAX_MA );
     }
     if ( ( p->hot_fb_gain_q16 == 0u ) || ( p->hot_fb_max_millic <= 0 ) ) {
-        p->hot_fb_gain_q16   = (uint32_t)( 2.0f * NVM_Q16_SCALE );   /* 2.0 in Q16 */
-        p->hot_fb_max_millic = 30000u;
+        p->hot_fb_gain_q16   = NvParams_GetDefault( NV_TEC_HOT_FB_GAIN_Q16 );
+        p->hot_fb_max_millic = (int32_t)NvParams_GetDefault( NV_TEC_HOT_FB_MAX_MILLIC );
     }
 }
 
@@ -176,7 +180,10 @@ static TecPid_t    s_pid;
 static Tec_Params_t s_p;
 static uint8_t     s_alarm;
 static uint8_t     s_tec_enabled;
-static uint8_t     s_dac_percent;      /* last TEC duty written to the MCP4725 */
+static uint8_t     s_dac_percent = 0xFFu; /* last duty written to the DAC;
+                                           0xFF = "unknown" sentinel so the
+                                           first tec_dac_set() is never
+                                           short-circuited                    */
 
 /*============================================================================*/
 /* Helpers                                                                     */
@@ -583,8 +590,17 @@ void TecControl_Init( void )
 
     s_alarm        = TEC_ALARM_NONE;
     s_tec_enabled  = 0u;
-    s_dac_percent  = 0u;
     tec_set_enabled( 0u );   /* held off until the SDM845 thermal precheck passes */
+
+    /* Park the DAC on the zero-current end of the FB-injection window. In
+     * the inverted topology DAC=0V is the FULL-cooling code (no injection
+     * current -> VOUT at the divider set point), so leaving the power-up
+     * 0 V there would rely on TEC_VEN alone as the single safety barrier.
+     * With the sentinel set, this write always happens; from here on the
+     * DAC sits at a code that commands zero TEC current even if the enable
+     * line were ever asserted unexpectedly. */
+    s_dac_percent  = 0xFFu;
+    (void)tec_dac_set( 0u );
 
     (void)qOS_Add_Task( &s_task, TecControl_Cb, qLowest_Priority,
                         (qTime_t)period_s, qPeriodic,

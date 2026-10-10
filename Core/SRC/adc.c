@@ -305,14 +305,15 @@ uint32_t Studio_ADC1_ReadCurrentMilliamp(void)
     }
     /* Guard against corrupt NVRAM values (including a zero shunt, which
      * would make the denominator below 0 and silently kill overcurrent
-     * protection): fall back to a sane default. */
+     * protection): fall back to the factory defaults, read via
+     * NvParams_GetDefault() so they always track s_defaults. */
     if ( ( amp_gain == 0u ) || ( div_num == 0u ) || ( div_den == 0u ) ||
          ( adc_vref_mv == 0u ) || ( shunt_uohm == 0u ) ) {
-      shunt_uohm = 20000u;   /* 20 mOhm, NVRAM factory default */
-      amp_gain   = 50u;
-      div_num    = 1u;
-      div_den    = 2u;
-      adc_vref_mv = 1800u;
+      shunt_uohm  = NvParams_GetDefault( NV_TEC_CURRENT_SHUNT_UOHM );
+      amp_gain    = NvParams_GetDefault( NV_TEC_CURRENT_AMP_GAIN );
+      div_num     = NvParams_GetDefault( NV_TEC_CURRENT_DIVIDER_NUM );
+      div_den     = NvParams_GetDefault( NV_TEC_CURRENT_DIVIDER_DEN );
+      adc_vref_mv = NvParams_GetDefault( NV_TEC_CURRENT_ADC_VREF_MV );
     }
   }
 
