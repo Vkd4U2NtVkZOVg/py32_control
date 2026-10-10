@@ -201,6 +201,28 @@ def main():
         assert valid and params == P1, "torn slot0 must not shadow good slot1"
         checks += 1
 
+    # --- Scenario G: page-granular torn write (block > 128B spans 2 pages).
+    # The real hardware programs page-by-page: a power loss between the two
+    # page programs leaves page 0 intact (header + first params) and page 1
+    # at 0xFF. The params tail lives in page 1, so the stored CRC (computed
+    # over the full params array) no longer matches -> the torn block must
+    # be rejected and the previous slot must win.
+    for old_slot in (0, 1):
+        flash = Flash()
+        flash.program(old_slot, block_image(5, P0))
+        active, seq, valid, params = sim_init(flash)
+        assert valid and params == P0
+        target = 1 - active
+        img = block_image(seq + 1, P1)
+        flash.erase(target)
+        flash.program(target, img[:128])            # page 0 only, then lost
+        assert flash.read(target)[128:] == b"\xFF" * 128
+        assert not crc_ok(flash.read(target)), "torn page-1 block must fail CRC"
+        active, seq, valid, params = sim_init(flash)
+        assert valid and params == P0, \
+            "page-granular tear must fall back to the previous good block"
+        checks += 1
+
     # --- Scenario F: long run, Save alternating slots, random-ish aborts.
     flash = Flash()
     active, seq, valid, params = sim_init(flash)          # blank -> defaults
