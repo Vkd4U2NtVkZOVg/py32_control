@@ -32,25 +32,17 @@ MCP4725_Status_t MCP4725_SetCode(uint16_t code)
     return mcp_status(SoftI2C_Master_Write(MCP4725_I2C_ADDR, data, 2U));
 }
 
-MCP4725_Status_t MCP4725_SetVoltage_mV(uint16_t millivolts, uint16_t vdd_millivolts)
+MCP4725_Status_t MCP4725_SetVoltage_mV(uint16_t millivolts)
 {
     uint32_t code;
 
-    if (vdd_millivolts == 0U) {
-        return MCP4725_ERR_PARAM;
-    }
-    if (millivolts >= vdd_millivolts) {
+    if (millivolts >= MCP4725_VDD_MV) {
         code = MCP4725_MAX_CODE;
     } else {
         code = ((uint32_t)millivolts * MCP4725_MAX_CODE) /
-               (uint32_t)vdd_millivolts;
+               MCP4725_VDD_MV;
     }
     return MCP4725_SetCode((uint16_t)code);
-}
-
-MCP4725_Status_t MCP4725_SetVoltage(uint16_t millivolts, uint16_t vdd_millivolts)
-{
-    return MCP4725_SetVoltage_mV(millivolts, vdd_millivolts);
 }
 
 MCP4725_Status_t MCP4725_WriteEEPROM(uint16_t code)

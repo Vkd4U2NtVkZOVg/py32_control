@@ -18,6 +18,7 @@ extern "C" {
 #endif
 
 #define MCP4725_MAX_CODE       (4095U)
+#define MCP4725_VDD_MV         (3300U)   /* fixed DAC reference (VDD) */
 
 typedef enum {
     MCP4725_OK = 0,
@@ -28,8 +29,7 @@ typedef enum {
 
 MCP4725_Status_t MCP4725_Init(void);
 MCP4725_Status_t MCP4725_SetCode(uint16_t code);
-MCP4725_Status_t MCP4725_SetVoltage_mV(uint16_t millivolts, uint16_t vdd_millivolts);
-MCP4725_Status_t MCP4725_SetVoltage(uint16_t millivolts, uint16_t vdd_millivolts);
+MCP4725_Status_t MCP4725_SetVoltage_mV(uint16_t millivolts);
 MCP4725_Status_t MCP4725_WriteEEPROM(uint16_t code);
 
 #ifdef __cplusplus

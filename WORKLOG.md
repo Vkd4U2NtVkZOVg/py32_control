@@ -2283,3 +2283,100 @@ python3 tres_i2c_probe.py --bus 3                             # 安全只读
 
 - `--set` 只支持单槽；批量改多参数仍是"逐个 --set + 最后一次 --save"（避免多次整页擦写磨损 FLASH）。
 - `tec_control.c` 中 `sdm_mc` 已改为读 `Studio_ADC1_ReadColdMilliCelsius()`（多源开关 API），含一处双分号笔误（`hot_mc, sdm_mc;;`），待下次提交清理。
+
+## 2026-10-10 — 软件 AES-128 挑战-响应认证（宏开关可选编译，防抄板）
+
+### 背景
+
+需求源头：希望 PY32 实现「类似 ATECC608C-SSHDA」的功能。经探索确认：
+
+- **PY32F030 无任何硬件加密外设**（寄存器级三重证据：外设基址、AHB/APB 时钟使能位、中断号全集均无 AES/HASH/TRNG/ECC/RSA）；Cortex-M0+ 内核亦无加密扩展。
+- 项目现状：零加密代码、无 mbedtls 类依赖、无安全启动、WRP/RDP 未启用。
+
+与用户确认方向后定为：**防抄板/正品认证（挑战-响应）+ 接受软件密钥**。即"防君子不防小人"——密钥存 flash 可被调试器读出，不给 ATECC 的物理不可提取性；若威胁模型需硬件级保护，必须上真 ATECC608 挂 I2C（板级改动）。
+
+### 方案
+
+宏开关 **`TRES_AES_ENABLE`**（见 `Core/INC/aes.h`）控制 AES 功能是否编译：
+
+- `=1`（eide.yml 已开）：注册挑战/响应窗口，AES 代码进入固件
+- `=0`/未定义：aes.c **空编译**（`text=0`），I2C 窗口不存在，固件与之前完全一致
+
+认证协议（复用现有 I2C 从机寄存器文件协议的 4 字节大端 + 自动递增模式）：
+
+```
+主机 → PY32:  写 0xB0..0xBF = challenge[16]（自动递增突发写 16 字节）
+PY32 内部:    AES-128-ECB(device_key, challenge)   ← 响应每次读时实时算
+主机 ← PY32:  读 0xC0..0xCF = response[16]
+主机验证:    response == AES(预期Key, challenge)
+```
+
+### 改动
+
+| 文件 | 改动 |
+|---|---|
+| `Core/INC/aes.h`（新） | `TRES_AES_ENABLE` 开关、`AES_DEVICE_KEY_BYTES`（16B 密钥，与主机侧 `tres_i2c_probe.py` 的 `AES_DEVICE_KEY` 一致）、`Aes128_Encrypt(key,in,out)` |
+| `Core/SRC/aes.c`（新） | 查表版 AES-128（S-box 256B + xtime 做 MixColumns），密钥扩展走栈（176B），无堆。宏关时整个文件空编译 |
+| `Core/INC/tres_i2c_slave.h` | 认证窗口宏：`TRES_REG_CHAL_BASE 0xB0`（16B 写）/ `TRES_REG_RESP_BASE 0xC0`（16B 读），与 NVRAM 0x40..0xAF 无重叠 |
+| `Core/SRC/tres_i2c_slave.c` | `Reg_Read()` 加响应窗口（每次读实时 `Aes128_Encrypt`，返回对应字节）；RXNE 写路径加挑战窗口（16 字节大端累积进 `s_chalBuf`，自动递增）——均包在 `#if TRES_AES_ENABLE` 内 |
+| `EIDE/.eide/eide.yml` | 登记 `aes.c`；defineList 加 `-D TRES_AES_ENABLE=1` |
+| `test/tres_i2c_probe.py` | 加 `--auth`：写 16 随机字节到挑战窗、读响应窗、用 `cryptography` 库算 `AES_ECB(device_key, challenge)` 比对 |
+
+### 验证
+
+- **FIPS-197 KAT**：密钥 `2B7E151628AED2A6ABF7158809CF4F3C` + 明文 `3243F6A8885A308D313198A2E0370734` → 密文 `3925841D02DC09FBDC118597196A0B32`，逐字节 PASS。
+- **参考库交叉验证**：随机第二向量与 `cryptography`（AES-ECB）输出一致（`07FEEF74...` MATCH）。
+- **宏关空编译**：`arm-none-eabi-size` 显示 aes.c 目标文件 `text=0`、`data=0`；宏开 `text=924B`（AES 实际 flash 成本 <1KB，整体仍充裕）。
+- **两态编译**：宏开/关 aes.c、tres_i2c_slave.c 均 0 错 0 警（`-Wall`）。
+- **全量宏关编译**：52 个既有源文件 + aes.c 共 54 个目标全部编译通过（含 QuarkTS include 路径修正 `-I../Drivers/QuarkTS/include`、lnp obj 列表 CRLF 修正）。
+- **布局无冲突**：NVRAM 0x40..0xAF / CHAL 0xB0..0xBF / RESP 0xC0..0xCF，断言无重叠。
+
+### 使用
+
+```bash
+# 固件侧：eide.yml 已定义 TRES_AES_ENABLE=1（去掉该行即关闭，aes 不占 flash）
+# 主机侧：实测认证（需要 cryptography 库）
+python3 tres_i2c_probe.py --bus 3 --auth
+# 输出示例
+#   [5] AES challenge-response: write 16 B to 0xB0, read from 0xC0
+#   challenge: <16B hex>
+#   response : <16B hex>
+#   expected : <16B hex>
+#   OK: device authenticated (AES-128-ECB matches)
+```
+
+### 遗留
+
+- ~~宏开全量链接未跑完~~（已补跑，见下表）：54 个源文件 + startup 汇编在宏开/宏关两态均编译链接成功，elf 生成正常。
+
+| 指标 | 宏关 (TRES_AES_ENABLE=0) | 宏开 (=1) | AES 增量 |
+|---|---|---|---|
+| FLASH | 31200 B (50.78%) | 32224 B (52.45%) | **+1024 B** |
+| RAM | 4480 B (54.69%) | 4496 B (54.88%) | **+16 B** |
+
+- 符号级确认：宏开 elf 含 `Aes128_Encrypt`（`.text` 0x27C）+ `aes_xtime`；宏关 elf 中 **0 个 AES 符号**（彻底剥离）。
+- 密钥当前是编译期常量（`AES_DEVICE_KEY_BYTES` 与 probe.py 的 `AES_DEVICE_KEY` 需同步改）。产品化时：每产线换密钥、可选对含密钥的 flash 区加 WRP 写保护、把密钥从源码移入构建期注入。
+- 这是软件密钥方案：JTAG/flash 读可提取，防君子不防小人。要物理不可提取需真 ATECC608（I2C 挂载，板级改动）。
+- 挑战为固定 16B AES-ECB，无随机数来源（PY32F030 无 TRNG）。若需防重放，需在挑战里加单调计数器/时间戳，或主机侧维护随机挑战。
+- `--auth` 依赖主机 `cryptography` 库；纯 `i2cset/i2cget` 用户需自算 AES。
+
+---
+
+## 2026-10-10 — MCP4725 满量程基准固定为 3.3 V：vdd 参数改宏
+
+### 工作内容（背景与目标）
+
+1. **`MCP4725_SetVoltage_mV` 去掉 `vdd_millivolts` 参数**：DAC 参考电压（VDD）在硬件上固定为 3.3 V，运行时再传入满量程值无必要，改为编译期宏 `MCP4725_VDD_MV (3300U)`。
+2. **清理冗余包装**：`MCP4725_SetVoltage`（两参、仅转发、全库无调用者）随签名变更一并删除。
+3. **同步调用点**：`tec_control.c` 的 `tec_dac_set()` 改为单参调用。
+
+### 设计关键点与实现方式
+
+- 宏紧邻 `MCP4725_MAX_CODE` 定义在 `mcp4725.h`，语义为"固定 DAC 参考（VDD）= 3300 mV"。
+- 缩放公式不变：`code = millivots * 4095 / 3300`，超满量程直接饱和到 4095；原先 `vdd==0` 的参数防御分支随之移除。
+- **遗留的 NVRAM 参数 `NV_TEC_DAC_VREF_MV`**：`tec_params_load()` 仍在读取并存入 `s_p.dac_vref_mv`，但已无消费方。本次未动 NVRAM 表（表项编号、探针/迁移兼容），后续可从 `nv_params` 表和 `Tec_Params_t` 一并删除。
+
+### 验证
+
+- 全库 grep 确认无残留两参调用。
+- CLI 语法编译 `mcp4725.c` + `tec_control.c`：项目代码 0 错 0 警（仅既有供应商头文件 unused-parameter 噪音）。

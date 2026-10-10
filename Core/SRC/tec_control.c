@@ -123,7 +123,7 @@ static void tec_dac_set( uint8_t duty )
     }
     s_dac_percent = duty;
     mv = (uint16_t)( ( (uint32_t)duty * (uint32_t)s_p.dac_max_ctrl_mv ) / 100u );
-    (void)MCP4725_SetVoltage_mV( mv, (uint16_t)s_p.dac_vref_mv );
+    (void)MCP4725_SetVoltage_mV( mv );
 }
 
 /* Heatsink fan is decoupled from the TEC PID output: base airflow while the
