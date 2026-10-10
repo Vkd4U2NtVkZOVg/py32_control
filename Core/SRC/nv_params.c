@@ -36,7 +36,7 @@
 /*============================================================================*/
 #define NVM_BASE        (0x0800F000UL)  /**< last flash sector, page-aligned  */
 #define NVM_MAGIC       (0x4E564432u)   /**< 'NVD2' - non-volatile data v2     */
-#define NVM_VERSION     (3u)
+#define NVM_VERSION     (4u)
 
 #define NVM_OK          (0)
 #define NVM_ERR_PARAM   (-1)
@@ -101,7 +101,6 @@ static const uint32_t s_defaults[ NVM_PARAM_COUNT ] = {
     [NV_TEC_CURRENT_DANGER_MA]         = 3000u,
     [NV_TEC_FAN_MIN_RPM]               = 500u,
     [NV_TEC_CONTROL_PERIOD_MS]         = 1000u,
-    [NV_TEC_DAC_VREF_MV]               = 3300u,
     [NV_TEC_DAC_MAX_CTRL_MV]           = 1200u,
     [NV_TEC_FAN_TEMP_BASE_MILLIC]      = 40000u,
     [NV_TEC_FAN_TEMP_FULL_MILLIC]      = 60000u,

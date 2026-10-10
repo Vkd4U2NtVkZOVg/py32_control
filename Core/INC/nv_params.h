@@ -33,7 +33,7 @@
  *   NvParams_Save();                    // persist the RAM cache to FLASH
  *
  * The I2C slave exposes every slot as a 4-byte big-endian window at
- * 0x40..0xAF (tres_i2c_slave.h), plus SAVE_PARAMS / DEFAULT_PARAMS commands.
+ * 0x40..0xAB (tres_i2c_slave.h), plus SAVE_PARAMS / DEFAULT_PARAMS commands.
  */
 #ifndef __NV_PARAMS_H__
 #define __NV_PARAMS_H__
@@ -68,7 +68,6 @@ typedef enum {
     NV_TEC_CURRENT_DANGER_MA,          /**< current above this: alarm +FF50 (mA)*/
     NV_TEC_FAN_MIN_RPM,                /**< fan fault threshold (RPM)           */
     NV_TEC_CONTROL_PERIOD_MS,          /**< control/QuarkTS period (ms)         */
-    NV_TEC_DAC_VREF_MV,                /**< MCP4725 reference = VDD (mV)        */
     NV_TEC_DAC_MAX_CTRL_MV,            /**< top of power-stage control window   */
     NV_TEC_FAN_TEMP_BASE_MILLIC,       /**< fan starts ramping at this hot (m°C)*/
     NV_TEC_FAN_TEMP_FULL_MILLIC,       /**< fan full speed at this hot (m°C)    */

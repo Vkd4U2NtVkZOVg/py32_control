@@ -41,7 +41,6 @@ typedef struct {
     int32_t cur_danger_ma;          /* overcurrent alarm + FF boost threshold   */
     int32_t fan_min_rpm;            /* fan fault RPM threshold                  */
     int32_t control_period_ms;      /* task period, ms                          */
-    int32_t dac_vref_mv;            /* MCP4725 reference (VDD)                  */
     int32_t dac_max_ctrl_mv;        /* power-stage control window top           */
     int32_t fan_temp_base_millic;   /* fan ramp start (hot side)                */
     int32_t fan_temp_full_millic;   /* fan 100 % (hot side)                     */
@@ -67,7 +66,6 @@ static void tec_params_load( Tec_Params_t *p )
     p->cur_danger_ma         = (int32_t)NvParams_Get( NV_TEC_CURRENT_DANGER_MA );
     p->fan_min_rpm           = (int32_t)NvParams_Get( NV_TEC_FAN_MIN_RPM );
     p->control_period_ms     = (int32_t)NvParams_Get( NV_TEC_CONTROL_PERIOD_MS );
-    p->dac_vref_mv           = (int32_t)NvParams_Get( NV_TEC_DAC_VREF_MV );
     p->dac_max_ctrl_mv       = (int32_t)NvParams_Get( NV_TEC_DAC_MAX_CTRL_MV );
     p->fan_temp_base_millic  = (int32_t)NvParams_Get( NV_TEC_FAN_TEMP_BASE_MILLIC );
     p->fan_temp_full_millic  = (int32_t)NvParams_Get( NV_TEC_FAN_TEMP_FULL_MILLIC );

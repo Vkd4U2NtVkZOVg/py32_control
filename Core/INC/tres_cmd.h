@@ -19,7 +19,7 @@
  *     0x12 PINS     : live control-pin snapshot
  *     0x13 LASTERR  : detail code of the last rejected command
  *     0x14 VERSION  : interface version
- *     0x40..0xAF    : NVRAM parameter window (see tres_i2c_slave.h)
+ *     0x40..0xAB    : NVRAM parameter window (see tres_i2c_slave.h)
  ******************************************************************************
  */
 #ifndef __TRES_CMD_H__
