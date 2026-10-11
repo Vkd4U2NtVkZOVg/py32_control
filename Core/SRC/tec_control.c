@@ -209,6 +209,13 @@ static void tec_params_load( Tec_Params_t *p )
     if ( p->current_valid_max_ma <= 0 ) {
         p->current_valid_max_ma = (int32_t)NvParams_GetDefault( NV_TEC_CURRENT_VALID_MAX_MA );
     }
+    if ( p->current_valid_max_ma < p->cur_danger_ma ) {
+        /* The plausibility window must sit ABOVE the danger threshold, or a
+         * real overcurrent inside [danger, valid_max) gets mislabeled and
+         * handled as a sensor fault instead of the OVERCURRENT path. */
+        p->current_valid_max_ma = (int32_t)NvParams_GetDefault( NV_TEC_CURRENT_VALID_MAX_MA );
+        p->cur_danger_ma        = (int32_t)NvParams_GetDefault( NV_TEC_CURRENT_DANGER_MA );
+    }
     if ( ( p->hot_fb_gain_q16 == 0u ) || ( p->hot_fb_max_millic <= 0 ) ) {
         p->hot_fb_gain_q16   = NvParams_GetDefault( NV_TEC_HOT_FB_GAIN_Q16 );
         p->hot_fb_max_millic = (int32_t)NvParams_GetDefault( NV_TEC_HOT_FB_MAX_MILLIC );
@@ -349,6 +356,8 @@ static void TecControl_Cb( qEvent_t e )
 
     uint8_t fan_duty;
     uint32_t fan_rpm;
+    uint32_t cur_read;
+    uint8_t  cur_ok;
     uint8_t drive;                  /* 0 = hold the converter off this cycle */
 
     (void)e;
@@ -357,7 +366,8 @@ static void TecControl_Cb( qEvent_t e )
     hot_mc = Studio_ADC1_ReadHotMilliCelsius();
     env_mc = AHT20_Get_LastTempMilliCelsius();   /* ambient, not dew point */
     sdm_mc = Studio_ADC1_ReadColdMilliCelsius();
-    cur_ma = Studio_ADC1_ReadCurrentMilliamp();
+    cur_ok = Studio_ADC1_ReadCurrentMilliamp( &cur_read );
+    cur_ma = cur_read;
 
     if ( is_temp_valid( env_mc ) == 0 ) {
         env_mc = s_p.target_base_millic;   /* fall back to nominal ambient */
@@ -378,6 +388,27 @@ static void TecControl_Cb( qEvent_t e )
         tec_set_enabled( 0u );
         (void)tec_dac_set( 0u );
         Fan_SetDutyPercent( 100u );
+        s_alarm |= TEC_ALARM_SENSOR;
+        return;
+    }
+
+    /*--- 1c. current-sense failure is FAIL-SAFE, not fall-back -------------*/
+    /* A timed-out ADC conversion reads as code 0, which in the mA domain is
+     * a LEGITIMATE value (TEC off) - adc.c therefore reports sample validity
+     * explicitly instead of letting 0 stand in for "no data". With a failed
+     * sample the overcurrent guard is BLIND: cut the TEC (same shape as the
+     * hot-side sensor fault above) until a valid sample returns; recovery is
+     * automatic through the normal first-enable path. The second half is the
+     * NVRAM plausibility window (current_valid_max_ma - previously loaded
+     * and validated but never consulted): a reading above it means the sense
+     * chain itself is no longer trustworthy. danger < valid_max is enforced
+     * in tec_params_load(), so a genuine overcurrent still trips the
+     * OVERCURRENT path (with its PID reset) before this one can label it a
+     * sensor fault. */
+    if ( ( cur_ok == 0u ) ||
+         ( cur_ma > (uint32_t)s_p.current_valid_max_ma ) ) {
+        tec_set_enabled( 0u );
+        (void)tec_dac_set( 0u );
         s_alarm |= TEC_ALARM_SENSOR;
         return;
     }

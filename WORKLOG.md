@@ -3282,3 +3282,23 @@ DAC 输出偏高(窗口顶方向)时 VOUT 被压得过低,TPS565201 进入打嗝
 2. DEFAULT 故障(no-op):exit 1 且 FLASH 仍被 finally 全表还原;
 3. DEFAULT 处注入 KeyboardInterrupt:异常正常传播且 FLASH 仍全表还原。
 7/7 断言通过。
+
+---
+
+## 2026-10-12 — 外部审计问题#3核实并修复:电流 ADC 超时被当作 0 mA + current_valid_max_ma 从未使用
+
+### 核实(属实,P2 保护盲区)
+
+`Studio_ADC1_ReadChannel` EOC 超时统一返回 0(原注释只考虑了 NTC 路径:0 码 -> 越窗温度 -> fail-safe)。电流路径把它转成 **0 mA**——但 TEC_VEN=0 时 INA 输出本来就是 ~0 mA,**真 0 与超时 0 在毫安层不可区分**;两温度正常而电流转换超时的周期里,过流检查(>3000 mA)不触发、无任何报警,过流保护全盲,控制器继续输出。另外 `NV_TEC_CURRENT_VALID_MAX_MA`(默认 5000)在 tec_params_load 里加载+校验,但控制回调从未使用。
+
+### 修复
+
+- **adc.c**:抽出 `static adc1_convert(channel, &ok)` 检查版转换(超时 `*ok=0`);`Studio_ADC1_ReadChannel` 保持原语义(0=超时,NTC 调用方靠越窗 fail-safe)并注明"电流路径不得依赖此约定";`Studio_ADC1_ReadCurrentMilliamp` 签名改 `uint8_t fn(uint32_t *out_ma)`——1=有效样本,0=超时(*out_ma=0),彻底区分真 0 mA 与失效样本。
+- **tec_control.c**:新增 1c 段(与 1b 热端传感器失效同构):`cur_ok==0` 或 `cur_ma > current_valid_max_ma` -> 撤 EN + DAC park + `TEC_ALARM_SENSOR` + return;恢复走正常 first-enable 路径,有效样本返回后自动重启。
+- **tec_params_load**:新增关系防护 `valid_max >= danger`(违反回退默认),保证真实过流先命中 OVERCURRENT 路径(带 PID 复位)而不是被标成传感器故障。
+
+### 语义说明
+
+越窗(>5000 mA)与超时同走 SENSOR 截断:窗口的意义就是"读数本身不可信"(无法区分真 6 A 与采样链故障),动作一致(切 TEC),仅告警位不同。此路径不强制风扇 100%:热端输入仍可信,风扇继续跟随热端(与 thermal-wait 路径同样不碰风扇)。
+
+编译 0 项目警告。

@@ -225,7 +225,11 @@ void Studio_ADC1_Init(void)
 /* enabled - AN1011 §1: "ADC使能后软件不能禁能" (a runtime LL_ADC_Disable made */
 /* conversions stick at 2048). Each read re-assigns one channel, starts a     */
 /* conversion, waits for EOC, and clears CHSELR again.                        */
-uint16_t Studio_ADC1_ReadChannel(uint32_t channel)
+/* Checked variant: 1 on success; 0 when EOC never arrives (clock/peripheral */
+/* fault), with *out set to 0. Callers that cannot treat 0 as "no data" -    */
+/* the current path, where 0 mA is a legitimate TEC-off reading - must use   */
+/* the validity flag instead of the raw value.                               */
+static uint16_t adc1_convert(uint32_t channel, uint8_t *ok)
 {
   uint16_t value = 0U;
   uint32_t timeout = 1000000U;   /* ~ms at 32 MHz; abort if EOC never arrives */
@@ -241,10 +245,9 @@ uint16_t Studio_ADC1_ReadChannel(uint32_t channel)
   LL_ADC_REG_StartConversion(ADC1);
   while (LL_ADC_IsActiveFlag_EOC(ADC1) == 0U) {
     if ( timeout-- == 0U ) {
-      /* Conversion never completed (clock/peripheral fault). Return 0: the
-       * hot/cold NTC paths then read as sensor faults and the TEC loop
-       * drives to a safe state instead of blocking forever. */
+      /* Conversion never completed (clock/peripheral fault). */
       WRITE_REG(ADC1->CHSELR, 0U);
+      *ok = 0U;
       return 0U;
     }
   }
@@ -254,6 +257,18 @@ uint16_t Studio_ADC1_ReadChannel(uint32_t channel)
   /* Clear all channels */
   WRITE_REG(ADC1->CHSELR, 0U);
 
+  *ok = 1U;
+  return value;
+}
+
+uint16_t Studio_ADC1_ReadChannel(uint32_t channel)
+{
+  uint8_t ok;
+  uint16_t value = adc1_convert(channel, &ok);
+  /* 0 on timeout: the hot/cold NTC callers convert it to an out-of-window
+   * temperature and fail safe. The current path must NOT rely on this - a
+   * genuine 0 mA (TEC off) and a timed-out sample are the same code there,
+   * so Studio_ADC1_ReadCurrentMilliamp() reports validity separately. */
   return value;
 }
 
@@ -269,10 +284,11 @@ uint16_t Studio_ADC1_ReadColdRaw(void)
 
 uint16_t Studio_ADC1_ReadCurrentRaw(void)
 {
-  return Studio_ADC1_ReadChannel(LL_ADC_CHANNEL_6);
+  uint8_t ok;
+  return adc1_convert(LL_ADC_CHANNEL_6, &ok);
 }
 
-uint32_t Studio_ADC1_ReadCurrentMilliamp(void)
+uint8_t Studio_ADC1_ReadCurrentMilliamp(uint32_t *out_ma)
 {
   /* Current-sense chain calibration from NVRAM (INA181A2 + divider). Values
    * are snapshotted once; changing NVRAM takes effect after reboot. */
@@ -281,7 +297,8 @@ uint32_t Studio_ADC1_ReadCurrentMilliamp(void)
   static uint32_t div_num    = 1u;
   static uint32_t div_den    = 1u;
   static uint32_t adc_vref_mv = 0u;
-  uint32_t adc_code = Studio_ADC1_ReadCurrentRaw();
+  uint16_t adc_code;
+  uint8_t  ok;
   uint64_t adc_voltage_uV;
   uint64_t shunt_voltage_uV;
   uint64_t current_mA;
@@ -317,13 +334,24 @@ uint32_t Studio_ADC1_ReadCurrentMilliamp(void)
     }
   }
 
+  /* A timed-out conversion reads as code 0 - indistinguishable at this
+   * layer from a genuine 0 mA (TEC off) - so sample validity is reported
+   * explicitly instead of letting 0 stand in for "no data" (a bare 0 here
+   * would silently blind the caller's overcurrent guard). */
+  adc_code = adc1_convert(LL_ADC_CHANNEL_6, &ok);
+  if ( ok == 0U ) {
+    *out_ma = 0U;
+    return 0U;
+  }
+
   /* Vadc = code * Vref / 4095; undo the INA output divider, then divide by
    * (shunt resistance * amplifier gain). Keep integer arithmetic in uV. */
   adc_voltage_uV = ((uint64_t)adc_code * adc_vref_mv * 1000ULL) / 4095ULL;
   shunt_voltage_uV = (adc_voltage_uV * div_den) / div_num;
   current_mA = (shunt_voltage_uV * 1000ULL) /
                ((uint64_t)shunt_uohm * amp_gain);
-  return (uint32_t)current_mA;
+  *out_ma = (uint32_t)current_mA;
+  return 1U;
 }
 
 int32_t Studio_ADC1_ReadHotMilliCelsius(void)
