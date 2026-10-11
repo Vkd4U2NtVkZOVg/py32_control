@@ -27,21 +27,22 @@ int TecPid_Init(TecPid_t *pid,
         return TEC_PID_ERR_PARAM;
     }
 
-    /* Sampling-period normalization: the EPID is incremental, so Ki/Kd act on
-     * a per-cycle delta. To make the same gains valid at any control period
-     * the caller-specified gains are RE-DERIVED from the standard definitions
-     * Ki = Kp·Ts/Ti and Kd = Kp·Td/Ts... instead we treat the raw ki/kd
-     * inputs as per-second rates and scale them by the actual period:
-     *   ki_eff = ki * period_s   (integral rate per cycle)
-     *   kd_eff = kd * period_s   (derivative per cycle)
-     * All units stay in milli-degC input / percent output, so a gain set
-     * tuned at Ts=1 s keeps its behaviour at any Ts. */
+    /* Sampling-period normalization: the EPID is incremental (velocity form),
+     * so the per-cycle equivalents of the physical (per-second) gains are:
+     *   I: position form integrates e*Ts -> per-cycle increment is Ki_c*Ts
+     *      ki_eff = ki * period_s                     (ki input: %/(mdegC*s))
+     *   D: position form differentiates x -> its one-cycle INCREMENT is
+     *      (Kd_c/Ts)*(2x[k-1]-x[k-2]-x[k])            (second difference)
+     *      kd_eff = kd / period_s                     (kd input: %/(mdegC*s))
+     * The 1/Ts for D matches the submodule's own epid_init_T
+     * (kd = kp*Td/sample_period). The old kd*Ts here was inverted - it made
+     * the D term off by 1/Ts^2 and was masked at the original Ts = 1 s. */
     if ( period_s <= 0.0f ) {
         period_s = 1.0f;
     }
     kp_eff = kp;
     ki_eff = ki * period_s;
-    kd_eff = kd * period_s;
+    kd_eff = kd / period_s;
 
     /* The epid and LPF instances live INSIDE the caller's TecPid_t (embedded
      * union storage), so every PID handle owns its own state - no shared
@@ -59,8 +60,10 @@ int TecPid_Init(TecPid_t *pid,
     pid->out_max       = out_max;
     pid->i_min         = i_min;
     pid->i_max         = i_max;
-    /* D-term filter smoothing is per-cycle; to stay period-independent the
-     * caller passes it tuned at Ts=1 s. */
+    /* D-term filter smoothing is per-cycle; the caller derives it from a
+     * PHYSICAL filter time constant and the actual period
+     * (a = Ts/(tau+Ts), see TEC_D_FILTER_TAU_S in tec_control.c), so the
+     * filter dynamics stay period-independent. */
     pid->d_filter_on   = ( d_filter_a > 0.0f ) ? 1u : 0u;
 
     if ( pid->d_filter_on != 0u ) {

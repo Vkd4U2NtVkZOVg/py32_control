@@ -12,9 +12,12 @@
  *   - Ambient (env_mc): target compensation + common-mode feedforward
  *   - Dynamic target: base + env compensation - SoC compensation (cold-side)
  *   - PID main loop: TecPid_Update() with the cold-side temperature
- *   - Feedforward: TEC current > threshold adds duty proportional to current
+ *   - Feedforward (optional, NV_TEC_FF_ENABLE): common-mode ambient-target
+ *     term only - the former TEC-current term was removed (positive feedback,
+ *     loop gain >1 inside the FF band); TEC current is protection-only now
  *   - Fault protection: overtemp full-speed/shutdown, overcurrent cutoff,
- *     fan fault alarm, dew-point hard cut + independent condensation floor
+ *     fan fault alarm, dew-point hard cut + independent condensation floor,
+ *     EN anti-hiccup deadband (deep light load drops TEC_VEN)
  *
  * All tunable parameters (PID gains, targets, thresholds, DAC window, fan ramp,
  * sensor scale) live in NVRAM (nv_params.h) and are snapshotted at

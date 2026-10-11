@@ -121,7 +121,10 @@ static const uint32_t s_defaults[ NVM_PARAM_COUNT ] = {
     [NV_TEC_TARGET_BASE_MILLIC]        = 45000u,
     [NV_TEC_HOT_OVERTEMP_MILLIC]       = 80000u,
     [NV_TEC_HOT_DANGER_MILLIC]         = 90000u,
-    [NV_TEC_CURRENT_FEEDFORWARD_MA]    = 2000u,
+    [NV_TEC_CURRENT_FEEDFORWARD_MA]    = 2000u,/* RESERVED, no consumer: the current-
+                                                  derived FF was removed (positive
+                                                  feedback). Slot kept so later slots
+                                                  keep their I2C register addresses. */
     [NV_TEC_CURRENT_DANGER_MA]         = 3000u,
     [NV_TEC_FAN_MIN_RPM]               = 500u,
     [NV_TEC_CONTROL_PERIOD_MS]         = 500u,
@@ -180,7 +183,9 @@ static const uint32_t s_defaults[ NVM_PARAM_COUNT ] = {
                                                   duty floor the loop could not go
                                                   below, cold side never settled at
                                                   target). 0 = PID only; nonzero =
-                                                  common-mode + current FF on. Write
+                                                  common-mode FF on (the only term -
+                                                  the current-derived FF was removed
+                                                  as positive feedback). Write
                                                   slot 34 (reg 0xC8) to toggle.     */
     [NV_TEC_EN_OFF_PCT]                = 8u,   /* anti-hiccup deadband: duty below
                                                   this drops TEC_VEN (DCDC EN) - a

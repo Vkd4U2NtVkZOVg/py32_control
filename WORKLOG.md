@@ -3143,3 +3143,56 @@ DAC 输出偏高(窗口顶方向)时 VOUT 被压得过低,TPS565201 进入打嗝
 
 1. 手动把 DAC 从窗口中段往顶端扫,听电感/看 VOUT,记录开始打嗝的 duty → 写入槽 35(0xCC)。
 2. 确认启动锚点(startup_pct=10,≈0.6 V)在打嗝边界的安全侧;若 0.6 V 已打嗝,同步调高 EN_OFF_PCT 或 startup 锚点。
+
+---
+
+## 2026-10-11 — 三轮审查(GPT):电流前馈正反馈确认属实,选项 A 落实(整路删除)
+
+### 核实结论(逐条)
+
+- **属实**:2000–3000 mA 带内仍按每 10 mA +1% 加力(原第 6 节);2500 mA → +50%、2900 → +90%、3000 → +100% 且 `>` 严格比较不触发关断。
+- **属实**:PID out_min=0 无法抵消正前馈(与 FF 开关记录的同一结构性问题)。
+- **属实且可定量**:标定窗口下 duty% ≈ TEC 电压%,TEC 6 V/15 W(R≈2.4 Ω)满压 2.5 A → dI/dduty ≈ 25 mA/%,FF 增益 1%/10 mA → **环路增益 ≈ 2.5 > 1**,带内再生正反馈,唯一刹车是 overcurrent 关断(爬升→关断→回暖→再爬升极限环)。
+- **两点补充**:①该路径在 `NV_TEC_FF_ENABLE`(默认关)门控内,默认 NVRAM 下不激活;②GPT 的前提"问题 1 修复后电流不再被低估"若基于 VDDA=3.3 V 推算则不成立(VDDA 实接 1.8 V,读数本就正确)——但不影响结构批评。
+
+### 修复(选项 A:整路删除电流前馈)
+
+- 删 `TecControl_Cb` 第 6 节;5b(common-mode)成为唯一前馈项,门控不变。
+- 删 `Tec_Params_t.cur_feedforward_ma` 字段 + 加载行;sanity 简化为只查 `cur_danger_ma > 0`。
+- **槽 6 `NV_TEC_CURRENT_FEEDFORWARD_MA` 保留为 RESERVED**(删行会使后续槽寄存器地址全部 -4,台架标定中的地址引用会失效);无固件消费方,probe 仍可读写。
+- 电流现在的全部角色:过流关断(>danger)+ 有效性窗口(valid_max)。降额由 EN 死区(轻载)与热端折返(过热)承担。
+
+### 台架注意
+
+台架标定中的默认值改动(KD=0.1、CONTROL_PERIOD=500 ms、DAC_MAX_CTRL_MV=1600 实测关断端)保留不动;`DAC_MAX_CTRL_MV=1600` 时窗口 [760,1600]、duty% ↔ VOUT 线性映射不变。
+
+---
+
+## 2026-10-11 — 三轮审查(GPT #9)核实并修正:PID D 项周期归一化方向反了(kd×Ts → kd/Ts)
+
+### 核实结论:GPT 正确,真回归
+
+增量 Type-C PID 的 D 项是 `kd_eff·(2x[k-1]-x[k-2]-x[k])`(测量二阶差分)。由位置式 `u_D = -Kd·dx/dt` 推增量:一个周期的 D 贡献 = **(Kd/Ts)·二阶差分**——系数应为 **kd/Ts(除)**,代码写的是 `kd_eff = kd * period_s`(乘),方向反了。决定性旁证:子模块自身的 `epid_init_T` 即 `kd = kp*Td/sample_period`(除)。Ki 的 `×Ts` 正确(Σe·Ts),P 无周期因子。引入提交 `a81cff3`(首轮 PID 周期归一化),默认 Ts=1 s 时 ×1 恰好掩盖。
+
+### 影响量化(当前台架 Ts=0.5 s)
+
+- kd=0.5:错误 kd_eff = 0.5×0.5 = 0.25,正确 = 0.5/0.5 = 1.0 → 修正后 **D 变强 4 倍**。要保持台架现状:KD 槽写 **0.125**(`--set pid_kd 0.125` + SAVE_PARAMS)。
+
+### 配套修正(per-cycle 固定值 → 物理时间常数,GPT 第二点)
+
+- **D-LPF**:宏 `TEC_D_FILTER_TAU_S = 2.0 s`,`a = Ts/(τ+Ts)`;Ts=1 s → a=0.33 ≈ 原硬编码 0.3(调参连续)。
+- **I 每步限幅**:宏 `TEC_I_SLEW_PCT_PER_S = 50 %/s`,限 ±50·Ts;Ts=1 s → ±50(与原一致)。
+- **输出斜坡 `RAMP_STEP_PERCENT`**:按用户选择保持**每周期**语义(槽 doc 注明换周期需重调);不新增 NVRAM 槽(NV_END=0xD0 已贴 AES 窗口,宏即可)。
+
+### 改动
+
+| 文件 | 内容 |
+|---|---|
+| `tec_pid.c` | `kd_eff = kd / period_s`;归一化注释重写(含推导与 epid_init_T 旁证);D-LPF 注释改为"调用方按物理 τ 推导" |
+| `tec_pid.h` | 两处 kd 单位文档 `×Ts` → `/Ts`;i_min/i_max doc 注明按 Ts 缩放物理斜率 |
+| `tec_control.c` | 新宏 `TEC_D_FILTER_TAU_S`/`TEC_I_SLEW_PCT_PER_S`;`TecControl_Init` 计算 `i_lim`、`d_filter_a` 传入 |
+| `nv_params.h` | `RAMP_STEP_PERCENT` doc:per-cycle 语义 + 换周期重调提示 |
+
+### 台架注意
+
+修正后动态变化(Ts=0.5):D ×4(0.25→1.0/周期)、I 限幅 100→50 %/s、D-LPF a 0.3→0.2(τ=2 s)、斜坡不变 5 %/周期。建议按 KD=0.125 起步重看阶跃响应。

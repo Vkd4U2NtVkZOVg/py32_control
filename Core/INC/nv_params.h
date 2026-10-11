@@ -76,7 +76,14 @@ typedef enum {
     NV_TEC_TARGET_BASE_MILLIC,         /**< base TEC target, milli-degC         */
     NV_TEC_HOT_OVERTEMP_MILLIC,        /**< hot > this: fan full speed (m°C)    */
     NV_TEC_HOT_DANGER_MILLIC,          /**< hot > this: TEC off + fan 100 (m°C) */
-    NV_TEC_CURRENT_FEEDFORWARD_MA,     /**< current above this gets FF (mA)     */
+    NV_TEC_CURRENT_FEEDFORWARD_MA,     /**< DEPRECATED/RESERVED: the current-
+                                            derived feedforward was removed
+                                            (positive feedback, loop gain >1 in
+                                            the FF band - duty rises, current
+                                            rises, term adds more duty). Slot
+                                            kept so later slots keep their
+                                            register addresses; no firmware
+                                            consumer reads it.                  */
     NV_TEC_CURRENT_DANGER_MA,          /**< current above this: alarm +FF50 (mA)*/
     NV_TEC_FAN_MIN_RPM,                /**< fan fault threshold (RPM)           */
     NV_TEC_CONTROL_PERIOD_MS,          /**< control/QuarkTS period (ms)         */
@@ -113,7 +120,12 @@ typedef enum {
                                             command below - lower DAC sinks
                                             current out of FB and overdrives
                                             VOUT past 6 V                        */
-    NV_TEC_RAMP_STEP_PERCENT,          /**< max duty % change per control cycle*/
+    NV_TEC_RAMP_STEP_PERCENT,          /**< max duty % change PER CONTROL CYCLE
+                                            (deliberately per-cycle, not per-
+                                            second: changing the control period
+                                            changes the physical ramp rate, so
+                                            retune this slot when the period
+                                            changes)                           */
     NV_TEC_DEWPOINT_MARGIN_MILLIC,     /**< target floor: dew point + this     */
     NV_TEC_FF_GAIN_Q16,                /**< COMMON-MODE feedforward: % duty per
                                             °C of (env - target) below knee    */
@@ -123,14 +135,17 @@ typedef enum {
     NV_TEC_HOT_FB_MAX_MILLIC,          /**< hot-side foldback: max cold-target
                                             lift (m°C)                         */
     NV_TEC_FF_ENABLE,                  /**< feedforward master switch: 0 = PID
-                                            only, nonzero = common-mode + current
-                                            feedforward enabled. Default OFF: an
-                                            additive FF sits OUTSIDE the PID's
-                                            [0,100] domain, so an overestimate
-                                            acts as a duty floor the loop can
-                                            never go below (PID pinned at out_min
-                                            cannot subtract) and the cold side
-                                            settles away from the target.       */
+                                            only, nonzero = common-mode
+                                            feedforward enabled (the only FF
+                                            term; the current-derived term was
+                                            removed as positive feedback).
+                                            Default OFF: an additive FF sits
+                                            OUTSIDE the PID's [0,100] domain, so
+                                            an overestimate acts as a duty floor
+                                            the loop can never go below (PID
+                                            pinned at out_min cannot subtract)
+                                            and the cold side settles away from
+                                            the target.                         */
     NV_TEC_EN_OFF_PCT,                 /**< anti-hiccup deadband: duty below this
                                             drops TEC_VEN (the DCDC EN) instead
                                             of driving VOUT into the TPS565201

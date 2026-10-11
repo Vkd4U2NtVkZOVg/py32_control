@@ -15,8 +15,10 @@
  *   - kp     : P gain, percent output per milli-degC of error
  *   - ki     : I gain, percent output per milli-degC per SECOND; the wrapper
  *              scales it by the actual loop period internally (ki_eff=ki*Ts)
- *   - kd     : D gain, percent output per milli-degC per SECOND; likewise
- *              scaled by the period (kd_eff=kd*Ts)
+ *   - kd     : D gain, percent output per milli-degC per SECOND; the wrapper
+ *              DIVIDES by the loop period (kd_eff=kd/Ts) - the incremental
+ *              second-difference term carries a 1/Ts factor (matches
+ *              epid_init_T's kp*Td/Ts)
  *   - period_s: the control-loop period in seconds, passed at init and used
  *              both to normalize ki/kd and to schedule the QuarkTS task, so
  *              tuned gains stay valid at any loop rate.
@@ -75,12 +77,13 @@ typedef struct {
  *   - ki                 : I gain, output per milli-degC per SECOND
  *                         (internally scaled by period_s: ki_eff = ki*Ts)
  *   - kd                 : D gain, output per milli-degC per SECOND
- *                         (internally scaled by period_s: kd_eff = kd*Ts)
+ *                         (internally scaled by period_s: kd_eff = kd/Ts)
  *   - period_s           : actual control-loop period, seconds. Tuned gains
  *                          stay valid at any period; only this parameter
  *                          changes when the task period changes.
  *   - i_min/i_max        : anti-windup window for the raw I increment
- *                          (per-second scaled), e.g. [-out_max, out_max].
+ *                          (per-cycle; scale a physical %/s slew by Ts), e.g.
+ *                          [-out_max, out_max].
  * @param pid       Controller handle.
  * @param kp,ki,kd  PID gains (Kp must be > 0, Ki > 0, Kd >= 0).
  * @param period_s  Control-loop period in seconds (scales ki/kd to per cycle).

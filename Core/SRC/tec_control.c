@@ -45,6 +45,18 @@
 /*============================================================================*/
 #define TEC_EN_HYST_PCT     ( 4 )
 
+/* Physical-time constants for the PID housekeeping that used to be fixed
+ * per-cycle numbers. The control period is NVRAM-tunable, so per-cycle values
+ * silently change the loop's physical dynamics when the period changes:
+ *   - D-term low-pass: first-order EMA with time constant TAU (s); the
+ *     per-cycle smoothing factor is a = Ts/(TAU+Ts). At Ts = 1 s this gives
+ *     a = 0.33, matching the previously hardcoded 0.3.
+ *   - I-increment clamp: a physical integrator slew limit in %/s; the
+ *     per-cycle clamp is +/-SLEW*Ts. At Ts = 1 s this gives +/-50, matching
+ *     the previously hardcoded window. */
+#define TEC_D_FILTER_TAU_S        ( 2.0f )
+#define TEC_I_SLEW_PCT_PER_S      ( 50.0f )
+
 /*============================================================================*/
 /* Configuration: snapshotted once from NVRAM at TecControl_Init().            */
 /*============================================================================*/
@@ -55,8 +67,7 @@ typedef struct {
     int32_t target_base_millic;     /* base TEC target temp                     */
     int32_t hot_overtemp_millic;    /* fan full speed threshold                 */
     int32_t hot_danger_millic;      /* TEC off + fan 100 % threshold            */
-    int32_t cur_feedforward_ma;     /* current feedforward knee                 */
-    int32_t cur_danger_ma;          /* overcurrent alarm + FF boost threshold   */
+    int32_t cur_danger_ma;          /* overcurrent cutoff threshold             */
     int32_t fan_min_rpm;            /* fan fault RPM threshold                  */
     int32_t control_period_ms;      /* task period, ms                          */
     int32_t dac_max_ctrl_mv;        /* power-stage control window top           */
@@ -90,7 +101,6 @@ static void tec_params_load( Tec_Params_t *p )
     p->target_base_millic    = (int32_t)NvParams_Get( NV_TEC_TARGET_BASE_MILLIC );
     p->hot_overtemp_millic   = (int32_t)NvParams_Get( NV_TEC_HOT_OVERTEMP_MILLIC );
     p->hot_danger_millic     = (int32_t)NvParams_Get( NV_TEC_HOT_DANGER_MILLIC );
-    p->cur_feedforward_ma    = (int32_t)NvParams_Get( NV_TEC_CURRENT_FEEDFORWARD_MA );
     p->cur_danger_ma         = (int32_t)NvParams_Get( NV_TEC_CURRENT_DANGER_MA );
     p->fan_min_rpm           = (int32_t)NvParams_Get( NV_TEC_FAN_MIN_RPM );
     p->control_period_ms     = (int32_t)NvParams_Get( NV_TEC_CONTROL_PERIOD_MS );
@@ -152,10 +162,8 @@ static void tec_params_load( Tec_Params_t *p )
         p->hot_overtemp_millic = (int32_t)NvParams_GetDefault( NV_TEC_HOT_OVERTEMP_MILLIC );
         p->hot_danger_millic   = (int32_t)NvParams_GetDefault( NV_TEC_HOT_DANGER_MILLIC );
     }
-    if ( ( p->cur_feedforward_ma <= 0 ) || ( p->cur_danger_ma <= 0 ) ||
-         ( p->cur_feedforward_ma >= p->cur_danger_ma ) ) {
-        p->cur_feedforward_ma = (int32_t)NvParams_GetDefault( NV_TEC_CURRENT_FEEDFORWARD_MA );
-        p->cur_danger_ma      = (int32_t)NvParams_GetDefault( NV_TEC_CURRENT_DANGER_MA );
+    if ( p->cur_danger_ma <= 0 ) {
+        p->cur_danger_ma = (int32_t)NvParams_GetDefault( NV_TEC_CURRENT_DANGER_MA );
     }
     if ( ( p->soc_tighten_temp_millic <= 0 ) || ( p->soc_tighten_delta_millic <= 0 ) ) {
         p->soc_tighten_temp_millic = (int32_t)NvParams_GetDefault( NV_TEC_SOC_TIGHTEN_TEMP_MILLIC );
@@ -447,7 +455,8 @@ static void TecControl_Cb( qEvent_t e )
     TecPid_Update( &s_pid, -(float)sdm_mc );
     pid_out = (int32_t)TecPid_GetOutput( &s_pid );
 
-    /*--- 5b/6. feedforward (master switch NV_TEC_FF_ENABLE, default OFF) ---*/
+    /*--- 5b. COMMON-MODE feedforward (master switch NV_TEC_FF_ENABLE,
+     * default OFF) ----------------------------------------------------------*/
     /* The FF is ADDITIVE outside the PID's [0,100] domain: when it
      * overestimates the steady-state need, duty can never fall below it (the
      * PID is pinned at out_min and cannot subtract), so the cold side settles
@@ -455,19 +464,16 @@ static void TecControl_Cb( qEvent_t e )
      * settles at target". The switch lets the bench A/B the FF without a
      * rebuild; re-enable once the FF estimate is calibrated (or the FF is
      * folded into the PID's own output limits so anti-windup sees the true
-     * saturation). */
+     * saturation).
+     * NOTE: this is the ONLY feedforward term. The former current-derived
+     * term (duty += (cur_mA - knee)/10) was REMOVED: with duty% == TEC
+     * voltage %, dI/dduty ~= 25 mA/% gives that path a POSITIVE loop gain of
+     * ~2.5 (>1) inside the 2000-3000 mA band - duty rises, current rises,
+     * the term adds more duty, and the only brake was the overcurrent cutoff
+     * (limit cycle up to the danger threshold). TEC current now serves
+     * protection only (overcurrent cutoff + validity window). */
     feedforward = 0;
     if ( s_p.ff_enable != 0u ) {
-        /*--- 5b. COMMON-MODE feedforward (TI AFEx39xx "COMMON-MODE" idea):
-         * the nominal actuator effort to hold a given target is dominated by the
-         * ambient-to-target temperature difference (the TEC must pump heat against
-         * the ambient gradient). Instead of letting the integrator crawl there from
-         * zero every time, start from an estimated base duty and let the PI loop
-         * only correct the residual error. Gain is % duty per °C of (env - target).
-         * NOTE: gradient_mc is in milli-degC, so it must be converted to degC
-         * before multiplying by ff_gain (% per degC) - otherwise a 10 degC
-         * gradient (10000 mdegC) x 1.0 saturates the feedforward to 100 % and
-         * swamps the PID. */
         {
             int32_t gradient_mc = env_mc - target_mc;   /* >0 = hotter ambient  */
             int32_t gradient_c  = gradient_mc / 1000;    /* milli-degC -> degC  */
@@ -480,12 +486,6 @@ static void TecControl_Cb( qEvent_t e )
                 ff_base = 100;
             }
             feedforward = ff_base;
-        }
-
-        /*--- 6. feedforward from TEC current (on top of COMMON-MODE) ----------*/
-        if ( ( cur_ma <= (uint32_t)s_p.current_valid_max_ma ) &&
-             ( cur_ma > (uint32_t)s_p.cur_feedforward_ma ) ) {
-            feedforward += (int32_t)( cur_ma - (uint32_t)s_p.cur_feedforward_ma ) / 10;
         }
     }
     if ( cur_ma > (uint32_t)s_p.cur_danger_ma ) {
@@ -630,6 +630,8 @@ static void TecControl_Cb( qEvent_t e )
 void TecControl_Init( void )
 {
     float period_s;
+    float i_lim;
+    float d_filter_a;
 
     tec_params_load( &s_p );
 
@@ -639,9 +641,11 @@ void TecControl_Init( void )
     period_s = (float)s_p.control_period_ms / 1000.0f;
 
     /* PID: output 0..100 %, I-term clamped for anti-windup, D-term filtered.
-     * Gain convention (tec_pid.h): ki/kd are per-second rates, scaled
-     * internally by period_s, so tuning stays valid if the task period
-     * changes - only period_s has to follow the QuarkTS schedule below.
+     * Gain convention (tec_pid.h): ki/kd are per-second rates, normalized
+     * internally (ki*Ts, kd/Ts), so tuning stays valid if the task period
+     * changes - only period_s has to follow the QuarkTS schedule below. The
+     * I-clamp and the D-filter factor are derived from the PHYSICAL-time
+     * macros above for the same reason (period-independent dynamics).
      * The EPID is "heating semantics"; TecControl_Cb flips the sign of both
      * setpoint and measure ((x - SP) cooling error) of the cold side, so the
      * init seed MUST be in the same (negative) domain, otherwise the first
@@ -649,13 +653,15 @@ void TecControl_Init( void )
      * output to 100 % even at zero error. Seed with the (negated) base
      * target: at init no measurement exists yet, and the first real
      * measurement replaces it next cycle. */
+    i_lim      = TEC_I_SLEW_PCT_PER_S * period_s;
+    d_filter_a = period_s / ( TEC_D_FILTER_TAU_S + period_s );
     (void)TecPid_Init( &s_pid,
                        s_p.pid_kp, s_p.pid_ki, s_p.pid_kd,
                        period_s,
                        -(float)s_p.target_base_millic,
                        0.0f, 100.0f,
-                       -50.0f, 50.0f,
-                       0.3f );
+                       -i_lim, i_lim,
+                       d_filter_a );
 
     s_alarm        = TEC_ALARM_NONE;
     s_tec_enabled  = 0u;
