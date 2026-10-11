@@ -372,12 +372,14 @@ int NvParams_Save( void )
         while ( LL_FLASH_IsActiveFlag_BUSY( FLASH ) != 0u ) {
             if ( timeout-- == 0u ) {
                 LL_FLASH_DisablePageErase( FLASH );
+                LL_FLASH_Lock( FLASH );   /* every exit path re-locks */
                 __set_PRIMASK( primask );
                 return NVM_ERR_FLASH;
             }
         }
         if ( LL_FLASH_IsActiveFlag_WRPERR( FLASH ) != 0u ) {
             LL_FLASH_DisablePageErase( FLASH );
+            LL_FLASH_Lock( FLASH );   /* every exit path re-locks */
             __set_PRIMASK( primask );
             return NVM_ERR_FLASH;
         }
@@ -403,12 +405,14 @@ int NvParams_Save( void )
         while ( LL_FLASH_IsActiveFlag_BUSY( FLASH ) != 0u ) {
             if ( timeout-- == 0u ) {
                 LL_FLASH_DisablePageProgram( FLASH );
+                LL_FLASH_Lock( FLASH );   /* every exit path re-locks */
                 __set_PRIMASK( primask );
                 return NVM_ERR_FLASH;
             }
         }
         if ( LL_FLASH_IsActiveFlag_WRPERR( FLASH ) != 0u ) {
             LL_FLASH_DisablePageProgram( FLASH );
+            LL_FLASH_Lock( FLASH );   /* every exit path re-locks */
             __set_PRIMASK( primask );
             return NVM_ERR_FLASH;
         }
