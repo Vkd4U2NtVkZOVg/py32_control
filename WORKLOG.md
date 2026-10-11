@@ -3259,3 +3259,26 @@ DAC 输出偏高(窗口顶方向)时 VOUT 被压得过低,TPS565201 进入打嗝
 修复:adc.c 冷源路径在 `!GetSdm845TempValid()` 时返回 `INT32_MIN`(与 AHT20 露点"无数据"哨兵同一约定)→ `is_temp_valid()` 拒收 → 走 `sdm_mc = target_base` fallback。`ReadColdMilliCelsius` 全项目仅 tec_control.c 一个调用方,哨兵不泄漏。
 
 **边界(知悉)**:`target_mc = 5000;`(tec_control.c,2cbc2f6 误提交的台架调试行,暂保留)生效期间,fallback 测量 45 °C 对强制目标 5 °C 仍有 40 °C 误差,COLD_SOURCE=1 且 host 未写温度时依旧满制冷;调试行删除后 fail-safe 才完整生效。另外 host 写过一次后 `s_temp_valid` 永久为 1,"过期温度"(host 中途死机)无时间戳机制,不在本修复范围。
+
+---
+
+## 2026-10-12 — 外部审计问题#1核实并修复:probe --params 永久覆盖其他自定义标定
+
+### 核实(属实,P1 数据破坏)
+
+`SAVE_PARAMS`/`DEFAULT_PARAMS` 在固件里作用于**全部 36 槽**(tres_cmd.c:SAVE -> NvParams_Save;DEFAULT -> NvParams_RestoreDefaults 只重载 RAM 不写 FLASH);而 --params 只备份/还原探测槽 25。DEFAULT 之后 RAM 全表=固件默认值,最后的 SAVE_PARAMS 把其余 35 槽的默认值整体刷进 FLASH——电流标定/PID/DAC 控制窗口等全部**永久丢失**;中途 FAIL 退出更无任何恢复。附带确认:固件 NVM_PARAM_COUNT 实际=36(FF_ENABLE/EN_OFF_PCT 加入后,窗口 0x40..0xCF),probe 的 NV_PARAMS 列表与固件逐名对齐,但其文档串(34 槽/0x40..0xC7/--set "0..27"/--auth 0xB0/0xC0)与探测槽注释(slot 25=SOC_TIGHTEN_DELTA,非注释写的 SOC_TIGHTEN_TEMP)全部过期。顺带发现 Q16 槽显示方向反了(disp=val/scale=raw*65536)。
+
+### 修复(4 提交)
+
+- `0100d0b` fix(probe): 全表备份(36 槽) -> try 内 SAVE/DEFAULT 验证 -> finally 全表还原+单次 SAVE(FAIL 退出/Ctrl-C 也执行) -> 结束后逐槽比对 backup,全部一致才报 OK;文档串同步 36 槽/0xCF/真实槽名/auth 地址。
+- `6c70119` fix(probe): Q16 槽显示改 val*scale(2.0 显示 2.0,而非 8.6e9)。
+- test(nvram): nv_dualslot_sim.py NVM_PARAM_COUNT 34 -> 36 同步,232 断言全过。
+- docs(worklog): 本条。
+
+### 验收(离线,假 SMBus 从机,跑真实 main())
+
+模拟 36 槽寄存器文件 + RAM/FLASH 双镜像(预置"已标定"值),三场景:
+1. 标定过的设备跑完全程:exit 0 且 FLASH **逐槽等于测试前镜像**、RAM 同步还原;
+2. DEFAULT 故障(no-op):exit 1 且 FLASH 仍被 finally 全表还原;
+3. DEFAULT 处注入 KeyboardInterrupt:异常正常传播且 FLASH 仍全表还原。
+7/7 断言通过。
