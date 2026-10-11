@@ -80,7 +80,8 @@ typedef enum {
     NV_TEC_CURRENT_DANGER_MA,          /**< current above this: alarm +FF50 (mA)*/
     NV_TEC_FAN_MIN_RPM,                /**< fan fault threshold (RPM)           */
     NV_TEC_CONTROL_PERIOD_MS,          /**< control/QuarkTS period (ms)         */
-    NV_TEC_DAC_MAX_CTRL_MV,            /**< top of power-stage control window   */
+    NV_TEC_DAC_MAX_CTRL_MV,            /**< FB-injection window top = TEC OFF end
+                                            (VOUT pins ≈0 V); R3=20k → ≈2500 mV */
     NV_TEC_FAN_TEMP_BASE_MILLIC,       /**< fan starts ramping at this hot (m°C)*/
     NV_TEC_FAN_TEMP_FULL_MILLIC,       /**< fan full speed at this hot (m°C)    */
     NV_TEC_FAN_DUTY_BASE,              /**< base airflow while TEC active (%)   */
@@ -98,15 +99,20 @@ typedef enum {
     NV_TEC_SOC_TIGHTEN_DELTA_MILLIC,   /**< by how much it tightens (m°C)       */
     NV_TEC_COLD_SOURCE,                /**< cold-side temperature source select:
                                             0 = TEC_COLD ADC (PA4), 1 = SDM845   */
-    NV_TEC_DAC_STARTUP_PCT,            /**< first-enable startup point as % of
-                                            the calibrated full scale (0..100):
-                                            duty starts at this % of full cooling
-                                            and ramps to target. Default 60 (%).
+    NV_TEC_DAC_STARTUP_PCT,            /**< first-enable anchor as % of full
+                                            cooling (0..100). Under the
+                                            calibrated window duty% == TEC
+                                            voltage % of 6 V, so default 10 (%)
+                                            starts at ≈0.6 V and the ramp climbs.
                                             See R3 / endpoint calibration in
                                             WORKLOG "FB 注入标定".                */
-    NV_TEC_DAC_MIN_CTRL_MV,             /**< FB-injection window bottom: DAC mV
-                                            where FB sits at VFBTH (0.76 V), i.e.
-                                            max TEC voltage / no injection      */
+    NV_TEC_DAC_MIN_CTRL_MV,             /**< FB-injection window bottom = FULL-
+                                            cooling end: DAC = FB = VFBTH
+                                            (0.76 V), zero injection, VOUT at
+                                            the 6 V natural set point. Never
+                                            command below - lower DAC sinks
+                                            current out of FB and overdrives
+                                            VOUT past 6 V                        */
     NV_TEC_RAMP_STEP_PERCENT,          /**< max duty % change per control cycle*/
     NV_TEC_DEWPOINT_MARGIN_MILLIC,     /**< target floor: dew point + this     */
     NV_TEC_FF_GAIN_Q16,                /**< COMMON-MODE feedforward: % duty per
@@ -116,6 +122,15 @@ typedef enum {
                                             over the overtemp knee (Q16)       */
     NV_TEC_HOT_FB_MAX_MILLIC,          /**< hot-side foldback: max cold-target
                                             lift (m°C)                         */
+    NV_TEC_FF_ENABLE,                  /**< feedforward master switch: 0 = PID
+                                            only, nonzero = common-mode + current
+                                            feedforward enabled. Default OFF: an
+                                            additive FF sits OUTSIDE the PID's
+                                            [0,100] domain, so an overestimate
+                                            acts as a duty floor the loop can
+                                            never go below (PID pinned at out_min
+                                            cannot subtract) and the cold side
+                                            settles away from the target.       */
     NV_PARAM_COUNT_MARKER,             /**< sentinel: MUST stay last. NVM_PARAM_COUNT
                                             is derived from it, so adding a slot
                                             is just adding a line above.         */

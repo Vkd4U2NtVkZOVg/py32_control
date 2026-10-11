@@ -115,6 +115,7 @@ NV_PARAMS = [
     ("FF_GAIN", "x1", 1 / 65536.0),  # COMMON-MODE feedforward %/°C (Q16)
     ("HOT_FB_GAIN", "x1", 1 / 65536.0),  # hot foldback: target lift per hot excess (Q16)
     ("HOT_FB_MAX", "mC", 1),   # hot foldback: max cold-target lift
+    ("FF_ENABLE", "-", 1),     # feedforward master switch: 0 = PID only
 ]
 
 # Slot name -> index, case-insensitive (e.g. "target_base", "TARGET_BASE").

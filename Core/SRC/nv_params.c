@@ -36,7 +36,9 @@
 /*============================================================================*/
 #define NVM_BASE        (0x0800F000UL)  /**< last flash sector, page-aligned  */
 #define NVM_MAGIC       (0x4E564433u)   /**< 'NVD3'                            */
-#define NVM_VERSION     (8u)            /**< v8: + hot-side foldback slots     */
+#define NVM_VERSION     (3u)            /**< v3: + FF enable switch (layout
+                                              grown; any older block invalidates
+                                              by magic/version check anyway)   */
 #define NVM_PAGE_BYTES  (128u)          /**< PY32F030 flash page size          */
 #define NVM_SLOTS       (2u)            /**< A/B slots; Save flips between them*/
 
@@ -115,17 +117,24 @@ static uint8_t  s_active_valid;     /**< 0 until a good block was seen/written*/
  * is stored as-is, with float gains in Q16; scale back with
  * (float)value / NVM_Q16_SCALE. */
 static const uint32_t s_defaults[ NVM_PARAM_COUNT ] = {
-    [NV_TEC_PID_KP_Q16]                = NVM_Q16( 2.0f ),
+    [NV_TEC_PID_KP_Q16]                = NVM_Q16( 0.1f ),
     [NV_TEC_PID_KI_Q16]                = NVM_Q16( 0.1f ),
-    [NV_TEC_PID_KD_Q16]                = NVM_Q16( 0.5f ),
+    [NV_TEC_PID_KD_Q16]                = NVM_Q16( 0.1f ),
     [NV_TEC_TARGET_BASE_MILLIC]        = 45000u,
     [NV_TEC_HOT_OVERTEMP_MILLIC]       = 80000u,
     [NV_TEC_HOT_DANGER_MILLIC]         = 90000u,
     [NV_TEC_CURRENT_FEEDFORWARD_MA]    = 2000u,
     [NV_TEC_CURRENT_DANGER_MA]         = 3000u,
     [NV_TEC_FAN_MIN_RPM]               = 500u,
-    [NV_TEC_CONTROL_PERIOD_MS]         = 1000u,
-    [NV_TEC_DAC_MAX_CTRL_MV]           = 1200u,
+    [NV_TEC_CONTROL_PERIOD_MS]         = 500u,
+    [NV_TEC_DAC_MAX_CTRL_MV]           = 1600u,/* FB-injection window top = TEC OFF
+                                                  end: injection cancels the R2
+                                                  current and VOUT pins at ≈0 V.
+                                                  R3=20k theory puts the pin at
+                                                  ≈2.50 V (WORKLOG R3 math) - the old
+                                                  1200 mV only throttled to ≈4.4 V
+                                                  and never turned the TEC off.
+                                                  Bench-calibrate the exact point.  */
     [NV_TEC_FAN_TEMP_BASE_MILLIC]      = 40000u,
     [NV_TEC_FAN_TEMP_FULL_MILLIC]      = 60000u,
     [NV_TEC_FAN_DUTY_BASE]             = 30u,
@@ -138,23 +147,28 @@ static const uint32_t s_defaults[ NVM_PARAM_COUNT ] = {
     [NV_TEC_TEMP_VALID_MAX_MILLIC]     = 120000u,
     [NV_TEC_CURRENT_VALID_MAX_MA]      = 5000u,
     [NV_TEC_FAN_FAULT_MIN_DUTY]        = 30u,
-    [NV_TEC_ENV_COMP_TEMP_MILLIC]      = 35000u,
+    [NV_TEC_ENV_COMP_TEMP_MILLIC]      = 50000u,
     [NV_TEC_SOC_TIGHTEN_TEMP_MILLIC]   = 70000u,
     [NV_TEC_SOC_TIGHTEN_DELTA_MILLIC]  = 5000u,
     [NV_TEC_COLD_SOURCE]               = 0u,   /* 0 = TEC_COLD ADC (PA4), 1 = SDM845 */
-    [NV_TEC_DAC_STARTUP_PCT]            = 60u,  /* first-enable: start at 60 % of
-                                                  full cooling (duty domain), not 0.
-                                                  The calibrated full-scale endpoints
-                                                  (DAC_MIN_CTRL_MV / measured DAC_MAX)
-                                                  map this % to an absolute DAC mV;
-                                                  the DCDC's 1 ms soft start builds
-                                                  0 -> anchor, the ramp trims the rest.
-                                                  Change over NVRAM/probe, no rebuild. */
-    [NV_TEC_DAC_MIN_CTRL_MV]           = 0u,   /* FB-injection window bottom: DAC mV
-                                                  where FB sits at VFBTH with no
-                                                  injection current (VOUT = divider
-                                                  natural set point). Calibrate with
-                                                  R3/R1/R2 per WORKLOG.             */
+    [NV_TEC_DAC_STARTUP_PCT]            = 10u,  /* first-enable anchor as % of full
+                                                  cooling. Under the calibrated
+                                                  window [760, 2500] duty% == TEC
+                                                  voltage % of the 6 V rating, so
+                                                  10 % starts at ≈0.6 V and the
+                                                  per-cycle ramp (RAMP_STEP_PERCENT)
+                                                  climbs from there - true low-
+                                                  voltage soft start, no half-supply
+                                                  slam. Change over NVRAM/probe.   */
+    [NV_TEC_DAC_MIN_CTRL_MV]           = 760u, /* FB-injection window bottom =
+                                                  FULL-COOLING end: DAC = FB =
+                                                  VFBTH (0.76 V) → zero injection
+                                                  current → VOUT = divider natural
+                                                  set point (6 V). Never command
+                                                  below: a lower DAC SINKS current
+                                                  out of the FB node and OVERDRIVES
+                                                  VOUT past 6 V (TEC overvoltage).
+                                                  Theory 760 mV; bench-calibrate.  */
     [NV_TEC_RAMP_STEP_PERCENT]         = 5u,   /* 5 % duty per 1 s cycle            */
     [NV_TEC_DEWPOINT_MARGIN_MILLIC]    = 2000u,/* 2 °C above dew point             */
     [NV_TEC_FF_GAIN_Q16]               = NVM_Q16( 1.0f ),  /* 1 % duty per °C      */
@@ -163,6 +177,13 @@ static const uint32_t s_defaults[ NVM_PARAM_COUNT ] = {
                                                               excess over the
                                                               overtemp knee     */
     [NV_TEC_HOT_FB_MAX_MILLIC]         = 30000u,/* foldback lift cap: +30 °C        */
+    [NV_TEC_FF_ENABLE]                 = 0u,   /* feedforward master switch: default
+                                                  OFF (bench: additive FF acted as a
+                                                  duty floor the loop could not go
+                                                  below, cold side never settled at
+                                                  target). 0 = PID only; nonzero =
+                                                  common-mode + current FF on. Write
+                                                  slot 34 (reg 0xC8) to toggle.     */
 };
 
 /*============================================================================*/

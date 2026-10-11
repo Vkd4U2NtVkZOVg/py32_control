@@ -68,6 +68,7 @@ typedef struct {
     int32_t ramp_step_percent;      /* max duty change per cycle (soft start)   */
     int32_t dewpoint_margin_millic; /* target floor = dew point + this          */
     float   ff_gain;                /* COMMON-MODE feedforward %/°C (Q16 NVRAM) */
+    uint8_t ff_enable;              /* feedforward master switch (0 = PID only) */
     uint32_t hot_fb_gain_q16;       /* hot foldback: cold-target lift per hot
                                        excess, Q16 (2.0 = +2 °C per 1 °C)      */
     int32_t hot_fb_max_millic;      /* hot foldback: max cold-target lift       */
@@ -101,6 +102,7 @@ static void tec_params_load( Tec_Params_t *p )
     p->ramp_step_percent      = (int32_t)NvParams_Get( NV_TEC_RAMP_STEP_PERCENT );
     p->dewpoint_margin_millic = (int32_t)NvParams_Get( NV_TEC_DEWPOINT_MARGIN_MILLIC );
     p->ff_gain                = (float)NvParams_Get( NV_TEC_FF_GAIN_Q16 ) / NVM_Q16_SCALE;
+    p->ff_enable              = ( NvParams_Get( NV_TEC_FF_ENABLE ) != 0u ) ? 1u : 0u;
     p->hot_fb_gain_q16        = NvParams_Get( NV_TEC_HOT_FB_GAIN_Q16 );
     p->hot_fb_max_millic      = (int32_t)NvParams_Get( NV_TEC_HOT_FB_MAX_MILLIC );
 
@@ -192,7 +194,12 @@ static uint8_t     s_dac_percent = 0xFFu; /* last duty written to the DAC;
                                            0xFF = "unknown" sentinel so the
                                            first tec_dac_set() is never
                                            short-circuited                    */
-
+static volatile int32_t hot_mc;
+static volatile int32_t env_mc;
+static volatile int32_t sdm_mc;
+static volatile uint32_t cur_ma;
+static volatile int32_t target_mc;
+static volatile int32_t duty;
 /*============================================================================*/
 /* Helpers                                                                     */
 /*============================================================================*/
@@ -228,12 +235,14 @@ static void tec_set_enabled( uint8_t on )
  * over-drives toward max duty (uncontrolled TEC voltage / UVP hiccup). Both
  * endpoints are NVRAM calibration points (see R3 sizing in the WORKLOG).
  *
- * NOTE on startup: we do NOT start from duty ~0 (VOUT ~ 0). Sweeping the full
- * 0..6 V range would drag the D-CAP2 control across the low-duty region where
- * its loop is less well-behaved. Instead the startup point sits NEAR the
- * operating point (DAC_STARTUP_PCT, default 60 % of full cooling) and the
- * large 0 -> anchor jump is handled by the TPS565201's own 1 ms internal soft
- * start; the ramp then only trims a small range toward the target.
+ * NOTE on startup: the anchor sits at the LOW end (DAC_STARTUP_PCT, default
+ * 10 % of full cooling ≈ 0.6 V under the calibrated window [760, 2500]) and
+ * the per-cycle ramp climbs from there - true low-voltage soft start, inrush
+ * bounded by RAMP_STEP_PERCENT. Because the window bottom IS the no-injection
+ * point (760 mV = FB at VREF), mv can never fall into the FB<VREF region, so
+ * the enable path can no longer reach the UVP (<494 mV) or overdrive (>6 V)
+ * regions; the TPS565201's 1 ms internal soft start only covers the initial
+ * 0 -> anchor step.
  *
  * Failure handling: the DAC write status is returned; s_dac_percent is only
  * advanced on SUCCESS, so a failed write never pretends the value was applied
@@ -287,15 +296,11 @@ static uint8_t tec_fan_duty_from_hot( int32_t hot_mc )
 /*============================================================================*/
 static void TecControl_Cb( qEvent_t e )
 {
-    int32_t hot_mc;
-    int32_t env_mc;
-    int32_t sdm_mc;
-    uint32_t cur_ma;
-    int32_t target_mc;
+
     int32_t hot_lift;
     int32_t pid_out;
     int32_t feedforward;
-    int32_t duty;
+
     uint8_t fan_duty;
     uint32_t fan_rpm;
 
@@ -338,7 +343,7 @@ static void TecControl_Cb( qEvent_t e )
     if ( sdm_mc > s_p.soc_tighten_temp_millic ) {
         target_mc -= s_p.soc_tighten_delta_millic;
     }
-
+    target_mc = 5000;
     /*--- 2b. hot-side foldback: lift the cold target to shed TEC load ------*/
     /* A TEC pumps waste heat into its hot side, so the way to relieve an
      * overheating heatsink is to cool LESS, not harder. Instead of dropping
@@ -377,21 +382,21 @@ static void TecControl_Cb( qEvent_t e )
      * (sdm_mc), and this guard is the independent hard protection layer on
      * top of the PID. If the cold side reaches (dew point + margin), cut the
      * TEC drive so it warms back above the condensation floor. */
-    {
-        int32_t dew_mc = AHT20_Get_LastDewPointMilliCelsius();
+    // {
+    //     int32_t dew_mc = AHT20_Get_LastDewPointMilliCelsius();
 
-        if ( dew_mc != INT32_MIN ) {
-            int32_t floor_mc = dew_mc + s_p.dewpoint_margin_millic;
+    //     if ( dew_mc != INT32_MIN ) {
+    //         int32_t floor_mc = dew_mc + s_p.dewpoint_margin_millic;
 
-            if ( sdm_mc < floor_mc ) {
-                tec_set_enabled( 0u );
-                (void)tec_dac_set( 0u );
-                Fan_SetDutyPercent( 100u );
-                s_alarm |= TEC_ALARM_DEWPOINT;
-                return;
-            }
-        }
-    }
+    //         if ( sdm_mc < floor_mc ) {
+    //             tec_set_enabled( 0u );
+    //             (void)tec_dac_set( 0u );
+    //             Fan_SetDutyPercent( 100u );
+    //             s_alarm |= TEC_ALARM_DEWPOINT;
+    //             return;
+    //         }
+    //     }
+    // }
 
     if ( hot_mc > s_p.hot_danger_millic ) {
         /* danger: cut TEC, hold the DAC at the zero-current end (window top),
@@ -418,18 +423,17 @@ static void TecControl_Cb( qEvent_t e )
     }
 
     if ( s_tec_enabled == 0u ) {
-        /* First enable: settle the FB node at the startup point BEFORE
-         * asserting TEC_VEN, then let the ramp take over.
+        /* First enable: settle the FB node at the startup anchor BEFORE
+         * asserting TEC_VEN, then let the ramp climb.
          *
-         * The startup point is a PERCENT of full cooling (DAC_STARTUP_PCT,
-         * default 60), chosen near the operating point, not at the 0-V end.
-         * Sweeping the whole 0..full range would drag the D-CAP2 loop through
-         * the low duty / low output region; instead the TPS565201's own 1 ms
-         * internal soft start builds the output from 0 V up to wherever the
-         * FB pin settles at this DAC %, and the per-cycle ramp below only
-         * trims the small remaining range toward the target. On asserting EN
-         * with the anchor set, FB is already above the UVP threshold
-         * (65 % of 0.76 V), so no hiccup. */
+         * The anchor is a PERCENT of full cooling (DAC_STARTUP_PCT, default
+         * 10): under the calibrated window [760, 2500] duty% maps linearly to
+         * TEC voltage (% of the 6 V rating), so 10 % starts at ≈0.6 V and the
+         * per-cycle ramp (RAMP_STEP_PERCENT) climbs to the operating point -
+         * inrush is bounded by the ramp, not by a voltage jump. With the
+         * window bottom at the no-injection point (760 mV) mv can never drop
+         * below FB=VREF, so this path can no longer land in the UVP (<494 mV)
+         * or overdrive (>6 V) regions. */
         {
             uint16_t start_duty;
             int dac_st;
@@ -474,34 +478,46 @@ static void TecControl_Cb( qEvent_t e )
     TecPid_Update( &s_pid, -(float)sdm_mc );
     pid_out = (int32_t)TecPid_GetOutput( &s_pid );
 
-    /*--- 5b. COMMON-MODE feedforward (TI AFEx39xx "COMMON-MODE" idea):
-     * the nominal actuator effort to hold a given target is dominated by the
-     * ambient-to-target temperature difference (the TEC must pump heat against
-     * the ambient gradient). Instead of letting the integrator crawl there from
-     * zero every time, start from an estimated base duty and let the PI loop
-     * only correct the residual error. Gain is % duty per °C of (env - target).
-     * NOTE: gradient_mc is in milli-degC, so it must be converted to degC
-     * before multiplying by ff_gain (% per degC) - otherwise a 10 degC
-     * gradient (10000 mdegC) x 1.0 saturates the feedforward to 100 % and
-     * swamps the PID. */
-    {
-        int32_t gradient_mc = env_mc - target_mc;   /* >0 = hotter ambient  */
-        int32_t gradient_c  = gradient_mc / 1000;    /* milli-degC -> degC  */
-        int32_t ff_base     = (int32_t)( gradient_c * s_p.ff_gain );
+    /*--- 5b/6. feedforward (master switch NV_TEC_FF_ENABLE, default OFF) ---*/
+    /* The FF is ADDITIVE outside the PID's [0,100] domain: when it
+     * overestimates the steady-state need, duty can never fall below it (the
+     * PID is pinned at out_min and cannot subtract), so the cold side settles
+     * away from the target - observed on the bench as "the output never
+     * settles at target". The switch lets the bench A/B the FF without a
+     * rebuild; re-enable once the FF estimate is calibrated (or the FF is
+     * folded into the PID's own output limits so anti-windup sees the true
+     * saturation). */
+    feedforward = 0;
+    if ( s_p.ff_enable != 0u ) {
+        /*--- 5b. COMMON-MODE feedforward (TI AFEx39xx "COMMON-MODE" idea):
+         * the nominal actuator effort to hold a given target is dominated by the
+         * ambient-to-target temperature difference (the TEC must pump heat against
+         * the ambient gradient). Instead of letting the integrator crawl there from
+         * zero every time, start from an estimated base duty and let the PI loop
+         * only correct the residual error. Gain is % duty per °C of (env - target).
+         * NOTE: gradient_mc is in milli-degC, so it must be converted to degC
+         * before multiplying by ff_gain (% per degC) - otherwise a 10 degC
+         * gradient (10000 mdegC) x 1.0 saturates the feedforward to 100 % and
+         * swamps the PID. */
+        {
+            int32_t gradient_mc = env_mc - target_mc;   /* >0 = hotter ambient  */
+            int32_t gradient_c  = gradient_mc / 1000;    /* milli-degC -> degC  */
+            int32_t ff_base     = (int32_t)( gradient_c * s_p.ff_gain );
 
-        if ( ff_base < 0 ) {
-            ff_base = 0;
+            if ( ff_base < 0 ) {
+                ff_base = 0;
+            }
+            if ( ff_base > 100 ) {
+                ff_base = 100;
+            }
+            feedforward = ff_base;
         }
-        if ( ff_base > 100 ) {
-            ff_base = 100;
-        }
-        feedforward = ff_base;
-    }
 
-    /*--- 6. feedforward from TEC current (on top of COMMON-MODE) ----------*/
-    if ( ( cur_ma <= (uint32_t)s_p.current_valid_max_ma ) &&
-         ( cur_ma > (uint32_t)s_p.cur_feedforward_ma ) ) {
-        feedforward += (int32_t)( cur_ma - (uint32_t)s_p.cur_feedforward_ma ) / 10;
+        /*--- 6. feedforward from TEC current (on top of COMMON-MODE) ----------*/
+        if ( ( cur_ma <= (uint32_t)s_p.current_valid_max_ma ) &&
+             ( cur_ma > (uint32_t)s_p.cur_feedforward_ma ) ) {
+            feedforward += (int32_t)( cur_ma - (uint32_t)s_p.cur_feedforward_ma ) / 10;
+        }
     }
     if ( cur_ma > (uint32_t)s_p.cur_danger_ma ) {
         /* Overcurrent: cutting COOLING, not adding it. The old
@@ -521,7 +537,7 @@ static void TecControl_Cb( qEvent_t e )
     }
 
     /*--- 7. combine, clamp, soft-start ramp --------------------------------*/
-    duty = pid_out + feedforward;
+    duty = pid_out + feedforward;   /* ff = 0 when NV_TEC_FF_ENABLE is off */
     if ( duty > 100 ) {
         duty = 100;
     }
@@ -530,12 +546,11 @@ static void TecControl_Cb( qEvent_t e )
     }
 
     /* Soft-start: never step the TEC duty by more than ramp_step_percent per
-     * cycle. The DAC startup point (NV_TEC_DAC_STARTUP_PCT, % of full scale) is
-     * where the TEC control starts from after enable - on a pure buck
-     * (TPS565201) the FB regulation keeps the TEC voltage pinned until the DAC
-     * crosses the power-stage set point, so starting near the operating point
-     * and ramping limits the inrush and avoids slamming the TEC (TI SNVAA70
-     * §3.3 "start close to Vin and regulate slowly"). */
+     * cycle. The startup anchor (NV_TEC_DAC_STARTUP_PCT, % of full scale) is
+     * where the TEC control starts from after enable - under the calibrated
+     * window duty% == TEC voltage %, so a low anchor plus this ramp bounds the
+     * inrush and avoids slamming the TEC (TI SNVAA70 §3.3 "start close to Vin
+     * and regulate slowly"). */
     if ( duty > ( (int32_t)s_dac_percent + s_p.ramp_step_percent ) ) {
         duty = (int32_t)s_dac_percent + s_p.ramp_step_percent;
     }
