@@ -3399,3 +3399,25 @@ grep 复核:`NvParams_Save` 共 9 个返回点,现在 8 个带锁返回 + 1 个"
 - 新增 `s_tx_src` 同态早退(0xFF 哨兵保证 init 首次调用照常配置):重复同态调用从"重写一遍 GPIO"变为真 no-op,避免预配置步骤在同态重入时制造无谓的高阻窗口。调用方核查(init + boot FSM 状态入口)无依赖冗余重配的场景。
 
 编译主配置 0 警告;`-DUSART2_TXSW_LINEMODE=0` 变体单独编译通过(仅 vendor 头噪声)。
+
+---
+
+## 2026-10-12 — 外部审计问题#10核实并修复:启动成功与超时同时到达时实际优先判失败
+
+### 核实(属实,可从分支直接确定)
+
+`SDM845_TIMEOUT = QSM_SIGNAL_TIMEOUT(0)` 是 QuarkTS 每态单次超时信号;而各成功条件(stage1/booted/stage3/4/5 锁存、SOM_BOOTED 引脚电平)在 USART RX ISR / GPIO 里**独立**于 FSM tick 演变。两者落进同一调度间隙时,下一次执行恰好投递 TIMEOUT 信号——超时分支不复查成功条件,直接进 BOOT_RESET/STRAP_FAIL:
+
+- st_PowerOnWait 超时分支不复查 SOM_BOOTED -> 会给刚启动的 SoC 重新上电;
+- st_BootCheck 不复查 IsStage1Seen -> 复位刚出 loader 的系统;
+- STAGE2/3/4/5 不复查各自锁存 -> STRAP_FAIL 停机,尽管成功条件已满足。
+
+而各状态注释宣称"成功优先(success priority)"——该语义只在非 TIMEOUT 信号上实现,竞态窗口真实性取决于调度与事件顺序,但分支结构上必然存在。
+
+### 修复(sdm845_boot.c)
+
+6 个等待态(POWER_ON_WAIT/BOOT_CHECK/STAGE2/3/4/5)的 SDM845_TIMEOUT 分支**先复查各自的成功条件**,未满足才走失败路径——成功优先从"仅 poll 路径"扩展为两种投递一致。失败策略(BOOT_CHECK 重试/其余 STRAP_FAIL 停机)不变,仅多一道成功复查;BOOT_CHECK 头注释同步更新。
+
+### 验证
+
+编译 0 项目警告;`test/replay_boot_fsm.py` 三场景(A 故障复现/B 修复/C 诚实超时)重放结果不变——该离线模型本就按"先查锁存再判超时"的语义书写,与修复后固件一致。
