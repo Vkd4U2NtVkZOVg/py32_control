@@ -38,3 +38,6 @@ example/
 .zcode/
 __pycache__/
 test/*.patch
+
+# ==== Vendor datasheets / reference docs are local-only, not for the repo ====
+datasheet/
