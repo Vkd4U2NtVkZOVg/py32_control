@@ -278,8 +278,8 @@ uint32_t Studio_ADC1_ReadCurrentMilliamp(void)
    * are snapshotted once; changing NVRAM takes effect after reboot. */
   static uint32_t shunt_uohm = 0u;
   static uint32_t amp_gain   = 0u;
-  static uint32_t div_num    = 1u;
-  static uint32_t div_den    = 1u;
+  static uint32_t div_num    = 0u;
+  static uint32_t div_den    = 0u; /* zero means not loaded, not unity gain */
   static uint32_t adc_vref_mv = 0u;
   uint32_t adc_code = Studio_ADC1_ReadCurrentRaw();
   uint64_t adc_voltage_uV;
@@ -352,3 +352,4 @@ int32_t Studio_ADC1_ReadColdMilliCelsius(void)
 /* USER CODE BEGIN 1 */
 
 /* USER CODE END 1 */
+
