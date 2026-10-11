@@ -10,7 +10,8 @@ Exercises the PY32F030 TRES register file (tres_i2c_slave.c) end to end:
      pulses the SDM845 reset line - off by default.
   4. optionally (--params) exercise NVRAM persistence: write a probe value
      into one slot, SAVE_PARAMS (RAM -> FLASH), DEFAULT_PARAMS (reload
-     firmware defaults) and restore the original value - off by default.
+     firmware defaults), then restore the WHOLE parameter table from a
+     pre-test backup (every slot verified) - off by default.
 
 Protocol (tres_i2c_slave.h):
   write: [regPtr] [data ...]      first byte selects the register pointer,
@@ -26,7 +27,7 @@ Registers:
   0x14 VERSION  0x02
   0x30-0x35 machine-state block: BOOTSTATE / BOOTRETRY / TECFLAGS /
                                  AHTSTAT / FANDUTY / TECDUTY
-  0x40-0xC7 NVRAM parameter window: 34 slots x 4-byte big-endian values
+  0x40-0xCF NVRAM parameter window: 36 slots x 4-byte big-endian values
 
 Commands (0x00 <- [0xA5][cmdId][param]):
   1 RESET, 2 ENTER_DFU, 3 REPORT_FAIL, 4 SAVE_PARAMS, 5 DEFAULT_PARAMS
@@ -71,7 +72,7 @@ TRES_REG_NV_LEN = 4
 NVM_Q16_SCALE = 65536.0   # Q16 fixed point: raw = round(value * 65536)
 
 # AES challenge-response authentication window (firmware: TRES_AES_ENABLE).
-#   Placed above the NVRAM parameter window (0x40..0xC7 for 34 slots).
+#   Placed above the NVRAM parameter window (0x40..0xCF for 36 slots).
 #   0xD0..0xDF  CHALLENGE (W) 16 bytes big-endian
 #   0xE0..0xEF  RESPONSE (R)  AES-128-ECB(device_key, challenge)
 TRES_REG_CHAL_BASE = 0xD0
@@ -251,7 +252,7 @@ step:
   [2] status:   read the machine-state block 0x30..0x35
                 (SDM845 boot state, TEC alarms, AHT20 status, fan/TEC duty)
   [3] commands: CMD_REPORT_FAIL x2 and verify the RETRIES counter advances
-  [4] params:   dump the NVRAM parameter window 0x40..0xC7 (34 slots x 4B)
+  [4] params:   dump the NVRAM parameter window 0x40..0xCF (36 slots x 4B)
   [5] action:   one of --reset / --dfu / --params / --set, or skipped
 
 Protocol (write): first byte selects the register pointer, following bytes
@@ -262,7 +263,7 @@ three bytes at register 0x00: [0xA5][cmdId][param].
 Modes (mutually exclusive, all off by default):
   (none)       read-only probe: [1]..[4], then [5] skipped.
   --set NAME V write NVRAM slot NAME (case-insensitive, or slot number
-               0..27) with value V into the RAM cache, then read it back.
+               0..35) with value V into the RAM cache, then read it back.
                For the Q16 gain slots PID_KP/PID_KI/PID_KD a decimal value
                is converted automatically (e.g. 2.0 -> raw 131072); a plain
                integer is taken as the raw Q16 code. Add --save to also
@@ -271,13 +272,14 @@ Modes (mutually exclusive, all off by default):
                in RUNNING or DFU_ACTIVE; rejected otherwise.
   --dfu        issue CMD_ENTER_DFU (reboots into DFU/USB). Allowed only in
                RUNNING; rejected otherwise.
-  --params     NVRAM persistence round-trip: flip SOC_TIGHTEN_TEMP by +1,
+  --params     NVRAM persistence round-trip: flip SOC_TIGHTEN_DELTA by +1,
                SAVE_PARAMS (RAM -> FLASH), DEFAULT_PARAMS (reload firmware
-               defaults), then restore the original value. Writes FLASH once
-               per SAVE_PARAMS (page erase+program, ~10k cycles).
+               defaults), then restore the WHOLE table from a pre-test backup
+               and verify every slot matches. Writes FLASH once per
+               SAVE_PARAMS (page erase+program, ~10k cycles).
   --auth       AES challenge-response anti-clone check: write 16 random
-               bytes to the CHALLENGE window (0xB0), read the RESPONSE
-               window (0xC0) and verify AES-128-ECB(device_key, challenge)
+               bytes to the CHALLENGE window (0xD0), read the RESPONSE
+               window (0xE0) and verify AES-128-ECB(device_key, challenge)
                matches. Requires firmware built with TRES_AES_ENABLE=1 and
                the host cryptography library (pip3 install cryptography).
 
@@ -288,7 +290,7 @@ Commands (register 0x00 <- [0xA5][cmdId][param]):
   4 SAVE_PARAMS    persist the NVRAM RAM cache to FLASH
   5 DEFAULT_PARAMS reload firmware defaults into the NVRAM RAM cache
 
-NVRAM parameter window (0x40..0xC7, 4-byte big-endian per slot):
+NVRAM parameter window (0x40..0xCF, 4-byte big-endian per slot):
   slot n lives at 0x40 + 4*n; the 4th byte written commits the value into
   the RAM cache. Persist with SAVE_PARAMS. --set accepts any of these names
   (case-insensitive); Q16 gain slots display as raw/65536:
@@ -348,11 +350,12 @@ Prerequisites:
                       help="issue CMD_ENTER_DFU (boots DFU/USB; policy-gated)")
     mode.add_argument("--params", action="store_true",
                       help="exercise NVRAM SAVE_PARAMS / DEFAULT_PARAMS "
-                           "(writes FLASH; restores the slot afterwards)")
+                           "(writes FLASH; backs up and restores the whole "
+                           "parameter table afterwards)")
     mode.add_argument("--set", nargs=2, metavar=("NAME", "VALUE"),
                       help="write one NVRAM slot into the RAM cache. NAME is a "
                            "slot name from the list below (case-insensitive, "
-                           "e.g. TARGET_BASE) or a slot number 0..27; VALUE "
+                           "e.g. TARGET_BASE) or a slot number 0..35; VALUE "
                            "is decimal or hex. Persist with --save.")
     mode.add_argument("--auth", action="store_true",
                       help="AES challenge-response: write 16 random bytes to "
@@ -428,41 +431,66 @@ Prerequisites:
     if args.params:
         # NVRAM persistence round-trip: pick a slot that is safe to disturb,
         # write a probe value, SAVE_PARAMS (RAM -> FLASH), read back, then
-        # DEFAULT_PARAMS (reload firmware defaults) and restore the original.
-        # Uses slot 25 (SOC_TIGHTEN_TEMP, default 70000) and flips it to +1.
+        # DEFAULT_PARAMS (reload firmware defaults) and restore.
+        #
+        # SAVE_PARAMS and DEFAULT_PARAMS act on the WHOLE table, so the
+        # entire parameter window is backed up before anything is sent and
+        # every slot is restored and verified afterwards. Restoring only the
+        # probe slot (the old behavior) re-flashed firmware defaults over
+        # every other calibrated value - current-sense chain, PID gains, the
+        # DAC FB-injection window, thresholds - a permanent, silent loss.
+        # Uses slot 25 (SOC_TIGHTEN_DELTA); +1 disturbs nothing.
         slot = 25
         name, unit, _scale = NV_PARAMS[slot]
         print("[5] NVRAM persistence: slot {} ({}) via SAVE/DEFAULT_PARAMS".
               format(slot, name))
-        orig = t.read_slot(slot)
+        backup = [t.read_slot(i) for i in range(len(NV_PARAMS))]
+        orig = backup[slot]
         probe = orig + 1 if orig != 0 else 1
-        print("    original {} = {}".format(name, orig))
+        print("    backed up all {} slots; original {} = {}".format(
+            len(NV_PARAMS), name, orig))
 
-        t.write_slot(slot, probe)
-        t.write_cmd(TRES_CMD_MAGIC, TRES_CMD_SAVE_PARAMS)
-        time.sleep(0.2)   # parser task persists RAM -> FLASH
-        saved = t.read_slot(slot)
-        print("    after SAVE_PARAMS: {} = {} (probe {})".format(
-            name, saved, probe))
-        if saved != probe:
-            sys.exit("    FAIL: SAVE_PARAMS did not persist the value")
+        try:
+            t.write_slot(slot, probe)
+            t.write_cmd(TRES_CMD_MAGIC, TRES_CMD_SAVE_PARAMS)
+            time.sleep(0.2)   # parser task persists RAM -> FLASH
+            saved = t.read_slot(slot)
+            print("    after SAVE_PARAMS: {} = {} (probe {})".format(
+                name, saved, probe))
+            if saved != probe:
+                sys.exit("    FAIL: SAVE_PARAMS did not persist the value")
 
-        t.write_cmd(TRES_CMD_MAGIC, TRES_CMD_DEFAULT_PARAMS)
-        time.sleep(0.2)   # parser task reloads firmware defaults into RAM
-        defaulted = t.read_slot(slot)
-        print("    after DEFAULT_PARAMS: {} = {}".format(name, defaulted))
-        if defaulted == probe:
-            sys.exit("    FAIL: DEFAULT_PARAMS did not reload defaults")
+            t.write_cmd(TRES_CMD_MAGIC, TRES_CMD_DEFAULT_PARAMS)
+            time.sleep(0.2)   # parser task reloads firmware defaults into RAM
+            defaulted = t.read_slot(slot)
+            print("    after DEFAULT_PARAMS: {} = {}".format(name, defaulted))
+            if defaulted == probe:
+                sys.exit("    FAIL: DEFAULT_PARAMS did not reload defaults")
+        finally:
+            # Whole-table restore + one SAVE_PARAMS. The finally block runs
+            # even when a FAIL exit or Ctrl-C interrupts the steps above, so
+            # an aborted run cannot leave probe/default values in FLASH.
+            # (A bus that dies mid-restore fails the restore itself - the
+            # one failure mode the host cannot recover from.)
+            print("    restoring all {} slots from the backup...".format(
+                len(NV_PARAMS)))
+            for i, val in enumerate(backup):
+                t.write_slot(i, val)
+            t.write_cmd(TRES_CMD_MAGIC, TRES_CMD_SAVE_PARAMS)
+            time.sleep(0.2)
 
-        # restore the original value and persist it, leaving FLASH untouched
-        t.write_slot(slot, orig)
-        t.write_cmd(TRES_CMD_MAGIC, TRES_CMD_SAVE_PARAMS)
-        time.sleep(0.2)
-        restored = t.read_slot(slot)
-        print("    restored {} = {}".format(name, restored))
-        if restored != orig:
-            sys.exit("    FAIL: could not restore original slot value")
-
+        # Acceptance: EVERY slot must match the pre-test backup, not just
+        # the probe slot. (Readback is the RAM cache; the FLASH save
+        # mechanism itself was already proven by the probe round-trip.)
+        now = [t.read_slot(i) for i in range(len(NV_PARAMS))]
+        mismatch = [i for i in range(len(NV_PARAMS)) if now[i] != backup[i]]
+        if mismatch:
+            sys.exit("    FAIL: post-test mismatch: " + ", ".join(
+                "{}[{}] now {:#x} != original {:#x}".format(
+                    NV_PARAMS[i][0], i, now[i], backup[i])
+                for i in mismatch))
+        print("    restored: all {} slots match the pre-test values".format(
+            len(NV_PARAMS)))
         print("    OK: SAVE_PARAMS and DEFAULT_PARAMS both work")
     elif args.set:
         slot = args.set_slot
