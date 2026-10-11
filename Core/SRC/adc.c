@@ -291,7 +291,14 @@ uint16_t Studio_ADC1_ReadCurrentRaw(void)
 uint8_t Studio_ADC1_ReadCurrentMilliamp(uint32_t *out_ma)
 {
   /* Current-sense chain calibration from NVRAM (INA181A2 + divider). Values
-   * are snapshotted once; changing NVRAM takes effect after reboot. */
+   * are snapshotted once; changing NVRAM takes effect after reboot. Zero OR
+   * out-of-envelope values refetch and, if still bad, fall back to the
+   * factory defaults: extreme non-zero magnitudes are physically meaningless
+   * AND overflow the intermediate uV products (uint64) - a divider
+   * denominator near 2^32 pushes shunt_voltage_uV past 2^64, and two near-
+   * 2^32 factors overflow the shunt*gain denominator. Envelopes fit any
+   * sane chain: shunt 0.1 mOhm..1 Ohm, gain 1..1000, divider 1..1e6, Vref
+   * 1 mV..5 V. Bounded this way the worst-case product stays below 2^53. */
   static uint32_t shunt_uohm = 0u;
   static uint32_t amp_gain   = 0u;
   static uint32_t div_num    = 1u;
@@ -303,35 +310,31 @@ uint8_t Studio_ADC1_ReadCurrentMilliamp(uint32_t *out_ma)
   uint64_t shunt_voltage_uV;
   uint64_t current_mA;
 
-  if ( ( shunt_uohm == 0u ) || ( amp_gain == 0u ) || ( div_num == 0u ) ||
-       ( div_den == 0u ) || ( adc_vref_mv == 0u ) ) {
-    if ( shunt_uohm == 0u ) {
-      shunt_uohm = NvParams_Get( NV_TEC_CURRENT_SHUNT_UOHM );
-    }
-    if ( amp_gain == 0u ) {
-      amp_gain = NvParams_Get( NV_TEC_CURRENT_AMP_GAIN );
-    }
-    if ( div_num == 0u ) {
-      div_num = NvParams_Get( NV_TEC_CURRENT_DIVIDER_NUM );
-    }
-    if ( div_den == 0u ) {
-      div_den = NvParams_Get( NV_TEC_CURRENT_DIVIDER_DEN );
-    }
-    if ( adc_vref_mv == 0u ) {
-      adc_vref_mv = NvParams_Get( NV_TEC_CURRENT_ADC_VREF_MV );
-    }
-    /* Guard against corrupt NVRAM values (including a zero shunt, which
-     * would make the denominator below 0 and silently kill overcurrent
-     * protection): fall back to the factory defaults, read via
-     * NvParams_GetDefault() so they always track s_defaults. */
-    if ( ( amp_gain == 0u ) || ( div_num == 0u ) || ( div_den == 0u ) ||
-         ( adc_vref_mv == 0u ) || ( shunt_uohm == 0u ) ) {
-      shunt_uohm  = NvParams_GetDefault( NV_TEC_CURRENT_SHUNT_UOHM );
-      amp_gain    = NvParams_GetDefault( NV_TEC_CURRENT_AMP_GAIN );
-      div_num     = NvParams_GetDefault( NV_TEC_CURRENT_DIVIDER_NUM );
-      div_den     = NvParams_GetDefault( NV_TEC_CURRENT_DIVIDER_DEN );
-      adc_vref_mv = NvParams_GetDefault( NV_TEC_CURRENT_ADC_VREF_MV );
-    }
+  if ( ( shunt_uohm < 100u ) || ( shunt_uohm > 1000000u ) ) {
+    shunt_uohm = NvParams_Get( NV_TEC_CURRENT_SHUNT_UOHM );
+  }
+  if ( ( amp_gain < 1u ) || ( amp_gain > 1000u ) ) {
+    amp_gain = NvParams_Get( NV_TEC_CURRENT_AMP_GAIN );
+  }
+  if ( ( div_num < 1u ) || ( div_num > 1000000u ) ) {
+    div_num = NvParams_Get( NV_TEC_CURRENT_DIVIDER_NUM );
+  }
+  if ( ( div_den < 1u ) || ( div_den > 1000000u ) ) {
+    div_den = NvParams_Get( NV_TEC_CURRENT_DIVIDER_DEN );
+  }
+  if ( ( adc_vref_mv < 1u ) || ( adc_vref_mv > 5000u ) ) {
+    adc_vref_mv = NvParams_Get( NV_TEC_CURRENT_ADC_VREF_MV );
+  }
+  if ( ( shunt_uohm < 100u ) || ( shunt_uohm > 1000000u ) ||
+       ( amp_gain < 1u ) || ( amp_gain > 1000u ) ||
+       ( div_num < 1u ) || ( div_num > 1000000u ) ||
+       ( div_den < 1u ) || ( div_den > 1000000u ) ||
+       ( adc_vref_mv < 1u ) || ( adc_vref_mv > 5000u ) ) {
+    shunt_uohm  = NvParams_GetDefault( NV_TEC_CURRENT_SHUNT_UOHM );
+    amp_gain    = NvParams_GetDefault( NV_TEC_CURRENT_AMP_GAIN );
+    div_num     = NvParams_GetDefault( NV_TEC_CURRENT_DIVIDER_NUM );
+    div_den     = NvParams_GetDefault( NV_TEC_CURRENT_DIVIDER_DEN );
+    adc_vref_mv = NvParams_GetDefault( NV_TEC_CURRENT_ADC_VREF_MV );
   }
 
   /* A timed-out conversion reads as code 0 - indistinguishable at this

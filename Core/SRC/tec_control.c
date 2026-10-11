@@ -45,6 +45,21 @@
 /*============================================================================*/
 #define TEC_EN_HYST_PCT     ( 4 )
 
+/* Absolute envelope for every milli-degree parameter: the NTC sensors span
+ * -40..125 C, so anything outside [-40, 200] C is corrupt (host miswrite,
+ * FLASH bit flip). Falling back per parameter also makes every downstream
+ * int32 subtraction/multiplication safe: all inputs then span at most
+ * 240 K, so the fan-ramp and foldback products stay far inside 32 bits. */
+#define TEC_TEMP_ENVELOPE_MIN_MILLIC   ( -40000 )
+#define TEC_TEMP_ENVELOPE_MAX_MILLIC   ( 200000 )
+
+/* Control-period bounds: this same task drives the overtemp/overcurrent/
+ * fan-stall protection checks, so an unbounded period would silently
+ * stretch every fault reaction. [1 ms, 5 s] keeps the scheduler load sane
+ * while still allowing slow bench sweeps. */
+#define TEC_PERIOD_MIN_MS              ( 1 )
+#define TEC_PERIOD_MAX_MS              ( 5000 )
+
 /* Physical-time constants for the PID housekeeping that used to be fixed
  * per-cycle numbers. The control period is NVRAM-tunable, so per-cycle values
  * silently change the loop's physical dynamics when the period changes:
@@ -105,6 +120,17 @@ typedef struct {
     int32_t hot_fb_max_millic;      /* hot foldback: max cold-target lift       */
 } Tec_Params_t;
 
+/* Envelope guard for a milli-degree parameter: return v when sane, else its
+ * factory default (see the TEC_TEMP_ENVELOPE_* macro comment). */
+static int32_t temp_param_or_default( int32_t v, uint8_t id )
+{
+    if ( ( v < TEC_TEMP_ENVELOPE_MIN_MILLIC ) ||
+         ( v > TEC_TEMP_ENVELOPE_MAX_MILLIC ) ) {
+        return (int32_t)NvParams_GetDefault( id );
+    }
+    return v;
+}
+
 static void tec_params_load( Tec_Params_t *p )
 {
     p->pid_kp                = (float)NvParams_Get( NV_TEC_PID_KP_Q16 ) / NVM_Q16_SCALE;
@@ -136,6 +162,20 @@ static void tec_params_load( Tec_Params_t *p )
     p->ff_enable              = ( NvParams_Get( NV_TEC_FF_ENABLE ) != 0u ) ? 1u : 0u;
     p->hot_fb_gain_q16        = NvParams_Get( NV_TEC_HOT_FB_GAIN_Q16 );
     p->hot_fb_max_millic      = (int32_t)NvParams_Get( NV_TEC_HOT_FB_MAX_MILLIC );
+
+    /* Absolute envelope on every milli-degree parameter (see the macro
+     * comment). Runs BEFORE the relation checks below, so they only ever
+     * compare bounded values - e.g. FAN_TEMP_BASE = 0x80000000 passes a
+     * naive base<full relation but overflows the fan-ramp subtraction. */
+    p->target_base_millic     = temp_param_or_default( p->target_base_millic, NV_TEC_TARGET_BASE_MILLIC );
+    p->hot_overtemp_millic    = temp_param_or_default( p->hot_overtemp_millic, NV_TEC_HOT_OVERTEMP_MILLIC );
+    p->hot_danger_millic      = temp_param_or_default( p->hot_danger_millic, NV_TEC_HOT_DANGER_MILLIC );
+    p->fan_temp_base_millic   = temp_param_or_default( p->fan_temp_base_millic, NV_TEC_FAN_TEMP_BASE_MILLIC );
+    p->fan_temp_full_millic   = temp_param_or_default( p->fan_temp_full_millic, NV_TEC_FAN_TEMP_FULL_MILLIC );
+    p->env_comp_temp_millic   = temp_param_or_default( p->env_comp_temp_millic, NV_TEC_ENV_COMP_TEMP_MILLIC );
+    p->soc_tighten_temp_millic = temp_param_or_default( p->soc_tighten_temp_millic, NV_TEC_SOC_TIGHTEN_TEMP_MILLIC );
+    p->temp_valid_min_millic  = temp_param_or_default( p->temp_valid_min_millic, NV_TEC_TEMP_VALID_MIN_MILLIC );
+    p->temp_valid_max_millic  = temp_param_or_default( p->temp_valid_max_millic, NV_TEC_TEMP_VALID_MAX_MILLIC );
 
     /* Sanity-check the DAC FB-injection window: tec_dac_set() computes
      * span = dac_max - dac_min and multiplies duty*span, so a corrupt
@@ -177,7 +217,9 @@ static void tec_params_load( Tec_Params_t *p )
     if ( p->cur_danger_ma <= 0 ) {
         p->cur_danger_ma = (int32_t)NvParams_GetDefault( NV_TEC_CURRENT_DANGER_MA );
     }
-    if ( ( p->soc_tighten_temp_millic <= 0 ) || ( p->soc_tighten_delta_millic <= 0 ) ) {
+    if ( ( p->soc_tighten_temp_millic <= 0 ) ||
+         ( p->soc_tighten_delta_millic <= 0 ) ||
+         ( p->soc_tighten_delta_millic > TEC_TEMP_ENVELOPE_MAX_MILLIC ) ) {
         p->soc_tighten_temp_millic = (int32_t)NvParams_GetDefault( NV_TEC_SOC_TIGHTEN_TEMP_MILLIC );
         p->soc_tighten_delta_millic = (int32_t)NvParams_GetDefault( NV_TEC_SOC_TIGHTEN_DELTA_MILLIC );
     }
@@ -199,7 +241,20 @@ static void tec_params_load( Tec_Params_t *p )
     if ( ( p->fan_duty_base < 0 ) || ( p->fan_duty_base > 100 ) ) {
         p->fan_duty_base = (int32_t)NvParams_GetDefault( NV_TEC_FAN_DUTY_BASE );
     }
-    if ( p->dewpoint_margin_millic < 0 ) {
+    if ( ( p->fan_fault_min_duty < 0 ) || ( p->fan_fault_min_duty > 100 ) ) {
+        /* The commanded duty never exceeds 100, so a threshold above it
+         * makes the stall-detect condition unsatisfiable and fan-stall
+         * protection silently dead. 0 stays legal: detection then runs at
+         * any commanded duty (the duty>0 guard prevents the shutoff/
+         * restart lockup). */
+        p->fan_fault_min_duty = (int32_t)NvParams_GetDefault( NV_TEC_FAN_FAULT_MIN_DUTY );
+    }
+    if ( ( p->control_period_ms < TEC_PERIOD_MIN_MS ) ||
+         ( p->control_period_ms > TEC_PERIOD_MAX_MS ) ) {
+        p->control_period_ms = (int32_t)NvParams_GetDefault( NV_TEC_CONTROL_PERIOD_MS );
+    }
+    if ( ( p->dewpoint_margin_millic < 0 ) ||
+         ( p->dewpoint_margin_millic > TEC_TEMP_ENVELOPE_MAX_MILLIC ) ) {
         p->dewpoint_margin_millic = (int32_t)NvParams_GetDefault( NV_TEC_DEWPOINT_MARGIN_MILLIC );
     }
     if ( p->temp_valid_min_millic >= p->temp_valid_max_millic ) {
@@ -216,7 +271,8 @@ static void tec_params_load( Tec_Params_t *p )
         p->current_valid_max_ma = (int32_t)NvParams_GetDefault( NV_TEC_CURRENT_VALID_MAX_MA );
         p->cur_danger_ma        = (int32_t)NvParams_GetDefault( NV_TEC_CURRENT_DANGER_MA );
     }
-    if ( ( p->hot_fb_gain_q16 == 0u ) || ( p->hot_fb_max_millic <= 0 ) ) {
+    if ( ( p->hot_fb_gain_q16 == 0u ) || ( p->hot_fb_max_millic <= 0 ) ||
+         ( p->hot_fb_max_millic > TEC_TEMP_ENVELOPE_MAX_MILLIC ) ) {
         p->hot_fb_gain_q16   = NvParams_GetDefault( NV_TEC_HOT_FB_GAIN_Q16 );
         p->hot_fb_max_millic = (int32_t)NvParams_GetDefault( NV_TEC_HOT_FB_MAX_MILLIC );
     }
