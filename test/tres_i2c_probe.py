@@ -116,6 +116,7 @@ NV_PARAMS = [
     ("HOT_FB_GAIN", "x1", 1 / 65536.0),  # hot foldback: target lift per hot excess (Q16)
     ("HOT_FB_MAX", "mC", 1),   # hot foldback: max cold-target lift
     ("FF_ENABLE", "-", 1),     # feedforward master switch: 0 = PID only
+    ("EN_OFF_PCT", "%", 1),    # anti-hiccup deadband: duty below this drops TEC_VEN
 ]
 
 # Slot name -> index, case-insensitive (e.g. "target_base", "TARGET_BASE").

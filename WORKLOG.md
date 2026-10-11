@@ -3113,3 +3113,33 @@ v6 的 `NvParams_Save()` 单块顺序擦写 2 页（erase p0 → erase p1 → pr
 
 - 关(默认):上电即纯 PID,行为与手动注释版一致。
 - 开:`probe.py --set ff_enable 1` → SAVE_PARAMS → 重启生效(参数在 TecControl_Init 快照)。
+
+---
+
+## 2026-10-11 — EN 防打嗝死区(NV_TEC_EN_OFF_PCT):深度轻载撤 TEC_VEN,不让 DCDC 进 UVP hiccup
+
+### 现象
+
+DAC 输出偏高(窗口顶方向)时 VOUT 被压得过低,TPS565201 进入打嗝模式(UVP hiccup 周期性重启),电感啸叫。
+
+### 策略
+
+低于一定 duty 需求时,与其让转换器工作在欠压区,不如**直接拉低 TEC_VEN(= DCDC 的 EN)关断**:TEC 零电流、无打嗝无啸叫,冷侧自然回暖——顺带解决了"轻载时冷侧温度低于目标"的问题(关断期温度回升,形成慢速 bang-bang)。
+
+### 实现
+
+- 新槽 `NV_TEC_EN_OFF_PCT`(槽 35,寄存器 0xCC),默认 **8 %**(≈0.5 V on 6 V TEC,台架按实测打嗝边界标定)。
+- 固定滞回 `TEC_EN_HYST_PCT = 4 %`(编译期宏,tec_control.c):关断阈值 off,重启阈值 off+4,边界不抖振。
+- 控制流重排(`TecControl_Cb`):PID/前馈/duty 合成 **之前** 的首次使能块移到 duty 合成**之后**,新增 7b 死区:
+  - EN 开 + duty < off → 撤 EN + DAC 停泊(off 端),本周期不写 DAC;
+  - EN 关 + duty < off+4 → 保持关(不重启,防抖);
+  - EN 关 + duty ≥ off+4 → 走原首次使能路径(锚点 + EN + 风扇所有权);
+  - EN 开 + duty 在带内 → 继续输出(滞回带)。
+  - ramp 限幅与 DAC 写仅在 drive 时执行;风扇控制每周期照常(关断期风扇仍按热端走)。
+- `NVM_VERSION` 3 → 4(36 槽;NV_END = 0xD0 恰好贴住 AES CHAL_BASE,半开区间不冲突,再新增槽则需先挪 AES 窗口)。
+- sanity:`en_off_pct ∈ [0, 100−4]`,违反回落默认。
+
+### 台架标定
+
+1. 手动把 DAC 从窗口中段往顶端扫,听电感/看 VOUT,记录开始打嗝的 duty → 写入槽 35(0xCC)。
+2. 确认启动锚点(startup_pct=10,≈0.6 V)在打嗝边界的安全侧;若 0.6 V 已打嗝,同步调高 EN_OFF_PCT 或 startup 锚点。

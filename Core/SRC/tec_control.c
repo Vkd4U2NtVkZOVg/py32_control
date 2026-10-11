@@ -39,6 +39,13 @@
 #include "nv_params.h"
 
 /*============================================================================*/
+/* Fixed hysteresis between the EN cut-off threshold and the re-enable        */
+/* threshold (percent of duty). Keeps the EN boundary from chattering while   */
+/* the demand hovers around the anti-hiccup deadband.                          */
+/*============================================================================*/
+#define TEC_EN_HYST_PCT     ( 4 )
+
+/*============================================================================*/
 /* Configuration: snapshotted once from NVRAM at TecControl_Init().            */
 /*============================================================================*/
 typedef struct {
@@ -64,6 +71,7 @@ typedef struct {
     int32_t soc_tighten_temp_millic;/* SoC above this tightens the target       */
     int32_t soc_tighten_delta_millic;/* how much it tightens by                  */
     int32_t dac_startup_pct;       /* first-enable startup point, % of full scale */
+    int32_t en_off_pct;             /* duty below this drops TEC_VEN (anti-hiccup) */
     int32_t dac_min_ctrl_mv;        /* FB-injection window bottom (VFBTH point) */
     int32_t ramp_step_percent;      /* max duty change per cycle (soft start)   */
     int32_t dewpoint_margin_millic; /* target floor = dew point + this          */
@@ -98,6 +106,7 @@ static void tec_params_load( Tec_Params_t *p )
     p->soc_tighten_temp_millic = (int32_t)NvParams_Get( NV_TEC_SOC_TIGHTEN_TEMP_MILLIC );
     p->soc_tighten_delta_millic = (int32_t)NvParams_Get( NV_TEC_SOC_TIGHTEN_DELTA_MILLIC );
     p->dac_startup_pct        = (int32_t)NvParams_Get( NV_TEC_DAC_STARTUP_PCT );
+    p->en_off_pct             = (int32_t)NvParams_Get( NV_TEC_EN_OFF_PCT );
     p->dac_min_ctrl_mv        = (int32_t)NvParams_Get( NV_TEC_DAC_MIN_CTRL_MV );
     p->ramp_step_percent      = (int32_t)NvParams_Get( NV_TEC_RAMP_STEP_PERCENT );
     p->dewpoint_margin_millic = (int32_t)NvParams_Get( NV_TEC_DEWPOINT_MARGIN_MILLIC );
@@ -162,6 +171,10 @@ static void tec_params_load( Tec_Params_t *p )
     }
     if ( ( p->ramp_step_percent <= 0 ) || ( p->ramp_step_percent > 100 ) ) {
         p->ramp_step_percent = (int32_t)NvParams_GetDefault( NV_TEC_RAMP_STEP_PERCENT );
+    }
+    if ( ( p->en_off_pct < 0 ) ||
+         ( p->en_off_pct > ( 100 - (int32_t)TEC_EN_HYST_PCT ) ) ) {
+        p->en_off_pct = (int32_t)NvParams_GetDefault( NV_TEC_EN_OFF_PCT );
     }
     if ( ( p->fan_duty_base < 0 ) || ( p->fan_duty_base > 100 ) ) {
         p->fan_duty_base = (int32_t)NvParams_GetDefault( NV_TEC_FAN_DUTY_BASE );
@@ -303,6 +316,7 @@ static void TecControl_Cb( qEvent_t e )
 
     uint8_t fan_duty;
     uint32_t fan_rpm;
+    uint8_t drive;                  /* 0 = hold the converter off this cycle */
 
     (void)e;
 
@@ -422,51 +436,6 @@ static void TecControl_Cb( qEvent_t e )
         return;
     }
 
-    if ( s_tec_enabled == 0u ) {
-        /* First enable: settle the FB node at the startup anchor BEFORE
-         * asserting TEC_VEN, then let the ramp climb.
-         *
-         * The anchor is a PERCENT of full cooling (DAC_STARTUP_PCT, default
-         * 10): under the calibrated window [760, 2500] duty% maps linearly to
-         * TEC voltage (% of the 6 V rating), so 10 % starts at ≈0.6 V and the
-         * per-cycle ramp (RAMP_STEP_PERCENT) climbs to the operating point -
-         * inrush is bounded by the ramp, not by a voltage jump. With the
-         * window bottom at the no-injection point (760 mV) mv can never drop
-         * below FB=VREF, so this path can no longer land in the UVP (<494 mV)
-         * or overdrive (>6 V) regions. */
-        {
-            uint16_t start_duty;
-            int dac_st;
-
-            if ( s_p.dac_startup_pct >= 100 ) {
-                start_duty = 100u;
-            } else if ( s_p.dac_startup_pct <= 0 ) {
-                start_duty = 0u;
-            } else {
-                start_duty = (uint16_t)s_p.dac_startup_pct;
-            }
-            s_dac_percent = 0u;   /* force a write */
-            dac_st = tec_dac_set( start_duty );   /* settle FB before enabling */
-            if ( dac_st != MCP4725_OK ) {
-                /* DAC write failed: DO NOT enable the TEC - the FB node was
-                 * never settled to the startup anchor, so powering the
-                 * converter now could drive it to max duty / hiccup. Keep the
-                 * TEC disabled and retry next cycle. */
-                s_alarm |= TEC_ALARM_DAC_FAULT;
-                tec_set_enabled( 0u );
-                return;
-            }
-        }
-        tec_set_enabled( 1u );   /* precheck passed: normal operation, TEC on */
-
-        /* Take ownership of the fan PWM channel. Fan_Init() defaults the
-         * FAN_CH_SW source switch to the SDM845 (the SoC drives the PWM), so
-         * writing TIM3 CH2 duty alone is a no-op until we flip ownership to
-         * the PY32. Without this the TEC loop's fan ramps (full speed on
-         * overtemp, hot-side following) never reach the fan. */
-        Fan_SetEnabled( 1u );
-    }
-
     /*--- 5. PID main loop --------------------------------------------------*/
     /* The controlled variable is the COLD side (sdm_mc); the hot side and
      * ambient never enter the PID error. EPID is "heating semantics"
@@ -536,7 +505,7 @@ static void TecControl_Cb( qEvent_t e )
         return;              /* wait for current to fall below limit */
     }
 
-    /*--- 7. combine, clamp, soft-start ramp --------------------------------*/
+    /*--- 7. combine, clamp --------------------------------------------------*/
     duty = pid_out + feedforward;   /* ff = 0 when NV_TEC_FF_ENABLE is off */
     if ( duty > 100 ) {
         duty = 100;
@@ -545,20 +514,95 @@ static void TecControl_Cb( qEvent_t e )
         duty = 0;
     }
 
+    /*--- 7b. EN deadband (anti-hiccup) --------------------------------------*/
+    /* A high DAC (low duty) pulls VOUT down hard; below the converter's UVP
+     * boundary the TPS565201 drops into hiccup mode (periodic restarts) and
+     * the inductor audibly whines. Deep-light-load demand is therefore served
+     * by DROPPING TEC_VEN (the converter EN) instead: zero TEC current, no
+     * hiccup, and the cold side warms back up - which also keeps it from
+     * hanging below the target. Hysteresis (TEC_EN_HYST_PCT) keeps the
+     * boundary from chattering:
+     *   EN on  + duty < off             -> EN off, DAC parked, wait
+     *   EN off + duty < off + hysteresis -> hold off (no re-enable chatter)
+     *   EN off + duty >= off + hysteresis -> normal first-enable path below
+     *   EN on  + duty in the band        -> keep driving (hysteresis band) */
+    drive = 1u;
+    if ( s_tec_enabled != 0u ) {
+        if ( duty < s_p.en_off_pct ) {
+            tec_set_enabled( 0u );
+            (void)tec_dac_set( 0u );   /* park at the off end while disabled */
+            drive = 0u;
+        }
+    } else {
+        if ( duty < ( s_p.en_off_pct + (int32_t)TEC_EN_HYST_PCT ) ) {
+            drive = 0u;   /* hold off; the DAC is already parked */
+        }
+    }
+
+    if ( ( s_tec_enabled == 0u ) && ( drive != 0u ) ) {
+        /* First enable: settle the FB node at the startup anchor BEFORE
+         * asserting TEC_VEN, then let the ramp climb.
+         *
+         * The anchor is a PERCENT of full cooling (DAC_STARTUP_PCT, default
+         * 10): under the calibrated window [760, 2500] duty% maps linearly to
+         * TEC voltage (% of the 6 V rating), so 10 % starts at ≈0.6 V and the
+         * per-cycle ramp (RAMP_STEP_PERCENT) climbs to the operating point -
+         * inrush is bounded by the ramp, not by a voltage jump. With the
+         * window bottom at the no-injection point (760 mV) mv can never drop
+         * below FB=VREF, so this path can no longer land in the UVP (<494 mV)
+         * or overdrive (>6 V) regions. Reached only when the duty demand has
+         * cleared the EN deadband (off + hysteresis), so the converter never
+         * switches on into the hiccup region. */
+        {
+            uint16_t start_duty;
+            int dac_st;
+
+            if ( s_p.dac_startup_pct >= 100 ) {
+                start_duty = 100u;
+            } else if ( s_p.dac_startup_pct <= 0 ) {
+                start_duty = 0u;
+            } else {
+                start_duty = (uint16_t)s_p.dac_startup_pct;
+            }
+            s_dac_percent = 0u;   /* force a write */
+            dac_st = tec_dac_set( start_duty );   /* settle FB before enabling */
+            if ( dac_st != MCP4725_OK ) {
+                /* DAC write failed: DO NOT enable the TEC - the FB node was
+                 * never settled to the startup anchor, so powering the
+                 * converter now could drive it to max duty / hiccup. Keep the
+                 * TEC disabled and retry next cycle. */
+                s_alarm |= TEC_ALARM_DAC_FAULT;
+                tec_set_enabled( 0u );
+                return;
+            }
+        }
+        tec_set_enabled( 1u );   /* demand cleared the deadband: TEC on */
+
+        /* Take ownership of the fan PWM channel. Fan_Init() defaults the
+         * FAN_CH_SW source switch to the SDM845 (the SoC drives the PWM), so
+         * writing TIM3 CH2 duty alone is a no-op until we flip ownership to
+         * the PY32. Without this the TEC loop's fan ramps (full speed on
+         * overtemp, hot-side following) never reach the fan. */
+        Fan_SetEnabled( 1u );
+    }
+
+    /*--- 7c. soft-start ramp (only while driving) ---------------------------*/
     /* Soft-start: never step the TEC duty by more than ramp_step_percent per
      * cycle. The startup anchor (NV_TEC_DAC_STARTUP_PCT, % of full scale) is
      * where the TEC control starts from after enable - under the calibrated
      * window duty% == TEC voltage %, so a low anchor plus this ramp bounds the
      * inrush and avoids slamming the TEC (TI SNVAA70 §3.3 "start close to Vin
      * and regulate slowly"). */
-    if ( duty > ( (int32_t)s_dac_percent + s_p.ramp_step_percent ) ) {
-        duty = (int32_t)s_dac_percent + s_p.ramp_step_percent;
-    }
-    if ( duty < ( (int32_t)s_dac_percent - s_p.ramp_step_percent ) ) {
-        duty = (int32_t)s_dac_percent - s_p.ramp_step_percent;
-    }
-    if ( duty < 0 ) {
-        duty = 0;
+    if ( drive != 0u ) {
+        if ( duty > ( (int32_t)s_dac_percent + s_p.ramp_step_percent ) ) {
+            duty = (int32_t)s_dac_percent + s_p.ramp_step_percent;
+        }
+        if ( duty < ( (int32_t)s_dac_percent - s_p.ramp_step_percent ) ) {
+            duty = (int32_t)s_dac_percent - s_p.ramp_step_percent;
+        }
+        if ( duty < 0 ) {
+            duty = 0;
+        }
     }
 
     /*--- 8. fan fault detection (only when commanding real airflow) --------*/
@@ -570,11 +614,13 @@ static void TecControl_Cb( qEvent_t e )
     }
 
     Fan_SetDutyPercent( fan_duty );        /* heatsink fan: follows hot side */
-    if ( tec_dac_set( (uint8_t)duty ) != MCP4725_OK ) {
-        /* DAC write failed mid-run: the TEC voltage is NOT what the loop
-         * thinks. Flag it so the host can see the mis-actuation; the next
-         * cycle retries the write (s_dac_percent was kept at last-good). */
-        s_alarm |= TEC_ALARM_DAC_FAULT;
+    if ( drive != 0u ) {
+        if ( tec_dac_set( (uint8_t)duty ) != MCP4725_OK ) {
+            /* DAC write failed mid-run: the TEC voltage is NOT what the loop
+             * thinks. Flag it so the host can see the mis-actuation; the next
+             * cycle retries the write (s_dac_percent was kept at last-good). */
+            s_alarm |= TEC_ALARM_DAC_FAULT;
+        }
     }
 }
 

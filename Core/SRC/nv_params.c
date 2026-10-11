@@ -36,9 +36,7 @@
 /*============================================================================*/
 #define NVM_BASE        (0x0800F000UL)  /**< last flash sector, page-aligned  */
 #define NVM_MAGIC       (0x4E564433u)   /**< 'NVD3'                            */
-#define NVM_VERSION     (3u)            /**< v3: + FF enable switch (layout
-                                              grown; any older block invalidates
-                                              by magic/version check anyway)   */
+#define NVM_VERSION     (4u)            /**< v4: + EN anti-hiccup deadband slot */
 #define NVM_PAGE_BYTES  (128u)          /**< PY32F030 flash page size          */
 #define NVM_SLOTS       (2u)            /**< A/B slots; Save flips between them*/
 
@@ -184,6 +182,16 @@ static const uint32_t s_defaults[ NVM_PARAM_COUNT ] = {
                                                   target). 0 = PID only; nonzero =
                                                   common-mode + current FF on. Write
                                                   slot 34 (reg 0xC8) to toggle.     */
+    [NV_TEC_EN_OFF_PCT]                = 8u,   /* anti-hiccup deadband: duty below
+                                                  this drops TEC_VEN (DCDC EN) - a
+                                                  high DAC drives VOUT into the
+                                                  TPS565201 UVP-hiccup region and
+                                                  the inductor whines; a disabled
+                                                  converter has zero TEC current and
+                                                  the cold side warms back up.
+                                                  Re-enable at off+4 (hysteresis).
+                                                  8 % ~= 0.5 V on the 6 V TEC;
+                                                  bench-calibrate the boundary.     */
 };
 
 /*============================================================================*/

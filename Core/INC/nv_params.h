@@ -131,6 +131,15 @@ typedef enum {
                                             never go below (PID pinned at out_min
                                             cannot subtract) and the cold side
                                             settles away from the target.       */
+    NV_TEC_EN_OFF_PCT,                 /**< anti-hiccup deadband: duty below this
+                                            drops TEC_VEN (the DCDC EN) instead
+                                            of driving VOUT into the TPS565201
+                                            UVP-hiccup region (inductor whine).
+                                            Re-enable at off + TEC_EN_HYST_PCT
+                                            (fixed 4 %, tec_control.c). Default
+                                            8 % ~= 0.5 V on the 6 V TEC; bench-
+                                            calibrate to the measured hiccup
+                                            boundary.                           */
     NV_PARAM_COUNT_MARKER,             /**< sentinel: MUST stay last. NVM_PARAM_COUNT
                                             is derived from it, so adding a slot
                                             is just adding a line above.         */
