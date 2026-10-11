@@ -151,7 +151,19 @@ uint8_t USART2_DMA_TxBusy( void )
     /* EN does NOT self-clear at normal completion on this DMA (software-only
      * per RM 11.4.7), so a finished transfer still reads enabled. The live
      * busy signal is the remaining count: CNDTR decrements per byte and sits
-     * at 0 once the shot is done. */
+     * at 0 once the shot is done.
+     *
+     * A transfer-error flag (TEIF2) means the DMA stalled mid-flight (e.g.
+     * USART2 disabled while a shot was in progress): EN stays set and CNDTR
+     * stays non-zero, which without the check below would report "busy"
+     * forever and reject every later Send - a permanent TX deadlock. Treat
+     * a latched error as NOT busy and clear it, so the next Send() re-arms
+     * the channel cleanly. */
+    if ( LL_DMA_IsActiveFlag_TE2( DMA1 ) != 0u ) {
+        LL_DMA_ClearFlag_TE2( DMA1 );
+        LL_DMA_ClearFlag_GI2( DMA1 );
+        return 0u;
+    }
     return ( ( LL_DMA_IsEnabledChannel( DMA1, LL_DMA_CHANNEL_2 ) != 0u ) &&
              ( LL_DMA_GetDataLength( DMA1, LL_DMA_CHANNEL_2 ) != 0u ) ) ? 1u : 0u;
 }

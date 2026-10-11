@@ -191,6 +191,14 @@ static qSM_Status_t st_ThermalPrecheck_Cb( qSM_Handler_t h )
             s_boot.precheckCooling = 0u;
             Pin_PwrKey( 0u );
             Pin_RstKey( 0u );
+            /* The precheck needs the fan at full speed to cool the enclosure
+             * BEFORE the SoC/TEC start, but Fan_Init() hands the PWM channel
+             * to the SDM845 by default - so take ownership here, or the
+             * Fan_SetDutyPercent(100) in the TIMEOUT branch would write a
+             * channel the SoC still owns (a no-op). The TEC loop's own
+             * Fan_SetEnabled(1) on first enable is then a redundant but
+             * harmless backstop. */
+            Fan_SetEnabled( 1u );
             break;
         case SDM845_TIMEOUT:
             ambient_mc = AHT20_Get_LastTempMilliCelsius();

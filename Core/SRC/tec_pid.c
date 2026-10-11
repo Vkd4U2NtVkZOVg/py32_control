@@ -43,17 +43,16 @@ int TecPid_Init(TecPid_t *pid,
     ki_eff = ki * period_s;
     kd_eff = kd * period_s;
 
-    /* Allocate the epid and optional D-filter instances up front. */
-    static epid_t s_epid;
-    static epid_lpf_t s_lpf;
-    ctx = &s_epid;
+    /* The epid and LPF instances live INSIDE the caller's TecPid_t (embedded
+     * union storage), so every PID handle owns its own state - no shared
+     * singleton, safe for multiple instances. */
+    ctx = &pid->epid.epid;
 
     info = epid_init(ctx, measure, measure, 0.0f, kp_eff, ki_eff, kd_eff);
     if ( info != EPID_ERR_NONE ) {
         return TEC_PID_ERR_INIT;
     }
 
-    pid->epid          = ctx;
     pid->setpoint      = measure;   /* default SP == initial measure */
     pid->last_measure  = measure;
     pid->out_min       = out_min;
@@ -63,7 +62,6 @@ int TecPid_Init(TecPid_t *pid,
     /* D-term filter smoothing is per-cycle; to stay period-independent the
      * caller passes it tuned at Ts=1 s. */
     pid->d_filter_on   = ( d_filter_a > 0.0f ) ? 1u : 0u;
-    pid->lpf           = &s_lpf;
 
     if ( pid->d_filter_on != 0u ) {
         /* D-term LPF must start from 0 (the D-term is 0 at init because
@@ -72,13 +70,11 @@ int TecPid_Init(TecPid_t *pid,
          * slam the controller to max output even at zero error, decaying
          * only over ~1/a cycles. */
         float lpf_seed = 0.0f;
-        if ( epid_util_lpf_init(&s_lpf, d_filter_a, lpf_seed) != EPID_ERR_NONE ) {
+        if ( epid_util_lpf_init( &pid->lpf.lpf,
+                                 d_filter_a, lpf_seed ) != EPID_ERR_NONE ) {
             return TEC_PID_ERR_INIT;
         }
-    } else {
-        pid->lpf = NULL;
     }
-
     return TEC_PID_OK;
 }
 
@@ -95,10 +91,10 @@ void TecPid_Update(TecPid_t *pid, float measure)
     float d_term;
     float error;
 
-    if ( pid == NULL || pid->epid == NULL ) {
+    if ( pid == NULL ) {
         return;
     }
-    ctx = (epid_t *)pid->epid;
+    ctx = &pid->epid.epid;
 
     /* Compute P/I/D terms (incremental Type-C PID). */
     epid_pid_calc(ctx, pid->setpoint, measure);
@@ -108,10 +104,10 @@ void TecPid_Update(TecPid_t *pid, float measure)
     epid_util_ilim(ctx, pid->i_min, pid->i_max);
 
     /* Optional D-term low-pass filtering (noise on temperature sensing). */
-    if ( pid->d_filter_on != 0u && pid->lpf != NULL ) {
-        d_term = ((epid_t *)pid->epid)->d_term;
-        epid_util_lpf_calc((epid_lpf_t *)pid->lpf, d_term);
-        ((epid_t *)pid->epid)->d_term = ((epid_lpf_t *)pid->lpf)->y;
+    if ( pid->d_filter_on != 0u ) {
+        d_term = ctx->d_term;
+        epid_util_lpf_calc( &pid->lpf.lpf, d_term );
+        ctx->d_term = pid->lpf.lpf.y;
     }
 
     /* Conditional integration (anti-windup #2): if the output is already
@@ -132,20 +128,20 @@ void TecPid_Update(TecPid_t *pid, float measure)
 
 float TecPid_GetOutput(const TecPid_t *pid)
 {
-    if ( pid == NULL || pid->epid == NULL ) {
+    if ( pid == NULL ) {
         return 0.0f;
     }
-    return ((epid_t *)pid->epid)->y_out;
+    return pid->epid.epid.y_out;
 }
 
 void TecPid_Reset(TecPid_t *pid, float measure)
 {
     epid_t *ctx;
 
-    if ( pid == NULL || pid->epid == NULL ) {
+    if ( pid == NULL ) {
         return;
     }
-    ctx = (epid_t *)pid->epid;
+    ctx = &pid->epid.epid;
 
     epid_init(ctx, measure, measure, 0.0f,
               ctx->kp, ctx->ki, ctx->kd);
@@ -156,8 +152,7 @@ void TecPid_Reset(TecPid_t *pid, float measure)
      * (possibly large, from before the fault) leaks into the output for ~1/a
      * cycles after recovery. Seed from 0: the D-term is 0 right after reset
      * (xk_1 == xk_2 == measure). */
-    if ( pid->d_filter_on != 0u && pid->lpf != NULL ) {
-        epid_lpf_t *lpf = (epid_lpf_t *)pid->lpf;
-        (void)epid_util_lpf_init( lpf, lpf->smoothing_factor, 0.0f );
+    if ( pid->d_filter_on != 0u ) {
+        (void)epid_util_lpf_init( &pid->lpf.lpf, pid->lpf.lpf.smoothing_factor, 0.0f );
     }
 }

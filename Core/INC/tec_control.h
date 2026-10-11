@@ -13,7 +13,7 @@
  *   - Dynamic target: base + env compensation - SoC compensation (cold-side)
  *   - PID main loop: TecPid_Update() with the cold-side temperature
  *   - Feedforward: TEC current > threshold adds duty proportional to current
- *   - Fault protection: overtemp full-speed/shutdown, overcurrent feedforward,
+ *   - Fault protection: overtemp full-speed/shutdown, overcurrent cutoff,
  *     fan fault alarm, dew-point hard cut + independent condensation floor
  *
  * All tunable parameters (PID gains, targets, thresholds, DAC window, fan ramp,
@@ -46,7 +46,7 @@ extern "C" {
 #define TEC_ALARM_NONE              0x00
 #define TEC_ALARM_OVERTEMP          0x01  /* hot-side > danger, TEC disabled   */
 #define TEC_ALARM_HOT_WARNING       0x02  /* hot-side > overtemp, fan full-speed */
-#define TEC_ALARM_OVERCURRENT       0x04  /* TEC current > danger, FF +50%     */
+#define TEC_ALARM_OVERCURRENT       0x04  /* TEC current > danger, drive cut    */
 #define TEC_ALARM_FAN_FAULT         0x08  /* fan RPM < min with duty > min     */
 #define TEC_ALARM_THERMAL_WAIT      0x10  /* ambient precheck: TEC held off    */
 #define TEC_ALARM_DEWPOINT          0x20  /* cold side < dew point + margin,

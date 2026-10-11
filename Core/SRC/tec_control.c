@@ -141,9 +141,17 @@ static void tec_params_load( Tec_Params_t *p )
         p->hot_overtemp_millic = (int32_t)NvParams_GetDefault( NV_TEC_HOT_OVERTEMP_MILLIC );
         p->hot_danger_millic   = (int32_t)NvParams_GetDefault( NV_TEC_HOT_DANGER_MILLIC );
     }
-    if ( p->cur_feedforward_ma >= p->cur_danger_ma ) {
+    if ( ( p->cur_feedforward_ma <= 0 ) || ( p->cur_danger_ma <= 0 ) ||
+         ( p->cur_feedforward_ma >= p->cur_danger_ma ) ) {
         p->cur_feedforward_ma = (int32_t)NvParams_GetDefault( NV_TEC_CURRENT_FEEDFORWARD_MA );
         p->cur_danger_ma      = (int32_t)NvParams_GetDefault( NV_TEC_CURRENT_DANGER_MA );
+    }
+    if ( ( p->soc_tighten_temp_millic <= 0 ) || ( p->soc_tighten_delta_millic <= 0 ) ) {
+        p->soc_tighten_temp_millic = (int32_t)NvParams_GetDefault( NV_TEC_SOC_TIGHTEN_TEMP_MILLIC );
+        p->soc_tighten_delta_millic = (int32_t)NvParams_GetDefault( NV_TEC_SOC_TIGHTEN_DELTA_MILLIC );
+    }
+    if ( p->env_comp_temp_millic <= 0 ) {
+        p->env_comp_temp_millic = (int32_t)NvParams_GetDefault( NV_TEC_ENV_COMP_TEMP_MILLIC );
     }
     if ( ( p->pid_kp <= 0.0f ) || ( p->pid_ki <= 0.0f ) || ( p->pid_kd < 0.0f ) ) {
         p->pid_kp = (float)NvParams_GetDefault( NV_TEC_PID_KP_Q16 ) / NVM_Q16_SCALE;

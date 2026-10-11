@@ -3006,3 +3006,33 @@ v6 的 `NvParams_Save()` 单块顺序擦写 2 页（erase p0 → erase p1 → pr
 
 - 全量 Core/SRC 编译 0 错 0 警（全部项目警告可见，非仅 error）；
 - `nv_dualslot_sim.py` 232 项通过。
+
+---
+
+## 2026-10-11 — 二轮审查修复：风扇预检所有权(B2) / PID单例外置(B3) / 负值参数保护(B6) / 注释同步(B9) / DMA错误防卡死(B12)
+
+### 审查结论（B1-B15 逐条核验）
+
+- **B1（误报）**：STAGE 发送机制自洽——entry 发送成功即置 `s_txPending=NULL`，retry 只补发 pending 中一条，`USART2_DMA_Send` 有 TxBusy 拒绝。无"双发/重装"竞争。
+- **B2（真）**：热预检要风扇预冷但从未 `Fan_SetEnabled(1)` 拿回通道，`Fan_SetDutyPercent(100)` 写在 SDM845 占用的通道上是空操作 → 预冷风扇转不起来。
+- **B3（真）**：`tec_pid.c` 的 `epid_t`/`lpf` 是文件级 static 单例，第二个 PID 实例会共享同一块状态。
+- **B6（真，安全）**：`soc_tighten_delta_millic` 无负值保护（负 delta 行为反转）；电流阈值无正数检查（`cur_danger_ma<0` 时无符号比较恒不成立 → 过流保护永久失效）。
+- **B9（真）**：`tec_control.h` 过流注释还是修复前的 "FF +50%"。
+- **B12（真）**：`USART2_DMA_TxBusy` 只查 `EN&&CNDTR`，DMA 错误停半路时永远"busy"→ 后续发送全拒，永久卡死。
+- B4/B5/B7/B8/B10/B11/B13/B14/B15：低/无 bug（B7 表界安全、B15 ResetAll 已清、B4 单主总线）。
+
+### 修复
+
+| # | 文件 | 改动 |
+|---|---|---|
+| B2 | `sdm845_boot.c` | `THERMAL_PRECHECK` ENTRY 加 `Fan_SetEnabled(1u)` 拿回风扇通道（TEC 首次 enable 里的 `Fan_SetEnabled(1)` 保留为兜底） |
+| B3 | `tec_pid.h/.c` | `epid_t`/`epid_lpf_t` 从文件级 static 单例改为**内嵌进 `TecPid_t`**（union 成员 `epid.epid`/`lpf.lpf`，strict-aliasing 安全），多实例各自独立状态；`TecPid_t` 约 +30B |
+| B6 | `tec_control.c` | 校验块加 `cur_feedforward<=0 || cur_danger<=0`、`soc_tighten_delta<=0`、`env_comp_temp<=0` 回落默认 |
+| B9 | `tec_control.h` | `TEC_ALARM_OVERCURRENT` 注释 "FF +50%" → "drive cut"；文件头 "overcurrent feedforward" → "overcurrent cutoff" |
+| B12 | `usart2_dma.c` | `USART2_DMA_TxBusy` 检测 DMA `TEIF2` 错误标志：置位即清错并返回"非 busy"，使下次 Send 能重装通道，解除永久 TX 死锁 |
+
+### 验证
+
+- 全量 Core/SRC 编译 0 错 0 警（全部项目警告可见，非仅 error）；
+- `nv_dualslot_sim.py` 232 项通过；
+- `TecPid_t` 由指针(48B)改为内嵌(约 77B)，RAM 仍余量充足。

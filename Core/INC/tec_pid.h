@@ -29,20 +29,40 @@
 
 #include <stdint.h>
 
+/* Bring in the real epid_t / epid_lpf_t definitions so the embedded storage
+ * unions below are complete types (pid.h has its own include guard). */
+#include "pid.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+/* Storage layout must match the real structs in pid.h exactly:
+ *   epid_t   = 10 floats (kp,ki,kd, xk_1,xk_2, p,i,d, y_out)
+ *   epid_lpf_t = 2 floats (smoothing_factor, y)
+ * Using a union instead of a reinterpret-cast keeps strict-aliasing clean
+ * (the active member is set by epid_init / epid_util_lpf_init through the
+ * union's epid member). */
+typedef union {
+    epid_t       epid;        /**< the real Embedded-PID context             */
+    float        raw[ 10 ];   /**< same bytes, so TecPid_t is trivially sized */
+} TecPid_Epid_t;
+
+typedef union {
+    epid_lpf_t   lpf;         /**< the real D-term low-pass filter           */
+    float        raw[ 2 ];    /**< same bytes                                 */
+} TecPid_Lpf_t;
+
 typedef struct {
-    void *epid;               /**< opaque epid_t instance (defined in pid.c) */
+    TecPid_Epid_t  epid;      /**< embedded, per-instance PID state          */
+    TecPid_Lpf_t   lpf;       /**< embedded, per-instance D-term LPF         */
     float setpoint;           /**< target temperature (milli-degC)           */
     float last_measure;       /**< last injected temperature (milli-degC)    */
     float out_min;            /**< lower output limit (percent)              */
     float out_max;            /**< upper output limit (percent)              */
     float i_min;              /**< anti-windup lower bound on I-increment    */
     float i_max;              /**< anti-windup upper bound on I-increment    */
-    void *lpf;                /**< optional D-term low-pass filter (epid_lpf_t) */
-    uint8_t d_filter_on;      /**< !=0 applies the LPF to the D-term            */
+    uint8_t d_filter_on;      /**< !=0 applies the LPF to the D-term         */
 } TecPid_t;
 
 /**
