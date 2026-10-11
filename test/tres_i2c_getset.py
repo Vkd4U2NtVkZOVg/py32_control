@@ -3,7 +3,8 @@
 
 i2cget/i2cset-style access to the PY32F030 TRES register file
 (tres_i2c_slave.c), plus a self-test for the host-writable SDM845
-temperature window at 0x20.
+temperature window at 0x20 (publishes only on a complete single-
+transaction write of all 4 bytes from the window base).
 
 Protocol (tres_i2c_slave.h):
   write: [regPtr] [data ...]      first byte selects the register pointer,
@@ -149,19 +150,32 @@ def cmd_test(t, args):
             print("        raw readback: {}".format(
                 " ".join("{:02X}".format(b) for b in raw)))
 
-    print("[3] partial-write guard: write 2 bytes only, value must hold")
+    print("[3] partial/splice write guard: incomplete writes must not publish")
     keep = t.get_temp()
-    t.set(TRES_REG_SDM845_TEMP, [0x12, 0x34])  # too short to publish
-    time.sleep(0.05)
-    got = t.get_temp()
-    ok = (got == keep)
-    failures += 0 if ok else 1
-    print("    kept {:>7} mC after partial write -> {:>7} mC  {}".format(
-        keep, got, "OK" if ok else "FAIL"))
+    cases = (
+        ("2 bytes from base",
+         lambda: t.set(TRES_REG_SDM845_TEMP, [0x12, 0x34])),
+        ("1 byte at base+3 (last-byte splice)",
+         lambda: t.set(TRES_REG_SDM845_TEMP + 3, [0x55])),
+        ("3 bytes from base, then 1 at base+3 (cross-transaction)",
+         lambda: (t.set(TRES_REG_SDM845_TEMP, [0xAA, 0xBB, 0xCC]),
+                  time.sleep(0.05),
+                  t.set(TRES_REG_SDM845_TEMP + 3, [0xDD]))),
+        ("3 bytes from base+1 (mid-window start)",
+         lambda: t.set(TRES_REG_SDM845_TEMP + 1, [0x11, 0x22, 0x33])),
+    )
+    for name, attack in cases:
+        attack()
+        time.sleep(0.05)
+        got = t.get_temp()
+        ok = (got == keep)
+        failures += 0 if ok else 1
+        print("    {:<48} kept {:>7} -> {:>7} mC  {}".format(
+            name, keep, got, "OK" if ok else "FAIL"))
 
     if failures:
         sys.exit("FAIL: {} of {} checks failed".format(
-            failures, len(SELFTEST_VALUES_MILLIC) + 1))
+            failures, len(SELFTEST_VALUES_MILLIC) + len(cases)))
     print("OK")
 
 
@@ -174,7 +188,7 @@ Examples:
       Write -5.5 C into the SDM845 temperature window and verify readback.
   python3 tres_i2c_getset.py test
       Full self-test: static registers, 5 temperature round-trips
-      (negative/zero/positive), and the partial-write guard.
+      (negative/zero/positive), and the partial/splice write guards.
 """
     ap = argparse.ArgumentParser(
         description="i2cget/i2cset-style access to the TRES register file, "
