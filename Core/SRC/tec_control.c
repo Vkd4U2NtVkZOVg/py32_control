@@ -362,6 +362,11 @@ static void TecControl_Cb( qEvent_t e )
 
     (void)e;
 
+    /* Alarms report THIS cycle's conditions: clear first, so the early
+     * fail-safe returns below cannot carry stale bits from previous cycles
+     * (e.g. an OVERCURRENT or DAC_FAULT whose condition has since gone). */
+    s_alarm = TEC_ALARM_NONE;
+
     /*--- 1. read all sources ------------------------------------------------*/
     hot_mc = Studio_ADC1_ReadHotMilliCelsius();
     env_mc = AHT20_Get_LastTempMilliCelsius();   /* ambient, not dew point */
@@ -447,7 +452,6 @@ static void TecControl_Cb( qEvent_t e )
     }
 
     /*--- 4. fault protection (highest priority first) ----------------------*/
-    s_alarm = TEC_ALARM_NONE;
 
     if ( hot_lift > 0 ) {
         /* Foldback active: the elevated cold target is doing the load
