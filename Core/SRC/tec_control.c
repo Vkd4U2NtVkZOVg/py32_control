@@ -292,6 +292,9 @@ static uint8_t     s_dac_percent = 0xFFu; /* last duty written to the DAC;
                                            short-circuited                    */
 static uint32_t    s_fan_stall_ms;  /* accumulated below-RPM time            */
 static uint32_t    s_fan_grace_ms;  /* remaining fan spool-up grace          */
+static uint8_t     s_fan_stalled;   /* interlock: only healthy RPM clears it */
+static uint8_t     s_fan_started;   /* do not renew grace on each TEC enable */
+static uint8_t     s_cold_fault;    /* reset PID from real feedback on recovery */
 static volatile int32_t hot_mc;
 static volatile int32_t env_mc;
 static volatile int32_t sdm_mc;
@@ -434,11 +437,21 @@ static void TecControl_Cb( qEvent_t e )
         env_mc = s_p.target_base_millic;   /* fall back to nominal ambient */
     }
     if ( is_temp_valid( sdm_mc ) == 0 ) {
-        sdm_mc = s_p.target_base_millic;
+        tec_set_enabled( 0u );
+        (void)tec_dac_set( 0u );
+        Fan_SetEnabled( 1u );
+        Fan_SetDutyPercent( 100u );
+        s_cold_fault = 1u;
+        s_alarm |= TEC_ALARM_SENSOR;
+        return;
+    }
+    if ( s_cold_fault != 0u ) {
+        TecPid_Reset( &s_pid, -(float)sdm_mc );
+        s_cold_fault = 0u;
     }
 
     /*--- 1b. hot-side sensor failure is FAIL-SAFE, not fall-back -----------*/
-    /* The cold side and ambient fall back to the target on an invalid
+    /* Only ambient falls back to the target on an invalid
      * reading; the hot side CANNOT - it feeds the overtemp shutdown, the
      * fan ramp and the fan-fault check. An open NTC reads as -40 C (would
      * never trip the overtemp guard) and a shorted NTC as +200 C. Treat
@@ -558,6 +571,21 @@ static void TecControl_Cb( qEvent_t e )
         (void)tec_dac_set( 0u );   /* 0 duty = 0 cooling = DAC at max_ctrl (VOUT 0) */
         s_alarm |= TEC_ALARM_THERMAL_WAIT;
         return;
+    }
+
+    /* A stalled fan must recover before ANY enable write. Alarm clearing
+     * by the host cannot clear this interlock. Keep requesting full airflow. */
+    if ( s_fan_stalled != 0u ) {
+        if ( Fan_Get_LastRPM() < (uint32_t)s_p.fan_min_rpm ) {
+            tec_set_enabled( 0u );
+            Fan_SetEnabled( 1u );
+            Fan_SetDutyPercent( 100u );
+            s_alarm |= TEC_ALARM_FAN_FAULT;
+            return;
+        }
+        s_fan_stalled = 0u;
+        s_fan_stall_ms = 0u;
+        TecPid_Reset( &s_pid, -(float)sdm_mc );
     }
 
     /*--- 5. PID main loop --------------------------------------------------*/
@@ -709,8 +737,11 @@ static void TecControl_Cb( qEvent_t e )
         /* Fresh fan start: arm the spool-up grace and clear the stall timer
          * so the first tach windows (which still read ~0 RPM) cannot trip
          * the sustained-stall cut. */
-        s_fan_grace_ms = TEC_FAN_GRACE_S * 1000u;
-        s_fan_stall_ms = 0u;
+        if ( s_fan_started == 0u ) {
+            s_fan_grace_ms = TEC_FAN_GRACE_S * 1000u;
+            s_fan_stall_ms = 0u;
+            s_fan_started = 1u;
+        }
     }
 
     /*--- 7c. soft-start ramp (only while driving) ---------------------------*/
@@ -776,8 +807,7 @@ static void TecControl_Cb( qEvent_t e )
                     (void)tec_dac_set( 0u );
                 }
                 Fan_SetDutyPercent( 100u );
-                s_fan_stall_ms = 0u;   /* re-trip timer restarts; the TEC
-                                          stays off until the fan recovers */
+                s_fan_stalled = 1u; /* held until a healthy RPM sample */
                 return;
             }
         }
@@ -788,9 +818,11 @@ static void TecControl_Cb( qEvent_t e )
     Fan_SetDutyPercent( fan_duty );        /* heatsink fan: follows hot side */
     if ( drive != 0u ) {
         if ( tec_dac_set( (uint8_t)duty ) != MCP4725_OK ) {
-            /* DAC write failed mid-run: the TEC voltage is NOT what the loop
-             * thinks. Flag it so the host can see the mis-actuation; the next
-             * cycle retries the write (s_dac_percent was kept at last-good). */
+            /* Disable independently of the failed bus. Recovery must pass
+             * the forced startup-anchor write before asserting EN again. */
+            tec_set_enabled( 0u );
+            TecPid_Reset( &s_pid, -(float)sdm_mc );
+            Fan_SetDutyPercent( 100u );
             s_alarm |= TEC_ALARM_DAC_FAULT;
         }
     }
@@ -839,6 +871,9 @@ void TecControl_Init( void )
     s_tec_enabled  = 0u;
     s_fan_stall_ms = 0u;
     s_fan_grace_ms = 0u;     /* armed at the first-enable (fresh fan start) */
+    s_fan_stalled  = 0u;
+    s_fan_started  = 0u;
+    s_cold_fault   = 0u;
     tec_set_enabled( 0u );   /* held off until the SDM845 thermal precheck passes */
 
     /* Park the DAC on the zero-current end of the FB-injection window. In

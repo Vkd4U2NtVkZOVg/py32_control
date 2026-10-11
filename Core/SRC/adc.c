@@ -301,8 +301,8 @@ uint8_t Studio_ADC1_ReadCurrentMilliamp(uint32_t *out_ma)
    * 1 mV..5 V. Bounded this way the worst-case product stays below 2^53. */
   static uint32_t shunt_uohm = 0u;
   static uint32_t amp_gain   = 0u;
-  static uint32_t div_num    = 1u;
-  static uint32_t div_den    = 1u;
+  static uint32_t div_num    = 0u;
+  static uint32_t div_den    = 0u; /* zero means not loaded, not unity gain */
   static uint32_t adc_vref_mv = 0u;
   uint16_t adc_code;
   uint8_t  ok;
@@ -390,3 +390,4 @@ int32_t Studio_ADC1_ReadColdMilliCelsius(void)
 /* USER CODE BEGIN 1 */
 
 /* USER CODE END 1 */
+
