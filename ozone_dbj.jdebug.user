@@ -1,20 +1,55 @@
 
 
+
+Breakpoint=d:/2026_project/Mix3_TRES_2/Firmware/TEST/Core/SRC/sdm845_boot.c:446:5, State=BP_STATE_DISABLED
+Breakpoint=d:/2026_project/Mix3_TRES_2/Firmware/TEST/Drivers/PY32F030_HAL_Driver/Inc/py32f0xx_ll_flash.h:433:3, State=BP_STATE_DISABLED
+GraphedExpression="s_boot.stateId", DisplayFormat=DISPLAY_FORMAT_DEC, Color=#e56a6f, Show=0
+OpenDocument="main.c", FilePath="d:/2026_project/Mix3_TRES_2/Firmware/TEST/Core/SRC/main.c", Line=72
+OpenDocument="mcp4725.c", FilePath="d:/2026_project/Mix3_TRES_2/Firmware/TEST/Core/SRC/mcp4725.c", Line=4
+OpenDocument="tec_control.c", FilePath="d:/2026_project/Mix3_TRES_2/Firmware/TEST/Core/SRC/tec_control.c", Line=161
+OpenDocument="soft_i2c.c", FilePath="d:/2026_project/Mix3_TRES_2/Firmware/TEST/Core/SRC/soft_i2c.c", Line=217
+OpenDocument="nv_params.c", FilePath="d:/2026_project/Mix3_TRES_2/Firmware/TEST/Core/SRC/nv_params.c", Line=165
+OpenDocument="qlists.c", FilePath="d:/2026_project/Mix3_TRES_2/Firmware/TEST/Drivers/QuarkTS/qlists.c", Line=582
+OpenDocument="startup_py32f030xx.s", FilePath="d:/2026_project/Mix3_TRES_2/Firmware/TEST/EIDE/startup_py32f030xx.s", Line=57
+OpenDocument="adc.c", FilePath="d:/2026_project/Mix3_TRES_2/Firmware/TEST/Core/SRC/adc.c", Line=256
+OpenDocument="cmsis_gcc.h", FilePath="d:/2026_project/Mix3_TRES_2/Firmware/TEST/Drivers/CMSIS/Include/cmsis_gcc.h", Line=48
+OpenDocument="usart.c", FilePath="d:/2026_project/Mix3_TRES_2/Firmware/TEST/Core/SRC/usart.c", Line=36
+OpenDocument="sdm845_boot.c", FilePath="d:/2026_project/Mix3_TRES_2/Firmware/TEST/Core/SRC/sdm845_boot.c", Line=427
+OpenDocument="sdm845_detect.c", FilePath="d:/2026_project/Mix3_TRES_2/Firmware/TEST/Core/SRC/sdm845_detect.c", Line=112
+OpenDocument="qkernel.c", FilePath="d:/2026_project/Mix3_TRES_2/Firmware/TEST/Drivers/QuarkTS/qkernel.c", Line=781
+OpenDocument="py32f0xx_ll_bus.h", FilePath="d:/2026_project/Mix3_TRES_2/Firmware/TEST/Drivers/PY32F030_HAL_Driver/Inc/py32f0xx_ll_bus.h", Line=360
+OpenDocument="py32f0xx_ll_flash.h", FilePath="d:/2026_project/Mix3_TRES_2/Firmware/TEST/Drivers/PY32F030_HAL_Driver/Inc/py32f0xx_ll_flash.h", Line=530
+OpenDocument="usart2_dma.c", FilePath="d:/2026_project/Mix3_TRES_2/Firmware/TEST/Core/SRC/usart2_dma.c", Line=0
 OpenDocument="qfsm.c", FilePath="d:/2026_project/Mix3_TRES_2/Firmware/TEST/Drivers/QuarkTS/qfsm.c", Line=507
-OpenDocument="tres_seq.c", FilePath="d:/2026_project/Mix3_TRES_2/Firmware/TEST/Core/SRC/tres_seq.c", Line=311
-OpenDocument="startup_py32f030xx.s", FilePath="d:/2026_project/Mix3_TRES_2/Firmware/TEST/EIDE/startup_py32f030xx.s", Line=108
-OpenDocument="main.c", FilePath="d:/2026_project/Mix3_TRES_2/Firmware/TEST/Core/SRC/main.c", Line=84
+OpenDocument="sdm845_detect.h", FilePath="d:/2026_project/Mix3_TRES_2/Firmware/TEST/Core/INC/sdm845_detect.h", Line=24
 OpenToolbar="Debug", Floating=0, x=0, y=0
-OpenWindow="Registers 1", DockArea=RIGHT, x=0, y=1, w=701, h=1102, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=0, FilteredItems=[], RefreshRate=1
-OpenWindow="Disassembly", DockArea=RIGHT, x=0, y=0, w=701, h=537, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=0
-OpenWindow="Memory 1", DockArea=BOTTOM, x=1, y=0, w=1040, h=328, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=0, EditorAddress=0x0
-OpenWindow="Watched Data 1", DockArea=LEFT, x=0, y=1, w=415, h=554, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=0
-OpenWindow="Functions", DockArea=LEFT, x=0, y=0, w=415, h=1085, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=0
-OpenWindow="Console", DockArea=BOTTOM, x=0, y=0, w=1068, h=328, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=0
+OpenWindow="Registers 1", DockArea=RIGHT, x=0, y=2, w=614, h=500, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=0, FilteredItems=[], RefreshRate=2
+OpenWindow="Disassembly", DockArea=RIGHT, x=0, y=1, w=614, h=160, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=0
+OpenWindow="Memory 1", DockArea=BOTTOM, x=3, y=0, w=269, h=691, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=0, EditorAddress=0x800F000
+OpenWindow="Local Data", DockArea=RIGHT, x=0, y=0, w=614, h=662, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=0
+OpenWindow="Watched Data 1", DockArea=LEFT, x=0, y=3, w=629, h=348, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=0
+OpenWindow="Functions", DockArea=LEFT, x=0, y=2, w=629, h=326, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=0
+OpenWindow="Call Graph", DockArea=LEFT, x=0, y=0, w=629, h=257, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=0
+OpenWindow="Memory Usage", DockArea=LEFT, x=0, y=1, w=629, h=390, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=0
+OpenWindow="Data Sampling", DockArea=BOTTOM, x=1, y=0, w=377, h=691, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=0, VisibleTab=0, UniformSampleSpacing=0
+OpenWindow="Timeline", DockArea=BOTTOM, x=0, y=0, w=765, h=691, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=1, DataPaneShown=1, PowerPaneShown=0, CodePaneShown=0, PinCursor="Cursor Movable", TimePerDiv="5 s / Div", TimeStampFormat="Cycles", DataGraphDrawAsPoints=0, DataGraphLegendShown=1, DataGraphUniformSampleSpacing=0, DataGraphLegendPosition="455;0", DataGraphShowNamesAtCursor=1, PowerGraphDrawAsPoints=0, PowerGraphLegendShown=0, PowerGraphAvgFilterTime=Off, PowerGraphAvgFilterLen=Off, PowerGraphUniformSampleSpacing=0, PowerGraphLegendPosition="714;-69", CodeGraphLegendShown=0, CodeGraphLegendPosition="730;0"
+OpenWindow="Console", DockArea=BOTTOM, x=2, y=0, w=927, h=691, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=0
+OpenWindow="Memory 2", DockArea=BOTTOM, x=4, y=0, w=302, h=691, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=0, EditorAddress=0x800EFA0
 SmartViewPlugin="", Page="", Toolbar="Hidden", Window="SmartView 1"
+TableHeader="Local Data", SortCol="Name", SortOrder="ASCENDING", VisibleCols=["Name";"Value";"Location";"Size";"Type";"Scope"], ColWidths=[188;124;102;100;264;247]
 TableHeader="Functions", SortCol="Name", SortOrder="ASCENDING", VisibleCols=["Name";"Address";"Size";"#Insts";"Source"], ColWidths=[914;104;100;100;222]
-TableHeader="Power Sampling", SortCol="None", SortOrder="ASCENDING", VisibleCols=["Index";"Time";"Ch 0"], ColWidths=[100;100;100]
-TableHeader="Registers 1", SortCol="Name", SortOrder="ASCENDING", VisibleCols=["Name";"Value";"Description"], ColWidths=[196;144;361]
-TableHeader="Watched Data 1", SortCol="Expression", SortOrder="ASCENDING", VisibleCols=["Expression";"Value";"Location";"Refresh"], ColWidths=[100;100;100;115]
+TableHeader="Call Graph", SortCol="Name", SortOrder="ASCENDING", VisibleCols=["Name";"Stack Total";"Stack Local";"Code Total";"Code Local";"Depth";"Called From"], ColWidths=[466;126;126;118;118;100;126]
+TableHeader="Data Sampling Table", SortCol="None", SortOrder="ASCENDING", VisibleCols=["Index";"Time";" s_boot.stateId"], ColWidths=[100;100;100]
+TableHeader="Data Sampling Setup", SortCol="Expression", SortOrder="ASCENDING", VisibleCols=["Expression";"Type";"Value";"Min";"Max";"Average";"# Changes";"Min. Change";"Max. Change"], ColWidths=[126;144;100;100;100;114;110;126;126]
+TableHeader="Power Sampling", SortCol="None", SortOrder="ASCENDING", VisibleCols=["Index";"Time";"Ch 0"], ColWidths=[100;100;629]
+TableHeader="Registers 1", SortCol="Name", SortOrder="ASCENDING", VisibleCols=["Name";"Value";"Description"], ColWidths=[196;144;294]
+TableHeader="Watched Data 1", SortCol="Expression", SortOrder="ASCENDING", VisibleCols=["Expression";"Value";"Location";"Refresh"], ColWidths=[217;120;131;161]
 TableHeader="RegisterSelectionDialog", SortCol="None", SortOrder="ASCENDING", VisibleCols=[], ColWidths=[]
 TableHeader="TargetExceptionDialog", SortCol="Name", SortOrder="ASCENDING", VisibleCols=["Name";"Value";"Address";"Description"], ColWidths=[200;100;100;340]
+WatchedExpression="s_rx_buf", RefreshRate=1, Window=Watched Data 1
+WatchedExpression="s_boot.stateId", RefreshRate=1, Window=Watched Data 1
+WatchedExpression="hot_mc", RefreshRate=5, Window=Watched Data 1
+WatchedExpression="s_hot_mc", RefreshRate=2, DisplayFormat=DISPLAY_FORMAT_DEC, Window=Watched Data 1
+WatchedExpression="tored->data.params", Window=Watched Data 1
+WatchedExpression="stored", Window=Watched Data 1
+WatchedExpression="sdm_mc", RefreshRate=1, Window=Watched Data 1
