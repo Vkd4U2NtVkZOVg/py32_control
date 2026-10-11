@@ -57,6 +57,18 @@
 #define TEC_D_FILTER_TAU_S        ( 2.0f )
 #define TEC_I_SLEW_PCT_PER_S      ( 50.0f )
 
+/* Fan-stall protection: the tachometer RPM is the direct, fast indicator of a
+ * dead heatsink fan, but it is a 2 s-window average (fan_task) that still
+ * reads ~0 until the fan has spooled up and its first window completes.
+ * Detection is therefore grace-gated and must be SUSTAINED before it may cut
+ * the TEC:
+ *   - TEC_FAN_GRACE_S: window ignored after a fresh fan start (spool-up +
+ *     first tach sample), counted down per control cycle;
+ *   - TEC_FAN_STALL_S: below-RPM time required before the TEC is cut
+ *     (accumulated in ms, so the rule is independent of the control period). */
+#define TEC_FAN_GRACE_S           ( 6u )
+#define TEC_FAN_STALL_S           ( 5u )
+
 /*============================================================================*/
 /* Configuration: snapshotted once from NVRAM at TecControl_Init().            */
 /*============================================================================*/
@@ -215,6 +227,8 @@ static uint8_t     s_dac_percent = 0xFFu; /* last duty written to the DAC;
                                            0xFF = "unknown" sentinel so the
                                            first tec_dac_set() is never
                                            short-circuited                    */
+static uint32_t    s_fan_stall_ms;  /* accumulated below-RPM time            */
+static uint32_t    s_fan_grace_ms;  /* remaining fan spool-up grace          */
 static volatile int32_t hot_mc;
 static volatile int32_t env_mc;
 static volatile int32_t sdm_mc;
@@ -270,24 +284,35 @@ static void tec_set_enabled( uint8_t on )
  * (a stale DAC output while the control loop thinks it moved the TEC voltage
  * would be a silent mis-actuation). Callers that gate TEC enable on this must
  * check the return. */
-static int tec_dac_set( uint8_t duty )
+/* Force a real DAC write even when `duty` equals the cached value: the cache
+ * can diverge from the physical DAC (the boot "unknown" sentinel, a
+ * previously failed write, or the MCP4725 falling back to its EEPROM
+ * power-up value after a brown-out). Callers that must GUARANTEE a bus
+ * transaction (the first-enable anchor before TEC_VEN) go through here.
+ * s_dac_percent advances only on SUCCESS, so a failed forced write leaves
+ * the cache pointing at the last value known to be on the DAC. */
+static int tec_dac_set_forced( uint8_t duty )
 {
     uint16_t mv;
     uint32_t span;
     MCP4725_Status_t st;
 
-    if ( duty == s_dac_percent ) {
-        return MCP4725_OK;
-    }
     span = (uint32_t)( s_p.dac_max_ctrl_mv - s_p.dac_min_ctrl_mv );
     mv = (uint16_t)( (uint32_t)s_p.dac_max_ctrl_mv -
                      ( ( (uint32_t)duty * span ) / 100u ) );
     st = MCP4725_SetVoltage_mV( mv );
-    if ( st != MCP4725_OK ) {
-        return (int)st;   /* failed: keep s_dac_percent at the last-good value */
+    if ( st == MCP4725_OK ) {
+        s_dac_percent = duty;
     }
-    s_dac_percent = duty;
-    return MCP4725_OK;
+    return (int)st;
+}
+
+static int tec_dac_set( uint8_t duty )
+{
+    if ( duty == s_dac_percent ) {
+        return MCP4725_OK;
+    }
+    return tec_dac_set_forced( duty );
 }
 
 /* Heatsink fan is decoupled from the TEC PID output: base airflow while the
@@ -564,8 +589,14 @@ static void TecControl_Cb( qEvent_t e )
             } else {
                 start_duty = (uint16_t)s_p.dac_startup_pct;
             }
-            s_dac_percent = 0u;   /* force a write */
-            dac_st = tec_dac_set( start_duty );   /* settle FB before enabling */
+            /* Forced write: the cache may not reflect the physical DAC here
+             * (an earlier failed park, or an MCP4725 brown-out back to its
+             * EEPROM power-up value), and with DAC_STARTUP_PCT == 0 a cached
+             * equality check would silently skip the anchor entirely -
+             * asserting TEC_VEN against an unverified DAC. Send the anchor
+             * unconditionally; failure latches TEC_ALARM_DAC_FAULT below and
+             * keeps the TEC off. */
+            dac_st = tec_dac_set_forced( start_duty );   /* settle FB before enabling */
             if ( dac_st != MCP4725_OK ) {
                 /* DAC write failed: DO NOT enable the TEC - the FB node was
                  * never settled to the startup anchor, so powering the
@@ -584,6 +615,11 @@ static void TecControl_Cb( qEvent_t e )
          * the PY32. Without this the TEC loop's fan ramps (full speed on
          * overtemp, hot-side following) never reach the fan. */
         Fan_SetEnabled( 1u );
+        /* Fresh fan start: arm the spool-up grace and clear the stall timer
+         * so the first tach windows (which still read ~0 RPM) cannot trip
+         * the sustained-stall cut. */
+        s_fan_grace_ms = TEC_FAN_GRACE_S * 1000u;
+        s_fan_stall_ms = 0u;
     }
 
     /*--- 7c. soft-start ramp (only while driving) ---------------------------*/
@@ -605,12 +641,57 @@ static void TecControl_Cb( qEvent_t e )
         }
     }
 
-    /*--- 8. fan fault detection (only when commanding real airflow) --------*/
+    /*--- 8. fan stall detection (sustained stall cuts the TEC) --------------*/
+    /* The tachometer is the direct, fast indicator of a dead heatsink fan;
+     * waiting for the hot side to climb into foldback/danger (80/90 degC)
+     * wastes that lead time. Rules:
+     *   - judge only when real airflow is commanded: duty > 0 AND at or above
+     *     the NVRAM detection threshold (>= so the base airflow is covered);
+     *   - the alarm bit asserts whenever the condition holds (s_alarm is
+     *     recomputed every cycle, so the host sees a persistent warning);
+     *   - while the condition holds the fan is driven at 100 %: the hot-side
+     *     ramp is meaningless without airflow feedback and max drive gives
+     *     a marginal fan the best chance to start;
+     *   - the TEC is cut only after the stall persists TEC_FAN_STALL_S
+     *     beyond the spool-up grace - one slow tach window or a brief sag
+     *     must not kill the cooling;
+     *   - recovery is automatic: a healthy RPM sample clears the timer and
+     *     the TEC re-enables through the normal deadband/first-enable path. */
     fan_duty = tec_fan_duty_from_hot( hot_mc );
     fan_rpm  = Fan_Get_LastRPM();
-    if ( ( fan_duty > (uint8_t)s_p.fan_fault_min_duty ) &&
+
+    if ( s_fan_grace_ms != 0u ) {
+        /* Unconditional per-cycle countdown - decrementing only inside the
+         * fault branch would grant a fresh grace at every later stall. */
+        s_fan_grace_ms = ( s_fan_grace_ms > (uint32_t)s_p.control_period_ms )
+                         ? ( s_fan_grace_ms - (uint32_t)s_p.control_period_ms )
+                         : 0u;
+    }
+
+    if ( ( fan_duty > 0u ) &&
+         ( fan_duty >= (uint8_t)s_p.fan_fault_min_duty ) &&
          ( fan_rpm < (uint32_t)s_p.fan_min_rpm ) ) {
         s_alarm |= TEC_ALARM_FAN_FAULT;
+        fan_duty = 100u;   /* stalled: hot-follow ramp is meaningless, max drive */
+
+        if ( s_fan_grace_ms == 0u ) {
+            s_fan_stall_ms += (uint32_t)s_p.control_period_ms;
+            if ( s_fan_stall_ms >= ( TEC_FAN_STALL_S * 1000u ) ) {
+                /* Sustained stall: the heatsink has no airflow, so drop the
+                 * TEC now instead of baking it until the hot side trips. */
+                if ( s_tec_enabled != 0u ) {
+                    tec_set_enabled( 0u );
+                    TecPid_Reset( &s_pid, -(float)sdm_mc );
+                    (void)tec_dac_set( 0u );
+                }
+                Fan_SetDutyPercent( 100u );
+                s_fan_stall_ms = 0u;   /* re-trip timer restarts; the TEC
+                                          stays off until the fan recovers */
+                return;
+            }
+        }
+    } else {
+        s_fan_stall_ms = 0u;   /* healthy sample: restart the stall timer */
     }
 
     Fan_SetDutyPercent( fan_duty );        /* heatsink fan: follows hot side */
@@ -665,6 +746,8 @@ void TecControl_Init( void )
 
     s_alarm        = TEC_ALARM_NONE;
     s_tec_enabled  = 0u;
+    s_fan_stall_ms = 0u;
+    s_fan_grace_ms = 0u;     /* armed at the first-enable (fresh fan start) */
     tec_set_enabled( 0u );   /* held off until the SDM845 thermal precheck passes */
 
     /* Park the DAC on the zero-current end of the FB-injection window. In

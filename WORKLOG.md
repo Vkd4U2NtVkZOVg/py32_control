@@ -3196,3 +3196,41 @@ DAC 输出偏高(窗口顶方向)时 VOUT 被压得过低,TPS565201 进入打嗝
 ### 台架注意
 
 修正后动态变化(Ts=0.5):D ×4(0.25→1.0/周期)、I 限幅 100→50 %/s、D-LPF a 0.3→0.2(τ=2 s)、斜坡不变 5 %/周期。建议按 KD=0.125 起步重看阶跃响应。
+
+---
+
+## 2026-10-11 — 三轮审查(GPT #8)核实并修正:风扇失速从"仅报警"升级为"持续失速切断 TEC"
+
+### 核实结论(GPT 属实,缺口更大)
+
+- 原检测只置 `TEC_ALARM_FAN_FAULT`,不动 duty/EN;唯一后手是热端折返(80 °C)/danger(90 °C)——要等热端**热爬升**才反应,浪费了转速信号秒级的先机。
+- 检测用严格 `>`,默认 base=30 与 min=30 相等 → `30 > 30` 假。且 `tec_fan_duty_from_hot` 在热端 ≤ 40 °C 时 duty 恒 = base → **热端 40 °C 以下全部工况失速都不报警**。
+- 转速是 2 s 窗口平均(fan_task),风扇刚启动读 ~0 → 直接升级为"关断"会在使能后误杀;宽限 + 持续判定是前提。`fan_fault_min_duty` 无 sanity(host 可写 0)。
+
+### 实现(宏,不新增 NVRAM 槽)
+
+- `TEC_FAN_GRACE_S = 6`(覆盖 2 s 转速窗 + 启动)、`TEC_FAN_STALL_S = 5`(持续判定)。
+- 检测条件:`fan_duty > 0 && fan_duty >= fan_fault_min_duty && rpm < fan_min_rpm`——`>=` + `>0` 护栏覆盖基础风量,并防止 min_duty 被写 0 后全停风扇陷入关断↔重启锁死。
+- 持续判定按**毫秒累加**(`stall_ms += control_period_ms`),周期独立;健康采样清零。
+- **宽限定时器每周期无条件递减**(只在故障分支递减会给后续每次失速重新发宽限)。
+- 失速持续期风扇强制 100%(无风量反馈时热端斜坡无意义,满驱给恢复最大机会);宽限内只报警不动作。
+- 触发动作与过流同构:撤 EN + `TecPid_Reset` + DAC park + 风扇 100% + return;TEC 已关时只报警不重复复位。恢复:RPM 回升 → 计时清零 → TEC 走正常 deadband/first-enable 路径自动重启。
+- 状态:`s_fan_stall_ms`/`s_fan_grace_ms` 文件级 static;首次使能(`Fan_SetEnabled(1)` 后)武装宽限并清计数。
+
+### 附带收益
+
+失速期间 `s_alarm` 每周期重算持续置位——host 轮询能看到**持续**告警(顺带规避了报警"每周期清零、瞬态可错过"的弱点在该故障上的影响)。
+
+---
+
+## 2026-10-11 — 三轮审查(GPT #6)核实并修正:pct=0 时使能锚点跳过 DAC 写(clobber 撒谎)
+
+### 核实结论(GPT 属实,定级 P2:条件叠加)
+
+`s_dac_percent` 的不变量是"恒等于最后一次成功写入的值 = DAC 物理状态"。而首次使能路径先 `s_dac_percent = 0u; /* force a write */` 再调 `tec_dac_set(start_duty)`——**clobber 本身就在破坏不变量**:宣称 0 却没有物理写入。当 `DAC_STARTUP_PCT = 0` 时 `start_duty=0`,相等短路(0==0)吞掉写入 → EN 拉高时 DAC 从未被验证。发散来源:①此前故障停车写入失败(DAC 仍停在旧 duty 位置,如 ≈3.6 V → 硬启动);②MCP4725 掉电回 EEPROM 上电值。clobber 之后所有 `tec_dac_set(0)` 也持续被缓存跳过。默认 `pct=10` 时 `10 != 0` 仍真写,故默认不触发——但 pct=0 是合法配置(真低压软启动)。
+
+### 修复
+
+- 新增 `tec_dac_set_forced()`:无相等短路,真实写,**仅成功才更新缓存**;`tec_dac_set()` 保留缓存短路并委托之。
+- 首次使能锚点改走 `tec_dac_set_forced(start_duty)`(clobber 行删除):任何 pct(含 0)都保证一次总线事务;失败仍由 `TEC_ALARM_DAC_FAULT` 拦住 EN、TEC 保持关断,下周期重试。
+- `TecControl_Init` 的 0xFF 未知哨兵保留:保证上电 park 真写,host 读 `TECDUTY=255` 可识别"尚未 парков成功"。
