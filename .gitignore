@@ -28,3 +28,13 @@ Drivers/.video_agent/
 # ==== System files ====
 Thumbs.db
 desktop.ini
+
+# ==== EIDE build-error dumps and vendor pack cache ====
+EIDE/err_*.txt
+EIDE/.pack/
+
+# ==== Third-party example bundles / local tool state ====
+example/
+.zcode/
+__pycache__/
+test/*.patch
