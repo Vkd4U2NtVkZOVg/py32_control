@@ -3234,3 +3234,28 @@ DAC 输出偏高(窗口顶方向)时 VOUT 被压得过低,TPS565201 进入打嗝
 - 新增 `tec_dac_set_forced()`:无相等短路,真实写,**仅成功才更新缓存**;`tec_dac_set()` 保留缓存短路并委托之。
 - 首次使能锚点改走 `tec_dac_set_forced(start_duty)`(clobber 行删除):任何 pct(含 0)都保证一次总线事务;失败仍由 `TEC_ALARM_DAC_FAULT` 拦住 EN、TEC 保持关断,下周期重试。
 - `TecControl_Init` 的 0xFF 未知哨兵保留:保证上电 park 真写,host 读 `TECDUTY=255` 可识别"尚未 парков成功"。
+
+---
+
+## 2026-10-11 — 外部审计两条问题核实(A 定性不存在 / B 属实已修)
+
+### A(定性:不存在,不改代码)
+
+审计称"冷侧失效切断路径在 thermal-precheck 门之前命令风扇 100%,与预检(1 s tick)拉锯 0↔100"。本树核实:
+
+- 本树**不存在 cold-fault 切断路径**——冷侧读数无效走 `sdm_mc = target_base` fallback(tec_control.c 一号段),没有独立的"切断 + 风扇 100%"路径;
+- 预检门(L465 `Sdm845_Boot_IsThermalReady`)之前写风扇的只有两条**热侧保护**:热端 NTC 失效(L377)、热端 >90 °C danger(L448),且都写 **100%**;
+- 预检冷却期间预检自己也是写 100%(sdm845_boot.c TIMEOUT 分支,每 poll tick),只在移交时写一次 0 → 两边同值覆写,不存在 0↔100 振荡;
+- 热端过热/热端传感器失效时,即使预检未完成也保持风扇 100% 是期望的保护行为——给这两条路径加 IsThermalReady 门控反而是错的。
+
+结论:审计描述的"cold-fault 路径"在本树不存在(疑似把热侧传感器失效路径误标为冷侧,或审计对象是另一会话里加了冷侧 fail-safe 的未提交版本)。
+
+### B(属实,P2,COLD_SOURCE=1 专属,已修)
+
+- `s_temp_raw` BSS 清零、`s_temp_valid` 仅在 host 写满 TRES_REG_SDM845_TEMP 4 字节后才置 1(tres_i2c_slave.c);
+- `Studio_ADC1_ReadColdMilliCelsius()` 在 COLD_SOURCE=1 时不查 valid 直接返回 0(即 0 °C);有效窗口 [-20,120] °C 包含 0 → 不判故障 → PID 把 0 °C 当真实冷温朝目标满制冷;
+- `TRES_I2C_Slave_GetSdm845TempValid()` 此前无任何调用者;probe.py 支持 `--set COLD_SOURCE 1`,场景真实可触发。
+
+修复:adc.c 冷源路径在 `!GetSdm845TempValid()` 时返回 `INT32_MIN`(与 AHT20 露点"无数据"哨兵同一约定)→ `is_temp_valid()` 拒收 → 走 `sdm_mc = target_base` fallback。`ReadColdMilliCelsius` 全项目仅 tec_control.c 一个调用方,哨兵不泄漏。
+
+**边界(知悉)**:`target_mc = 5000;`(tec_control.c,2cbc2f6 误提交的台架调试行,暂保留)生效期间,fallback 测量 45 °C 对强制目标 5 °C 仍有 40 °C 误差,COLD_SOURCE=1 且 host 未写温度时依旧满制冷;调试行删除后 fail-safe 才完整生效。另外 host 写过一次后 `s_temp_valid` 永久为 1,"过期温度"(host 中途死机)无时间戳机制,不在本修复范围。

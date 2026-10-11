@@ -334,8 +334,15 @@ int32_t Studio_ADC1_ReadHotMilliCelsius(void)
 int32_t Studio_ADC1_ReadColdMilliCelsius(void)
 {
   /* Cold-side temperature source switch (NVRAM NV_TEC_COLD_SOURCE):
-   *   0 = TEC_COLD ADC on PA4 (default), 1 = SDM845 host-reported temp. */
+   *   0 = TEC_COLD ADC on PA4 (default), 1 = SDM845 host-reported temp.
+   * Host has not written a temp yet (s_temp_valid == 0) -> return the
+   * "no data" sentinel (same convention as the AHT20 dew point), so the
+   * tec_control plausibility window rejects it and the loop falls back
+   * to nominal instead of PID-driving full cooling against a stale 0 C. */
   if ( NvParams_Get( NV_TEC_COLD_SOURCE ) != 0u ) {
+    if ( TRES_I2C_Slave_GetSdm845TempValid() == 0u ) {
+      return INT32_MIN;
+    }
     return TRES_I2C_Slave_GetSdm845TempMilliC();
   }
   return NTC3950_AdcToMilliCelsius(Studio_ADC1_ReadColdRaw());
