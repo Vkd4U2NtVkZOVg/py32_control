@@ -423,7 +423,7 @@ Prerequisites:
     raw = t.read_reg(TRES_REG_NV_BASE, TRES_REG_NV_LEN * len(NV_PARAMS))
     for i, (name, unit, scale) in enumerate(NV_PARAMS):
         val = int.from_bytes(raw[i * 4:(i + 1) * 4], "big")
-        disp = (val / scale) if scale < 1 else val
+        disp = (val * scale) if scale < 1 else val
         print("    [{:2}] {:<16} = {:<12} {}".format(
             i, name, int(disp) if scale >= 1 else disp, unit))
     print("    (Q16 slots PID_KP/KI/KD are stored as int(raw)/65536)")
@@ -505,7 +505,7 @@ Prerequisites:
         # display: Q16 slots show the float equivalent alongside the raw code
         if scale < 1:
             print("[5] set {} = {} (Q16 raw {:#x}){}".format(
-                name, value / scale, value, " " + unit))
+                name, value * scale, value, " " + unit))
         else:
             print("[5] set {} = {} ({:#x}){}".format(
                 name, value, value, " " + unit))
@@ -517,7 +517,7 @@ Prerequisites:
                      "(read {} != {})".format(readback, value))
         if scale < 1:
             print("    written to RAM cache, read back {} "
-                  "(= {})".format(readback, readback / scale))
+                  "(= {})".format(readback, readback * scale))
         else:
             print("    written to RAM cache, read back {} ({:#x})".format(
                 readback, readback))
