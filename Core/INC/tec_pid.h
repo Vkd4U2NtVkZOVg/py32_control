@@ -125,6 +125,9 @@ float TecPid_GetOutput(const TecPid_t *pid);
  */
 void TecPid_Reset(TecPid_t *pid, float measure);
 
+/* Reset history and seed actual output for recovery from external limiting. */
+void TecPid_TrackOutput(TecPid_t *pid, float measure, float output);
+
 #ifdef __cplusplus
 }
 #endif

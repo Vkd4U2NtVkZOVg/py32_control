@@ -16,7 +16,7 @@
  *     term only - the former TEC-current term was removed (positive feedback,
  *     loop gain >1 inside the FF band); TEC current is protection-only now
  *   - Fault protection: overtemp full-speed/shutdown, overcurrent cutoff,
- *     fan fault alarm, dew-point hard cut + independent condensation floor,
+ *     fan fault alarm, dew-point minimum-output hold + target floor,
  *     EN anti-hiccup deadband (deep light load drops TEC_VEN)
  *
  * All tunable parameters (PID gains, targets, thresholds, DAC window, fan ramp,
@@ -54,7 +54,7 @@ extern "C" {
 #define TEC_ALARM_FAN_FAULT         0x08  /* fan RPM < min with duty > min     */
 #define TEC_ALARM_THERMAL_WAIT      0x10  /* ambient precheck: TEC held off    */
 #define TEC_ALARM_DEWPOINT          0x20  /* cold side < dew point + margin,
-                                             TEC drive cut to avoid condensation */
+                                             minimum cooling held (not a condensation guarantee) */
 #define TEC_ALARM_DAC_FAULT         0x40  /* MCP4725 write failed: commanded duty
                                              not applied (mis-actuation)        */
 #define TEC_ALARM_SENSOR            0x80  /* temperature/current source invalid:

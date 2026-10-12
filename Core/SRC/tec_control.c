@@ -16,9 +16,9 @@
  *                          flag, and fan ramping; never feeds the PID error
  *   - ambient (env_mc)   : target compensation and common-mode feedforward,
  *                          not the PID measure
- * The dew-point guard is an independent hard protection layer on the cold
- * side (PID and guard share the same controlled variable, so they cannot
- * fight each other).
+ * Dew-point protection raises the target floor and holds minimum cooling
+ * with temperature hysteresis. It does not guarantee condensation avoidance
+ * if the minimum stable converter output still overcools the cold side.
  *
  * Every tunable parameter lives in NVRAM (nv_params.h); TecControl_Init()
  * snapshots the whole table into a local struct, so the control loop never
@@ -44,6 +44,7 @@
 /* the demand hovers around the anti-hiccup deadband.                          */
 /*============================================================================*/
 #define TEC_EN_HYST_PCT     ( 4 )
+#define TEC_DEW_RELEASE_MILLIC ( 1000 )
 
 /* Absolute envelope for every milli-degree parameter: the NTC sensors span
  * -40..125 C, so anything outside [-40, 200] C is corrupt (host miswrite,
@@ -296,6 +297,7 @@ static uint32_t    s_fan_grace_ms;  /* remaining fan spool-up grace          */
 static uint8_t     s_fan_stalled;   /* interlock: only healthy RPM clears it */
 static uint8_t     s_fan_started;   /* do not renew grace on each TEC enable */
 #endif /* TEC_FAN_FAULT_ENABLE */
+static uint8_t     s_dew_hold; /* latched low-output mode, 1 C release band */
 static uint8_t     s_cold_fault;    /* reset PID from real feedback on recovery */
 static volatile int32_t hot_mc;
 static volatile int32_t env_mc;
@@ -421,6 +423,8 @@ static void TecControl_Cb( qEvent_t e )
 #endif
     uint32_t cur_read;
     uint8_t  cur_ok;
+    uint8_t dew_was_hold;
+    int32_t dew_min_duty = s_p.en_off_pct + TEC_EN_HYST_PCT;
     uint8_t drive;                  /* 0 = hold the converter off this cycle */
 
     (void)e;
@@ -536,25 +540,25 @@ static void TecControl_Cb( qEvent_t e )
         s_alarm |= TEC_ALARM_HOT_WARNING;
     }
 
-    /* Condensation protection - the controlled variable IS the cold side
-     * (sdm_mc), and this guard is the independent hard protection layer on
-     * top of the PID. If the cold side reaches (dew point + margin), cut the
-     * TEC drive so it warms back above the condensation floor. */
-    // {
-    //     int32_t dew_mc = AHT20_Get_LastDewPointMilliCelsius();
-
-    //     if ( dew_mc != INT32_MIN ) {
-    //         int32_t floor_mc = dew_mc + s_p.dewpoint_margin_millic;
-
-    //         if ( sdm_mc < floor_mc ) {
-    //             tec_set_enabled( 0u );
-    //             (void)tec_dac_set( 0u );
-    //             Fan_SetDutyPercent( 100u );
-    //             s_alarm |= TEC_ALARM_DEWPOINT;
-    //             return;
-    //         }
-    //     }
-    // }
+    /* Dew protection derates rather than toggling EN. Keep the requested
+     * target above dew + margin, and latch minimum cooling until the cold
+     * side has warmed 1 C above that floor. An unavailable humidity sample
+     * must not silently restore unrestricted cooling. */
+    dew_was_hold = s_dew_hold;
+    {
+        int32_t dew_mc = AHT20_Get_LastDewPointMilliCelsius();
+        if ((dew_mc < TEC_TEMP_ENVELOPE_MIN_MILLIC) ||
+            (dew_mc > TEC_TEMP_ENVELOPE_MAX_MILLIC)) {
+            s_dew_hold = 1u;
+            s_alarm |= TEC_ALARM_SENSOR;
+        } else {
+            int32_t floor_mc = dew_mc + s_p.dewpoint_margin_millic;
+            if (target_mc < floor_mc) target_mc = floor_mc;
+            if (sdm_mc <= floor_mc) s_dew_hold = 1u;
+            else if (sdm_mc >= floor_mc + TEC_DEW_RELEASE_MILLIC) s_dew_hold = 0u;
+        }
+        if (s_dew_hold) s_alarm |= TEC_ALARM_DEWPOINT;
+    }
 
     if ( hot_mc > s_p.hot_danger_millic ) {
         /* danger: cut TEC, hold the DAC at the zero-current end (window top),
@@ -604,9 +608,20 @@ static void TecControl_Cb( qEvent_t e )
      * Fan is a cooling actuator (output increases when temperature is above
      * setpoint), so we invert both setpoint and measure to flip the effective
      * error to (x - SP). */
-    TecPid_SetSetpoint( &s_pid, -(float)target_mc );
-    TecPid_Update( &s_pid, -(float)sdm_mc );
-    pid_out = (int32_t)TecPid_GetOutput( &s_pid );
+    if (s_dew_hold) {
+        /* Freeze accumulation while the actuator is externally constrained. */
+        TecPid_TrackOutput(&s_pid, -(float)sdm_mc, (float)dew_min_duty);
+        pid_out = dew_min_duty;
+    } else {
+        if (dew_was_hold) {
+            float actual = (s_tec_enabled && s_dac_percent <= 100u) ?
+                           (float)s_dac_percent : 0.0f;
+            TecPid_TrackOutput(&s_pid, -(float)sdm_mc, actual);
+        }
+        TecPid_SetSetpoint( &s_pid, -(float)target_mc );
+        TecPid_Update( &s_pid, -(float)sdm_mc );
+        pid_out = (int32_t)TecPid_GetOutput( &s_pid );
+    }
 
     /*--- 5b. COMMON-MODE feedforward (master switch NV_TEC_FF_ENABLE,
      * default OFF) ----------------------------------------------------------*/
@@ -626,7 +641,7 @@ static void TecControl_Cb( qEvent_t e )
      * (limit cycle up to the danger threshold). TEC current now serves
      * protection only (overcurrent cutoff + validity window). */
     feedforward = 0;
-    if ( s_p.ff_enable != 0u ) {
+    if ( (s_p.ff_enable != 0u) && !s_dew_hold ) {
         {
             int32_t gradient_mc = env_mc - target_mc;   /* >0 = hotter ambient  */
             int32_t gradient_c  = gradient_mc / 1000;    /* milli-degC -> degC  */
@@ -717,6 +732,7 @@ static void TecControl_Cb( qEvent_t e )
             } else {
                 start_duty = (uint16_t)s_p.dac_startup_pct;
             }
+            if (s_dew_hold) start_duty = (uint16_t)dew_min_duty;
             /* Forced write: the cache may not reflect the physical DAC here
              * (an earlier failed park, or an MCP4725 brown-out back to its
              * EEPROM power-up value), and with DAC_STARTUP_PCT == 0 a cached
@@ -772,6 +788,7 @@ static void TecControl_Cb( qEvent_t e )
         if ( duty < 0 ) {
             duty = 0;
         }
+        if (s_dew_hold && duty < dew_min_duty) duty = dew_min_duty;
     }
 
     /*--- 8. fan stall detection (sustained stall cuts the TEC) --------------*/
@@ -894,6 +911,7 @@ void TecControl_Init( void )
     s_fan_stalled  = 0u;
     s_fan_started  = 0u;
 #endif
+    s_dew_hold     = 0u;
     s_cold_fault   = 0u;
     tec_set_enabled( 0u );   /* held off until the SDM845 thermal precheck passes */
 

@@ -38,6 +38,26 @@ static void __set_PRIMASK(uint32_t p) { (void)p; }
 
 
 def cases():
+    yield 'pid_output_tracking', COMMON + read('Drivers/Embedded-PID/src/pid.c') + '\n' + read('Core/SRC/tec_pid.c') + '''
+int main(void) {
+    TecPid_t pid;
+    assert(TecPid_Init(&pid, .01f, .001f, 0, 1, -12000,
+                      0, 100, -10, 10, .2f) == 0);
+    TecPid_SetSetpoint(&pid, -5000);
+    for (int i = 0; i < 100; ++i) TecPid_Update(&pid, -45000);
+    assert(TecPid_GetOutput(&pid) == 100);
+    TecPid_TrackOutput(&pid, -12000, 12);
+    assert(TecPid_GetOutput(&pid) == 12 && pid.last_measure == -12000);
+    assert(pid.lpf.lpf.y == 0);
+    TecPid_SetSetpoint(&pid, -12000);
+    TecPid_Update(&pid, -12000);
+    assert(TecPid_GetOutput(&pid) == 12);
+    TecPid_TrackOutput(&pid, -12000, 1000);
+    assert(TecPid_GetOutput(&pid) == 100);
+    TecPid_TrackOutput(&pid, -12000, -1);
+    assert(TecPid_GetOutput(&pid) == 0);
+}
+'''
     src = read('Core/SRC/sdm845_boot.c')
     prefix = COMMON + '#include "sdm845_boot.h"\n' + '''
 typedef int qSM_Status_t;
@@ -301,6 +321,7 @@ def main(argv=None):
             exe = source.with_suffix('.exe')
             source.write_text(code, encoding='utf-8')
             subprocess.run(args.cc + ['-std=c11', '-I', str(ROOT / 'Core/INC'),
+                                     '-I', str(ROOT / 'Drivers/Embedded-PID/src'),
                                      str(source), '-o', str(exe)], check=True)
             subprocess.run([str(exe)], check=True)
             print(name + ': passed', flush=True)

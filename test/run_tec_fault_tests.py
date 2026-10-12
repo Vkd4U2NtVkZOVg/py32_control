@@ -46,7 +46,8 @@ typedef int MCP4725_Status_t;
 static int32_t cold = 45000;
 static uint32_t rpm = 1000;
 static int fail_dac, demand = 50;
-static int32_t hot = 35000;
+static int32_t hot = 35000, dew = 10000;
+static float tracked_output;
 static uint8_t adc_ok = 1, fan_duty_seen, fan_enabled;
 static uint16_t adc_code = 0;
 static uint32_t params[NVM_PARAM_COUNT];
@@ -61,12 +62,14 @@ static uint32_t Fan_Get_LastRPM(void) { ++tach_reads; return rpm; }
 static int32_t Studio_ADC1_ReadHotMilliCelsius(void) { return hot; }
 static int32_t Studio_ADC1_ReadColdMilliCelsius(void) { return cold; }
 static int32_t AHT20_Get_LastTempMilliCelsius(void) { return 25000; }
+static int32_t AHT20_Get_LastDewPointMilliCelsius(void) { return dew; }
 static uint16_t adc1_convert(uint32_t channel, uint8_t *ok)
 { (void)channel; *ok = adc_ok; return adc_code; }
 static int Sdm845_Boot_IsThermalReady(void) { return 1; }
 static int TecPid_Init(TecPid_t *p, float a, float b, float c, float d,
  float e, float f, float g, float h, float i, float j) { return 0; }
 static void TecPid_Reset(TecPid_t *p, float m) { reset_measure = m; }
+static void TecPid_TrackOutput(TecPid_t *p, float m, float out) { reset_measure = m; tracked_output = out; }
 static void TecPid_SetSetpoint(TecPid_t *p, float s) {}
 static void TecPid_Update(TecPid_t *p, float m) {}
 static float TecPid_GetOutput(TecPid_t *p) { return (float)demand; }

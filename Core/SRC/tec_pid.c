@@ -159,3 +159,11 @@ void TecPid_Reset(TecPid_t *pid, float measure)
         (void)epid_util_lpf_init( &pid->lpf.lpf, pid->lpf.lpf.smoothing_factor, 0.0f );
     }
 }
+void TecPid_TrackOutput(TecPid_t *pid, float measure, float output)
+{
+    if (pid == NULL) return;
+    TecPid_Reset(pid, measure);
+    if (output < pid->out_min) output = pid->out_min;
+    if (output > pid->out_max) output = pid->out_max;
+    pid->epid.epid.y_out = output;
+}

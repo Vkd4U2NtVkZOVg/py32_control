@@ -2,6 +2,7 @@
  * Hardware and PID math are stubbed; assertions exercise the real callback. */
 static void reset_fixture(void)
 {
+    dew = 10000;
     cold = 45000; hot = 35000; rpm = 1000; fail_dac = 0; demand = 50;
     adc_ok = 1; adc_code = 0; fan_duty_seen = 0; fan_enabled = 0;
     for (unsigned i = 0; i < NVM_PARAM_COUNT; ++i) params[i] = s_defaults[i];
@@ -115,6 +116,43 @@ int main(int argc, char **argv)
     s_p.hot_fb_gain_q16 = UINT32_MAX; s_p.hot_fb_max_millic = 200000;
     TecControl_Cb(NULL);
     assert(target_mc == 205000);
+    /* Entering the hold from high power preserves EN and ramps down. */
+    reset_fixture(); demand = 80;
+    for (int i = 0; i < 30; ++i) TecControl_Cb(NULL);
+    assert(s_dac_percent == 80);
+    edges = enable_edges; cold = 12000;
+    TecControl_Cb(NULL);
+    assert(s_dew_hold && s_tec_enabled && s_dac_percent == 75);
+    for (int i = 0; i < 30; ++i) TecControl_Cb(NULL);
+    assert(s_dac_percent == 12 && s_tec_enabled && enable_edges == edges);
+    /* Hold above the electrical deadband even if PID asks for zero. */
+    reset_fixture(); cold = 12000; demand = 0;
+    for (int i = 0; i < 20; ++i) TecControl_Cb(NULL);
+    assert(s_dew_hold && s_tec_enabled && s_dac_percent == 12);
+    assert(s_alarm & TEC_ALARM_DEWPOINT);
+    edges = enable_edges;
+    for (int i = 0; i < 100; ++i) {
+        cold = (i % 2) ? 11900 : 12500;
+        TecControl_Cb(NULL);
+        assert(s_dew_hold && s_tec_enabled && s_dac_percent == 12);
+    }
+    assert(enable_edges == edges); /* no enable chatter at the floor */
+    cold = 13000; demand = 80; TecControl_Cb(NULL);
+    assert(!s_dew_hold && s_tec_enabled && tracked_output == 12);
+    assert(s_dac_percent == 17); /* normal ramp bounds recovery */
+    assert(target_mc >= 12000);
+    /* Missing dew sample and additive feedforward cannot bypass derating. */
+    dew = INT32_MIN; s_p.ff_enable = 1; s_p.ff_gain = 100;
+    for (int i = 0; i < 30; ++i) TecControl_Cb(NULL);
+    assert(s_dew_hold && s_tec_enabled && s_dac_percent == 12);
+    assert(s_alarm & TEC_ALARM_SENSOR);
+    /* Other faults still win over the minimum-output request. */
+    hot = 95000; TecControl_Cb(NULL);
+    assert(!s_tec_enabled && (s_alarm & TEC_ALARM_OVERTEMP));
+    hot = 35000; adc_code = 4000; TecControl_Cb(NULL);
+    assert(!s_tec_enabled && (s_alarm & TEC_ALARM_OVERCURRENT));
+    adc_code = 0; fail_dac = 1; TecControl_Cb(NULL);
+    assert(!s_tec_enabled && (s_alarm & TEC_ALARM_DAC_FAULT));
     puts("TEC fault callback tests passed");
     return 0;
 }
