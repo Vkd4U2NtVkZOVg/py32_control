@@ -254,6 +254,14 @@ static qSM_Status_t st_PowerOnWait_Cb( qSM_Handler_t h )
             Pin_RstKey( 0u );             /* release (high) */
             break;
         case SDM845_TIMEOUT:
+            /* Success check first even on the timeout delivery: SOM_BOOTED
+             * is a pin level that can rise in the same gap the timeout
+             * expires - the poll-only check would lose that race and
+             * re-power a just-booted SoC. */
+            if ( LL_GPIO_IsInputPinSet( GPIOB, SOM_BOOTED_Pin ) != 0u ) {
+                h->NextState = &stBootSuccess;
+                return qSM_STATUS_SIGNAL_HANDLED;
+            }
             h->NextState = &stPwrPress;
             return qSM_STATUS_SIGNAL_HANDLED;
         default:
@@ -288,9 +296,11 @@ static qSM_Status_t st_PwrPress_Cb( qSM_Handler_t h )
     return qSM_STATUS_EXIT_SUCCESS;
 }
 
-/* BOOT_CHECK: keys released on entry (fix: no exit-dependency), then on every
- * poll check the detector first (success priority); only the 15 s timeout
- * drives the failure branch (retry or strap-fail). */
+/* BOOT_CHECK: keys released on entry (fix: no exit-dependency), then the
+ * detector is checked on BOTH the poll and the timeout delivery (success
+ * priority - the RX-ISR latch and the timeout can land in the same window);
+ * only an expired timeout without the latch drives the failure branch
+ * (retry or strap-fail). */
 static qSM_Status_t st_BootCheck_Cb( qSM_Handler_t h )
 {
     switch ( h->Signal ) {
@@ -300,6 +310,14 @@ static qSM_Status_t st_BootCheck_Cb( qSM_Handler_t h )
             Pin_RstKey( 0u );             /* release */
             break;
         case SDM845_TIMEOUT:
+            /* Success check first even on the timeout delivery: the stage-1
+             * latch comes from the RX ISR and can fire in the same gap the
+             * timeout expires - a poll-only check would lose that race and
+             * reset a just-booted loader. */
+            if ( Sdm845_Detect_IsStage1Seen() != 0u ) {
+                h->NextState = &stStage2Wait;
+                return qSM_STATUS_SIGNAL_HANDLED;
+            }
             if ( s_boot.retryCount < SDM845_BOOT_MAX_RETRIES ) {
                 h->NextState = &stBootReset;
             } else {
@@ -328,6 +346,12 @@ static qSM_Status_t st_Stage2Wait_Cb( qSM_Handler_t h )
             s_boot.stateId = (uint8_t)SDM845_STAGE2_WAIT;
             break;
         case SDM845_TIMEOUT:
+            /* Success check first even on the timeout delivery (same race as
+             * BOOT_CHECK): the stage2+idle latch can land with it. */
+            if ( Sdm845_Detect_IsBooted() != 0u ) {
+                h->NextState = &stStage3Wait;
+                return qSM_STATUS_SIGNAL_HANDLED;
+            }
             /* Loader up but no login after t_login: kernel/init hang. The
              * hard power-cycle budget is spent in BOOT_CHECK only; once the
              * loader banner matched, no more resets - halt for recovery. */
@@ -363,6 +387,12 @@ static qSM_Status_t st_Stage3Wait_Cb( qSM_Handler_t h )
                                sizeof( SDM845_CMD_ACCOUNT ) - 1u, 0u );
             break;
         case SDM845_TIMEOUT:
+            /* Success check first even on the timeout delivery: the
+             * "Password:" latch can land with it. */
+            if ( Sdm845_Detect_IsStage3Seen() != 0u ) {
+                h->NextState = &stStage4Wait;
+                return qSM_STATUS_SIGNAL_HANDLED;
+            }
             /* No "Password:" prompt: login never accepted the account. The
              * hard power-cycle budget is spent in BOOT_CHECK only - once past
              * the loader banner, timeout halts instead of resetting. */
@@ -393,6 +423,12 @@ static qSM_Status_t st_Stage4Wait_Cb( qSM_Handler_t h )
                                sizeof( SDM845_CMD_PASSWORD ) - 1u, 0u );
             break;
         case SDM845_TIMEOUT:
+            /* Success check first even on the timeout delivery: the
+             * "Welcome to AGNOS" latch can land with it. */
+            if ( Sdm845_Detect_IsStage4Seen() != 0u ) {
+                h->NextState = &stStage5Wait;
+                return qSM_STATUS_SIGNAL_HANDLED;
+            }
             /* No "Welcome to AGNOS": the password was rejected or getty died.
              * Same policy as STAGE2/3: no reset past the loader banner, halt. */
             h->NextState = &stStrapFail;
@@ -420,6 +456,12 @@ static qSM_Status_t st_Stage5Wait_Cb( qSM_Handler_t h )
                                SDM845_T_STAGE5_SETTLE_MS );
             break;
         case SDM845_TIMEOUT:
+            /* Success check first even on the timeout delivery: the amixer
+             * reply latch can land with it. */
+            if ( Sdm845_Detect_IsStage5Seen() != 0u ) {
+                h->NextState = &stBootSuccess;
+                return qSM_STATUS_SIGNAL_HANDLED;
+            }
             /* STAGE5 never matched the amixer reply. By now the SoC is fully
              * past hardware bring-up (loader + kernel + userspace login), so a
              * PMIC hard-cycle (BOOT_RESET) would not fix a userspace-side miss

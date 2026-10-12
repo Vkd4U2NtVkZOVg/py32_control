@@ -22,7 +22,7 @@ import zlib
 
 NVM_MAGIC = 0x4E564433            # 'NVD3', must match nv_params.c
 NVM_VERSION = 7                   # must match nv_params.c
-NVM_PARAM_COUNT = 34              # keep in sync with NV_PARAM_COUNT_MARKER
+NVM_PARAM_COUNT = 36              # keep in sync with NV_PARAM_COUNT_MARKER
 BLOCK_SIZE = 256                  # 2 x 128-byte pages per slot
 SLOTS = 2
 

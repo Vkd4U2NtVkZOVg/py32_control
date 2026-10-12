@@ -58,14 +58,17 @@ extern "C" {
 /* INA181A2 current-sense chain. The electrical constants (shunt resistance,
  * amplifier gain, divider ratio, ADC reference) are calibration data and live
  * in NVRAM (NV_TEC_CURRENT_* slots); the scaling function loads them once at
- * first call. See adc.c Studio_ADC1_Init/ReadCurrentMilliamp. */
+ * first call. Sample validity is reported explicitly: 1 stores the current
+ * in *out_ma; 0 (and *out_ma = 0) means the ADC conversion timed out - 0 mA
+ * itself is a legitimate reading (TEC off), so it cannot double as the
+ * failure marker. See adc.c Studio_ADC1_Init/ReadCurrentMilliamp. */
 
 void Studio_ADC1_Init(void);
 uint16_t Studio_ADC1_ReadChannel(uint32_t channel);
 uint16_t Studio_ADC1_ReadHotRaw(void);
 uint16_t Studio_ADC1_ReadColdRaw(void);
 uint16_t Studio_ADC1_ReadCurrentRaw(void);
-uint32_t Studio_ADC1_ReadCurrentMilliamp(void);
+uint8_t Studio_ADC1_ReadCurrentMilliamp(uint32_t *out_ma);
 int32_t Studio_ADC1_ReadHotMilliCelsius(void);
 int32_t Studio_ADC1_ReadColdMilliCelsius(void);
 

@@ -187,18 +187,47 @@ void Studio_USART2_Init(void)
   *         While USART2_TXSW_LINEMODE is 1 (current partial hardware: PA0 is
   *         still wired in parallel), this also reconfigures PA0 per throw:
   *         TX push-pull + TX_RX for PY32, high-Z input + RX-only for CH343.
-  *         With a true SPDT installed, build with
+  *         Isolation ORDER matters in that mode: handing the line to the
+  *         PY32 weak-holds PA0 first, cuts the CH343, and only then makes
+  *         PA0 push-pull - the old config-first order let a CH343 low bit
+  *         fight the fresh push-pull driver for the window between the two
+  *         steps. With a true SPDT installed, build with
   *         -DUSART2_TXSW_LINEMODE=0 and only PF3 is toggled.
-  * @param  src USART2_TXSRC_CH343 or USART2_TXSRC_PY32. Safe to call repeatedly.
+  * @param  src USART2_TXSRC_CH343 or USART2_TXSRC_PY32. Safe to call
+  *         repeatedly: a same-state call is a true no-op (no GPIO churn).
   * @note   Never switch away from PY32 while USART2_DMA_TxBusy(): the byte in
   *         flight would be corrupted. The boot FSM only switches at state
   *         entries, where no transfer can be pending.
   * @retval None
   */
+static uint8_t s_tx_src = 0xFFu;   /* 0xFF = unset: the first call configures */
+
 void USART2_SetTxSource( uint8_t src )
 {
 #if USART2_TXSW_LINEMODE
   LL_GPIO_InitTypeDef GPIO_InitStruct;
+
+  if ( src == s_tx_src ) {
+    return;   /* repeated same-state call: no GPIO churn, no glitch window */
+  }
+
+  if ( src == USART2_TXSRC_PY32 ) {
+    /* Isolation order on the parallel hardware (only PF3 can disconnect the
+     * CH343): weak-hold PA0 (high-Z + pull-up, no conflict with either
+     * driver), THEN cut the CH343, and only then let the final config below
+     * make PA0 a push-pull driver. Between the cut and the drive the pull-up
+     * holds the line idle-high, so the SoC RX never floats. Handing the line
+     * back keeps the reverse order below: PA0 to high-Z before the CH343
+     * reconnects. */
+    GPIO_InitStruct.Pin        = LL_GPIO_PIN_0;
+    GPIO_InitStruct.Mode       = LL_GPIO_MODE_INPUT;
+    GPIO_InitStruct.Pull       = LL_GPIO_PULL_UP;
+    GPIO_InitStruct.Speed      = LL_GPIO_SPEED_FREQ_VERY_HIGH;
+    GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
+    GPIO_InitStruct.Alternate  = LL_GPIO_AF9_USART2;
+    LL_GPIO_Init( GPIOA, &GPIO_InitStruct );
+    LL_GPIO_ResetOutputPin( UART2_TX_SW_Port, UART2_TX_SW );   /* CH343 off */
+  }
 
   /* PA0 only; PA1 stays muxed as USART2_RX in both states. */
   LL_GPIO_StructInit( &GPIO_InitStruct );
@@ -216,13 +245,19 @@ void USART2_SetTxSource( uint8_t src )
   LL_USART_SetTransferDirection( USART2,
       ( src == USART2_TXSRC_PY32 ) ? LL_USART_DIRECTION_TX_RX
                                    : LL_USART_DIRECTION_RX );
-#endif
 
-  /* PF3: isolate / re-connect the CH343 TX driver on the shared bus. */
+  if ( src != USART2_TXSRC_PY32 ) {
+    LL_GPIO_SetOutputPin( UART2_TX_SW_Port, UART2_TX_SW );  /* CH343 on */
+  }
+#else
+  /* True SPDT: the throw itself is exclusive, so the order does not matter. */
   if ( src == USART2_TXSRC_PY32 ) {
     LL_GPIO_ResetOutputPin( UART2_TX_SW_Port, UART2_TX_SW );
   } else {
     LL_GPIO_SetOutputPin( UART2_TX_SW_Port, UART2_TX_SW );
   }
+#endif
+
+  s_tx_src = src;
 }
 /* USER CODE END 1 */

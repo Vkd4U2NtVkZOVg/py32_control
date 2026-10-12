@@ -21,8 +21,10 @@ static void reset_fixture(void)
 }
 int main(void)
 {
+    uint32_t ma = 0;
     reset_fixture();
-    assert(Studio_ADC1_ReadCurrentMilliamp() == 3516);
+    assert(Studio_ADC1_ReadCurrentMilliamp(&ma) == 1);
+    assert(ma == 3516);   /* ADC=4000, NVRAM divider 1:2 (div-calibration fix) */
     reset_fixture();
     rpm = 0;
     for (int i = 0; i < 24; ++i) TecControl_Cb(NULL);

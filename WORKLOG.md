@@ -1,17 +1,5 @@
 # 工作日志
 
-## 2026-10-11：TEC 故障联锁修复（codex/tec-fault-interlocks）
-
-基于 af0ce6833fe8224659bfad15c61e02d23ed9ffb5。用户确认 target_mc=5000 和露点保护注释用于调试，本次保持原样。分压还原公式 div_den/div_num 正确，未额外添加 ×2。
-
-- 电流标定：div_num/div_den 的未加载哨兵改为 0，使首次采样加载 NVRAM 中 1/2 的分压配置；保留原有零值回退和整数换算。默认参数、ADC=4000 时应得到 3516mA。
-- 风扇失速：持续失速建立独立联锁；在任何重新使能之前检查转速，低于阈值时保持 TEC 禁能并请求风扇全速。主机清报警不能解除联锁。转速恢复后重置 PID，再走强制 DAC 锚点启动。启动宽限在首次 TEC 接管风扇时只发放一次，避免死区或故障反复启停刷新宽限。
-- 冷端测量：无效温度立即禁用 TEC、尝试停车 DAC、接管风扇并全速，报告 SENSOR；不再替换为正常目标温度。恢复有效测量时以真实温度重建 PID 历史。
-- DAC 运行故障：写失败立即拉低 TEC_VEN、重置 PID、风扇全速并报告 DAC_FAULT；后续恢复必须经过已有强制锚点写入，持续总线失败不能再次开启 TEC。
-- 回归测试：新增 test/run_tec_fault_tests.py 与 tec_fault_harness.c，使用实际 C 回调和电流换算函数，模拟外设及 PID 输出，覆盖持续失速、清报警不能绕过联锁、转速恢复、死区循环、冷端开短路及恢复、DAC 失败及恢复。控制回调内电流输入在测试中置零，以独立验证联锁；电流换算单独断言。
-- 验证：已有 Xtensa GCC 对该 C 测试单元的语法检查通过，git diff --check 通过。当前环境无可运行的主机 C 编译器或完整 ARM 构建环境，测试断言尚未执行，未完成 ARM 链接或上板验证。具备主机 GCC 后运行 python test/run_tec_fault_tests.py --cc gcc；上板需补充风扇拔除、NTC 开短路和 I2C 写失败注入。
-
-
 > 本文件流式记录本项目（PY32F030 固件 + QuarkTS）的核心开发过程、实现方式与核心流程图。
 > 新章节追加在文件末尾（不修改已记录的历史）。
 
@@ -3247,3 +3235,202 @@ DAC 输出偏高(窗口顶方向)时 VOUT 被压得过低,TPS565201 进入打嗝
 - 首次使能锚点改走 `tec_dac_set_forced(start_duty)`(clobber 行删除):任何 pct(含 0)都保证一次总线事务;失败仍由 `TEC_ALARM_DAC_FAULT` 拦住 EN、TEC 保持关断,下周期重试。
 - `TecControl_Init` 的 0xFF 未知哨兵保留:保证上电 park 真写,host 读 `TECDUTY=255` 可识别"尚未 парков成功"。
 
+---
+
+## 2026-10-11 — 外部审计两条问题核实(A 定性不存在 / B 属实已修)
+
+### A(定性:不存在,不改代码)
+
+审计称"冷侧失效切断路径在 thermal-precheck 门之前命令风扇 100%,与预检(1 s tick)拉锯 0↔100"。本树核实:
+
+- 本树**不存在 cold-fault 切断路径**——冷侧读数无效走 `sdm_mc = target_base` fallback(tec_control.c 一号段),没有独立的"切断 + 风扇 100%"路径;
+- 预检门(L465 `Sdm845_Boot_IsThermalReady`)之前写风扇的只有两条**热侧保护**:热端 NTC 失效(L377)、热端 >90 °C danger(L448),且都写 **100%**;
+- 预检冷却期间预检自己也是写 100%(sdm845_boot.c TIMEOUT 分支,每 poll tick),只在移交时写一次 0 → 两边同值覆写,不存在 0↔100 振荡;
+- 热端过热/热端传感器失效时,即使预检未完成也保持风扇 100% 是期望的保护行为——给这两条路径加 IsThermalReady 门控反而是错的。
+
+结论:审计描述的"cold-fault 路径"在本树不存在(疑似把热侧传感器失效路径误标为冷侧,或审计对象是另一会话里加了冷侧 fail-safe 的未提交版本)。
+
+### B(属实,P2,COLD_SOURCE=1 专属,已修)
+
+- `s_temp_raw` BSS 清零、`s_temp_valid` 仅在 host 写满 TRES_REG_SDM845_TEMP 4 字节后才置 1(tres_i2c_slave.c);
+- `Studio_ADC1_ReadColdMilliCelsius()` 在 COLD_SOURCE=1 时不查 valid 直接返回 0(即 0 °C);有效窗口 [-20,120] °C 包含 0 → 不判故障 → PID 把 0 °C 当真实冷温朝目标满制冷;
+- `TRES_I2C_Slave_GetSdm845TempValid()` 此前无任何调用者;probe.py 支持 `--set COLD_SOURCE 1`,场景真实可触发。
+
+修复:adc.c 冷源路径在 `!GetSdm845TempValid()` 时返回 `INT32_MIN`(与 AHT20 露点"无数据"哨兵同一约定)→ `is_temp_valid()` 拒收 → 走 `sdm_mc = target_base` fallback。`ReadColdMilliCelsius` 全项目仅 tec_control.c 一个调用方,哨兵不泄漏。
+
+**边界(知悉)**:`target_mc = 5000;`(tec_control.c,2cbc2f6 误提交的台架调试行,暂保留)生效期间,fallback 测量 45 °C 对强制目标 5 °C 仍有 40 °C 误差,COLD_SOURCE=1 且 host 未写温度时依旧满制冷;调试行删除后 fail-safe 才完整生效。另外 host 写过一次后 `s_temp_valid` 永久为 1,"过期温度"(host 中途死机)无时间戳机制,不在本修复范围。
+
+---
+
+## 2026-10-11：TEC 故障联锁修复（codex/tec-fault-interlocks）
+
+基于 af0ce6833fe8224659bfad15c61e02d23ed9ffb5。用户确认 target_mc=5000 和露点保护注释用于调试，本次保持原样。分压还原公式 div_den/div_num 正确，未额外添加 ×2。
+
+- 电流标定：div_num/div_den 的未加载哨兵改为 0，使首次采样加载 NVRAM 中 1/2 的分压配置；保留原有零值回退和整数换算。默认参数、ADC=4000 时应得到 3516mA。
+- 风扇失速：持续失速建立独立联锁；在任何重新使能之前检查转速，低于阈值时保持 TEC 禁能并请求风扇全速。主机清报警不能解除联锁。转速恢复后重置 PID，再走强制 DAC 锚点启动。启动宽限在首次 TEC 接管风扇时只发放一次，避免死区或故障反复启停刷新宽限。
+- 冷端测量：无效温度立即禁用 TEC、尝试停车 DAC、接管风扇并全速，报告 SENSOR；不再替换为正常目标温度。恢复有效测量时以真实温度重建 PID 历史。
+- DAC 运行故障：写失败立即拉低 TEC_VEN、重置 PID、风扇全速并报告 DAC_FAULT；后续恢复必须经过已有强制锚点写入，持续总线失败不能再次开启 TEC。
+- 回归测试：新增 test/run_tec_fault_tests.py 与 tec_fault_harness.c，使用实际 C 回调和电流换算函数，模拟外设及 PID 输出，覆盖持续失速、清报警不能绕过联锁、转速恢复、死区循环、冷端开短路及恢复、DAC 失败及恢复。控制回调内电流输入在测试中置零，以独立验证联锁；电流换算单独断言。
+- 验证：已有 Xtensa GCC 对该 C 测试单元的语法检查通过，git diff --check 通过。当前环境无可运行的主机 C 编译器或完整 ARM 构建环境，测试断言尚未执行，未完成 ARM 链接或上板验证。具备主机 GCC 后运行 python test/run_tec_fault_tests.py --cc gcc；上板需补充风扇拔除、NTC 开短路和 I2C 写失败注入。
+
+---
+
+## 2026-10-12 — 外部审计问题#1核实并修复:probe --params 永久覆盖其他自定义标定
+
+### 核实(属实,P1 数据破坏)
+
+`SAVE_PARAMS`/`DEFAULT_PARAMS` 在固件里作用于**全部 36 槽**(tres_cmd.c:SAVE -> NvParams_Save;DEFAULT -> NvParams_RestoreDefaults 只重载 RAM 不写 FLASH);而 --params 只备份/还原探测槽 25。DEFAULT 之后 RAM 全表=固件默认值,最后的 SAVE_PARAMS 把其余 35 槽的默认值整体刷进 FLASH——电流标定/PID/DAC 控制窗口等全部**永久丢失**;中途 FAIL 退出更无任何恢复。附带确认:固件 NVM_PARAM_COUNT 实际=36(FF_ENABLE/EN_OFF_PCT 加入后,窗口 0x40..0xCF),probe 的 NV_PARAMS 列表与固件逐名对齐,但其文档串(34 槽/0x40..0xC7/--set "0..27"/--auth 0xB0/0xC0)与探测槽注释(slot 25=SOC_TIGHTEN_DELTA,非注释写的 SOC_TIGHTEN_TEMP)全部过期。顺带发现 Q16 槽显示方向反了(disp=val/scale=raw*65536)。
+
+### 修复(4 提交)
+
+- `0100d0b` fix(probe): 全表备份(36 槽) -> try 内 SAVE/DEFAULT 验证 -> finally 全表还原+单次 SAVE(FAIL 退出/Ctrl-C 也执行) -> 结束后逐槽比对 backup,全部一致才报 OK;文档串同步 36 槽/0xCF/真实槽名/auth 地址。
+- `6c70119` fix(probe): Q16 槽显示改 val*scale(2.0 显示 2.0,而非 8.6e9)。
+- test(nvram): nv_dualslot_sim.py NVM_PARAM_COUNT 34 -> 36 同步,232 断言全过。
+- docs(worklog): 本条。
+
+### 验收(离线,假 SMBus 从机,跑真实 main())
+
+模拟 36 槽寄存器文件 + RAM/FLASH 双镜像(预置"已标定"值),三场景:
+1. 标定过的设备跑完全程:exit 0 且 FLASH **逐槽等于测试前镜像**、RAM 同步还原;
+2. DEFAULT 故障(no-op):exit 1 且 FLASH 仍被 finally 全表还原;
+3. DEFAULT 处注入 KeyboardInterrupt:异常正常传播且 FLASH 仍全表还原。
+7/7 断言通过。
+
+---
+
+## 2026-10-12 — 外部审计问题#3核实并修复:电流 ADC 超时被当作 0 mA + current_valid_max_ma 从未使用
+
+### 核实(属实,P2 保护盲区)
+
+`Studio_ADC1_ReadChannel` EOC 超时统一返回 0(原注释只考虑了 NTC 路径:0 码 -> 越窗温度 -> fail-safe)。电流路径把它转成 **0 mA**——但 TEC_VEN=0 时 INA 输出本来就是 ~0 mA,**真 0 与超时 0 在毫安层不可区分**;两温度正常而电流转换超时的周期里,过流检查(>3000 mA)不触发、无任何报警,过流保护全盲,控制器继续输出。另外 `NV_TEC_CURRENT_VALID_MAX_MA`(默认 5000)在 tec_params_load 里加载+校验,但控制回调从未使用。
+
+### 修复
+
+- **adc.c**:抽出 `static adc1_convert(channel, &ok)` 检查版转换(超时 `*ok=0`);`Studio_ADC1_ReadChannel` 保持原语义(0=超时,NTC 调用方靠越窗 fail-safe)并注明"电流路径不得依赖此约定";`Studio_ADC1_ReadCurrentMilliamp` 签名改 `uint8_t fn(uint32_t *out_ma)`——1=有效样本,0=超时(*out_ma=0),彻底区分真 0 mA 与失效样本。
+- **tec_control.c**:新增 1c 段(与 1b 热端传感器失效同构):`cur_ok==0` 或 `cur_ma > current_valid_max_ma` -> 撤 EN + DAC park + `TEC_ALARM_SENSOR` + return;恢复走正常 first-enable 路径,有效样本返回后自动重启。
+- **tec_params_load**:新增关系防护 `valid_max >= danger`(违反回退默认),保证真实过流先命中 OVERCURRENT 路径(带 PID 复位)而不是被标成传感器故障。
+
+### 语义说明
+
+越窗(>5000 mA)与超时同走 SENSOR 截断:窗口的意义就是"读数本身不可信"(无法区分真 6 A 与采样链故障),动作一致(切 TEC),仅告警位不同。此路径不强制风扇 100%:热端输入仍可信,风扇继续跟随热端(与 thermal-wait 路径同样不碰风扇)。
+
+编译 0 项目警告。
+
+---
+
+## 2026-10-12 — 外部审计问题#18核实并修复:NvParams_Save 部分错误返回路径漏 LL_FLASH_Lock
+
+### 核实(属实,且不止两处)
+
+`NvParams_Save()` 在 L348 解锁 FLASH 后,**4 个**错误路径只关操作模式+恢复中断就返回,漏了重新上锁:
+
+- 擦除 BUSY 超时(原 L372-378)
+- 擦除 WRPERR(原 L379-383)
+- 编程 BUSY 超时(原 L403-409)
+- 编程 WRPERR(原 L410-414)
+
+而预检 BUSY 超时(两处,尚未启动操作)和成功路径都会 `LL_FLASH_Lock`。审计引用的 nv_params.c:372/403 是其中两个 BUSY 超时点;两个 WRPERR 路径同样漏锁。结果:一次保存故障后 FLASH 接口保持解锁,异常清理不一致(下一次 Save 的解锁检查虽能通过,但解锁窗口内 FLASH 对任何误写/误擦都是敞开的)。
+
+### 修复
+
+4 个路径在 `DisablePageErase/DisablePageProgram` 之后、`__set_PRIMASK` 之前补 `LL_FLASH_Lock( FLASH )`,与成功路径的清理顺序一致。其余两处无锁返回确认无需修改:解锁校验失败路径(LOCK 仍置位,从未解锁)和读回校验失败路径(发生在成功路径上锁之后)。
+
+grep 复核:`NvParams_Save` 共 9 个返回点,现在 8 个带锁返回 + 1 个"从未解锁"返回。编译 0 项目警告。
+
+---
+
+## 2026-10-12 — 外部审计问题#19核实并修复:传感器故障期间滞留旧报警位
+
+### 核实(属实,接口语义不一致)
+
+`s_alarm` 的清零点在第 4 段(`s_alarm = TEC_ALARM_NONE`),而 1b(热端传感器失效)和 1c(电流采样失效/越窗)两个 fail-safe 提前返回路径在此之前就 `|= TEC_ALARM_SENSOR` 并 return——上一周期的 OVERCURRENT/DAC_FAULT/OVERTEMP 等位因此滞留,即使对应条件早已消失,直到某周期完整跑过第 4 段才被清掉。不破坏关断动作,但与头文件"Bitmask of active alarms(当前活动报警)"语义不符,主机诊断会被误导。fan-stall 注释里"每周期重算、条件持续才持续置位"的设计意图也被这两个路径破坏。
+
+### 修复
+
+清零点移到 `TecControl_Cb` 最顶部(`(void)e` 之后、任何读取与提前返回之前),删除第 4 段的重复清零。效果:所有路径(含两个早期 fail-safe)都基于"本周期条件"重建报警;回调内无任何读取旧值的位置,行为安全。`TecControl_ClearAlarm()` 语义不变(主机清除后,下一周期照常重算)。
+
+编译 0 项目警告。
+
+---
+
+## 2026-10-12 — 外部审计问题#6核实并修复:四字节窗口写入无完整事务检查,可拼接参数/温度
+
+### 核实(属实,可构造多种拼接)
+
+提交条件只看"写到了窗口第 4 字节的偏移",不校验前 3 字节是否属于同一完整写入:
+
+- **温度跨事务拼接**:写 3 字节到 0x20(STOP)后,再单写 1 字节到 0x23 -> `off==3` 触发发布,`s_tempBuf[0..2]` 是上一事务残留,且 `s_temp_valid=1`。
+- **NVRAM 跨槽拼接**:`s_nvBuf` 为全部 36 槽**共用**——先写槽 A 前 3 字节,再单写槽 B 第 4 字节 -> `NvParams_Set(槽B, 槽A残留|新字节)`,是跨槽污染而不只是旧值。
+- **OVR 丢字节**:`s_regPtr` 只在收到字节时前进,中段丢字节使后续字节**前移落位**,单事务内也能凑出 `off==3` 提交错位数据;BERR/ARLO 中断后的残留同样无约束。
+- 既有部分写测试(getset [3])只覆盖"从首地址写 2 字节",上述场景全部漏测。
+
+### 修复(tres_i2c_slave.c)
+
+新增本事务游程跟踪:`s_wr_cnt`(本事务已收到的窗口内字节数,寄存器指针字节处清零——每个写事务必经)、`s_wr_first`(游程在窗口内的起始偏移)、`s_wr_ovr`(本事务发生过 OVR,错误分支置位)。提交条件:
+
+- 温度窗口:`off==3 && s_wr_first==0 && !ovr`(落位偏移必然连续——指针每收 1 字节进 1,基址+末字节即全部 4 字节落地);
+- NVRAM 槽:`byte==3 && first 对齐槽边界 && (off-first)>=3 && !ovr`(多槽突发写每个槽照常提交,中槽起始永不提交)。
+
+语义变化(头文件已同步):窗口值必须在**单个事务内**从基址完整写入(4 字节块写);"两次 2 字节拆分写"不再发布——这是接受的取舍,拼接危害远大于拆分写便利,主机工具均为 4 字节块写。AES 挑战窗口不加门:响应由 s_chalBuf 实时计算、无提交步,挑战本身非机密,拼接只会让认证失败(fail-safe),已加注释说明。
+
+### 验证
+
+- 离线模型(ISR RX 路径忠实移植)17/17:完整写发布、2 字节/末字节拼接/跨事务 3+1/中窗口起始/OVR 错位/OVR+超长/忽略区突发/2+2 拆分全部不发布,多槽突发正常提交;
+- getset 自测 [3] 扩展为 4 个拼接场景(2 字节、末字节单写、跨事务 3+1、中窗口起始),全部断言值保持;
+- 编译 0 项目警告。
+
+---
+
+## 2026-10-12 — 外部审计问题#5核实并修复:参数校验不完整,异常配置可旁路保护/整数溢出
+
+### 核实(属实,四个具体缺口)
+
+- **FAN_FAULT_MIN_DUTY=101 可被接受**:命令 duty 永远 <=100,失速检测条件 `duty >= min_duty` 永不成立 -> 风扇失速保护静默失效(该参数此前完全没有边界检查)。
+- **FAN_TEMP_BASE=0x80000000**:通过 `base >= full` 大小关系校验(INT32_MIN < 60000),但风扇公式 `(hot_mc - base) * (100 - duty_base)` 的有符号减法溢出 int32;`full - base` 分母同样溢出。
+- **控制周期只有下限**(`<1 -> 1000`),无上限 -> 保护和过流/失速检查间隔可被拉到任意长。
+- **电流标定只拒零**:极端非零值可溢出中间乘法(div_den 接近 2^32 时 `adc_uV * div_den` 超 uint64;shunt*gain 两个 2^32-1 相乘溢出分母)。
+
+### 修复
+
+- **tec_control.c**:新增毫度参数绝对包络 `[-40000, 200000]`(NTC 量程 -40..125 C,包络外即损坏数据),`temp_param_or_default()` 逐参数回退默认,**在关系校验之前执行**,使后续所有关系比较只见有界值;且包络内任意两值之差 <=240 K,风扇公式/折返的所有 int32/int64 乘法远离溢出(离线验证:风扇最坏积 2.4e7 « 2^31,折返 int64 积 1.03e15 « 2^63,再被 fb_max<=200000 钳制)。涵盖 target/overtemp/danger/fan_base/full/env_comp/soc_temp/valid_min/valid_max 九个参数;soc_tighten_delta、dewpoint_margin、hot_fb_max 增加上限。`FAN_FAULT_MIN_DUTY` 增加 [0,100] 边界(0 保持合法:duty>0 护栏防锁死);`CONTROL_PERIOD_MS` 增加 [1,5000] 边界(该任务同时驱动过温/过流/失速保护,周期即保护反应时延)。
+- **adc.c**:电流标定从"只拒零"改为逐参数包络 [shunt 100..1e6 uOhm, gain 1..1000, divider 1..1e6, Vref 1..5000 mV],越界重取、仍越界回退默认;包络内最坏乘积 5e15 < 2^53,uint64 全程安全(离线验证),荒谬结果再由 current_valid_max_ma 合理性窗口(问题#3 已接入)截断。
+
+触发条件保持审计描述:主机误写/异常配置/损坏数据;默认参数全部位于新包络内(逐项核对)。
+
+---
+
+## 2026-10-12 — 外部审计问题#11核实并修复:切 PY32 发送时隔离顺序短暂并联两个驱动
+
+### 核实(属实,仅并联硬件模式)
+
+`USART2_TXSW_LINEMODE=1`(当前硬件:PA0 仍与总线并联,只有 PF3 能隔离 CH343)下,`USART2_SetTxSource(PY32)` 原顺序:先把 PA0 配成推挽 AF9(**开始驱动总线**)-> 方向 TX_RX -> PF3 断 CH343。两步之间若 CH343 正在输出低电平,推挽对推挽直接冲突(串口毛刺窗口)。反方向(切回 CH343)顺序本就正确:PA0 先高阻再重连。真实独占 SPDT(LINEMODE=0)无此条件。
+
+### 修复(usart.c)
+
+- **PY32 方向改为三步**:PA0 先配高阻+弱上拉(对两侧驱动都无冲突)-> PF3 断 CH343 -> 再配推挽发送。断开到驱动的窗口内线上由 PA0 弱上拉保持空闲高,SoC RX 不悬浮、无任何驱动冲突。
+- **切回 CH343 方向保持原序**(高阻先行,再重连),逻辑挪进 `#if` 分支按方向分置;LINEMODE=0 分支仅翻 PF3(独占开关,顺序无关)。
+- 新增 `s_tx_src` 同态早退(0xFF 哨兵保证 init 首次调用照常配置):重复同态调用从"重写一遍 GPIO"变为真 no-op,避免预配置步骤在同态重入时制造无谓的高阻窗口。调用方核查(init + boot FSM 状态入口)无依赖冗余重配的场景。
+
+编译主配置 0 警告;`-DUSART2_TXSW_LINEMODE=0` 变体单独编译通过(仅 vendor 头噪声)。
+
+---
+
+## 2026-10-12 — 外部审计问题#10核实并修复:启动成功与超时同时到达时实际优先判失败
+
+### 核实(属实,可从分支直接确定)
+
+`SDM845_TIMEOUT = QSM_SIGNAL_TIMEOUT(0)` 是 QuarkTS 每态单次超时信号;而各成功条件(stage1/booted/stage3/4/5 锁存、SOM_BOOTED 引脚电平)在 USART RX ISR / GPIO 里**独立**于 FSM tick 演变。两者落进同一调度间隙时,下一次执行恰好投递 TIMEOUT 信号——超时分支不复查成功条件,直接进 BOOT_RESET/STRAP_FAIL:
+
+- st_PowerOnWait 超时分支不复查 SOM_BOOTED -> 会给刚启动的 SoC 重新上电;
+- st_BootCheck 不复查 IsStage1Seen -> 复位刚出 loader 的系统;
+- STAGE2/3/4/5 不复查各自锁存 -> STRAP_FAIL 停机,尽管成功条件已满足。
+
+而各状态注释宣称"成功优先(success priority)"——该语义只在非 TIMEOUT 信号上实现,竞态窗口真实性取决于调度与事件顺序,但分支结构上必然存在。
+
+### 修复(sdm845_boot.c)
+
+6 个等待态(POWER_ON_WAIT/BOOT_CHECK/STAGE2/3/4/5)的 SDM845_TIMEOUT 分支**先复查各自的成功条件**,未满足才走失败路径——成功优先从"仅 poll 路径"扩展为两种投递一致。失败策略(BOOT_CHECK 重试/其余 STRAP_FAIL 停机)不变,仅多一道成功复查;BOOT_CHECK 头注释同步更新。
+
+### 验证
+
+编译 0 项目警告;`test/replay_boot_fsm.py` 三场景(A 故障复现/B 修复/C 诚实超时)重放结果不变——该离线模型本就按"先查锁存再判超时"的语义书写,与修复后固件一致。

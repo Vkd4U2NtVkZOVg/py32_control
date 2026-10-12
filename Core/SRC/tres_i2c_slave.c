@@ -33,6 +33,18 @@ static uint8_t  s_tx;                /* 1: serving a master read (TRA)       */
 static uint8_t  s_cmdIdx;
 static uint8_t  s_cmdBuf[ CMD_WRITE_LEN ];
 
+/* Complete-transaction tracking for the multi-byte windows: s_wr_cnt counts
+ * bytes received in the CURRENT write transaction (reset whenever the
+ * register pointer is written - every write transaction starts with it),
+ * s_wr_first records where the current in-window run started, s_wr_ovr
+ * flags a lost byte (OVR shifts the byte-to-offset mapping). A window
+ * commits only when the transaction itself delivered its whole content
+ * contiguously: staging leftovers from an earlier transaction - or a byte
+ * shifted by an overrun - must never be published. */
+static uint8_t  s_wr_cnt;
+static uint8_t  s_wr_first;
+static uint8_t  s_wr_ovr;
+
 /* SDM845 temperature write window (TRES_REG_SDM845_TEMP, 4 bytes, big endian).
  * Bytes accumulate in s_tempBuf; the 4th byte publishes the assembled value
  * into s_temp_raw -- an aligned 32-bit store, atomic on Cortex-M0+, so the
@@ -125,6 +137,9 @@ void TRES_I2C_Slave_Init(void)
     s_expectPtr = 1u;
     s_tx        = 0u;
     s_cmdIdx    = 0u;
+    s_wr_cnt    = 0u;
+    s_wr_first  = 0u;
+    s_wr_ovr    = 0u;
 
     NVIC_SetPriority( I2C1_IRQn, 2u );
     NVIC_EnableIRQ( I2C1_IRQn );
@@ -159,7 +174,13 @@ void I2C1_IRQHandler(void)
     /*--- errors -------------------------------------------------------------*/
     if ( ( sr1 & I2C_SR1_BERR ) != 0u ) { LL_I2C_ClearFlag_BERR( I2C1 ); s_expectPtr = 1u; }
     if ( ( sr1 & I2C_SR1_ARLO ) != 0u ) { LL_I2C_ClearFlag_ARLO( I2C1 ); s_expectPtr = 1u; }
-    if ( ( sr1 & I2C_SR1_OVR )  != 0u ) { LL_I2C_ClearFlag_OVR( I2C1 ); }
+    if ( ( sr1 & I2C_SR1_OVR )  != 0u ) {
+        /* A lost byte shifts every later byte one offset earlier, so the
+         * transaction can no longer be a trustworthy complete window
+         * write: no window may commit in it. */
+        LL_I2C_ClearFlag_OVR( I2C1 );
+        s_wr_ovr = 1u;
+    }
 
     /*--- address match: SR1->SR2 read sequence clears ADDR ------------------*/
     if ( ( sr1 & I2C_SR1_ADDR ) != 0u ) {
@@ -186,6 +207,8 @@ void I2C1_IRQHandler(void)
                 s_regPtr    = b;
                 s_expectPtr = 0u;
                 s_cmdIdx    = 0u;
+                s_wr_cnt    = 0u;   /* every write transaction starts here */
+                s_wr_ovr    = 0u;
             } else if ( s_regPtr == TRES_REG_CMD ) {
                 if ( s_cmdIdx < CMD_WRITE_LEN ) {
                     s_cmdBuf[ s_cmdIdx ] = b;
@@ -202,12 +225,24 @@ void I2C1_IRQHandler(void)
             } else if ( ( s_regPtr >= TRES_REG_SDM845_TEMP ) &&
                         ( s_regPtr < ( TRES_REG_SDM845_TEMP +
                                        TRES_REG_SDM845_TEMP_LEN ) ) ) {
-                /* SDM845 temperature window: 4 bytes MSB first. Bytes land in
-                 * the staging buffer; the 4th publishes atomically.            */
+                /* SDM845 temperature window: 4 bytes MSB first. Publishes
+                 * only when ONE transaction delivered the whole window
+                 * (run started at the window base, no byte lost to OVR) -
+                 * landed offsets are contiguous because the pointer
+                 * advances once per received byte, so base + last byte
+                 * implies all four landed. A transaction starting
+                 * mid-window must not publish staging leftovers from an
+                 * earlier one mixed with its own byte.                  */
                 uint32_t off = (uint32_t)( s_regPtr - TRES_REG_SDM845_TEMP );
 
+                if ( s_wr_cnt == 0u ) {
+                    s_wr_first = (uint8_t)off;
+                }
+                s_wr_cnt++;
                 s_tempBuf[ off ] = b;
-                if ( off == ( TRES_REG_SDM845_TEMP_LEN - 1u ) ) {
+                if ( ( off == ( TRES_REG_SDM845_TEMP_LEN - 1u ) ) &&
+                     ( s_wr_first == 0u ) &&
+                     ( s_wr_ovr == 0u ) ) {
                     s_temp_raw = ( (uint32_t)s_tempBuf[ 0 ] << 24 ) |
                                  ( (uint32_t)s_tempBuf[ 1 ] << 16 ) |
                                  ( (uint32_t)s_tempBuf[ 2 ] << 8  ) |
@@ -218,14 +253,27 @@ void I2C1_IRQHandler(void)
                 s_regPtr++;
             } else if ( ( s_regPtr >= TRES_REG_NV_BASE ) &&
                         ( s_regPtr < TRES_REG_NV_END ) ) {
-                /* NVRAM window: 4 bytes big-endian per slot. The 4th byte
-                 * commits into the RAM cache (NvParams_Save persists).        */
+                /* NVRAM window: 4 bytes big-endian per slot. A slot commits
+                 * only when ONE transaction wrote it completely: the run
+                 * must start on a slot boundary and reach this slot's last
+                 * byte (multi-slot bursts commit each slot normally). A
+                 * write starting mid-slot would otherwise commit another
+                 * slot's staging leftovers together with its own byte -
+                 * the shared s_nvBuf makes that cross-slot contamination,
+                 * not just a stale value.                                */
                 uint32_t off  = (uint32_t)( s_regPtr - TRES_REG_NV_BASE );
                 uint8_t  slot = (uint8_t)( off / TRES_REG_NV_LEN );
                 uint8_t  byte = (uint8_t)( off % TRES_REG_NV_LEN );
 
+                if ( s_wr_cnt == 0u ) {
+                    s_wr_first = (uint8_t)off;
+                }
+                s_wr_cnt++;
                 s_nvBuf[ byte ] = b;
-                if ( byte == ( TRES_REG_NV_LEN - 1u ) ) {
+                if ( ( byte == ( TRES_REG_NV_LEN - 1u ) ) &&
+                     ( ( s_wr_first % TRES_REG_NV_LEN ) == 0u ) &&
+                     ( ( off - s_wr_first ) >= ( TRES_REG_NV_LEN - 1u ) ) &&
+                     ( s_wr_ovr == 0u ) ) {
                     NvParams_Set( slot,
                                   ( (uint32_t)s_nvBuf[ 0 ] << 24 ) |
                                   ( (uint32_t)s_nvBuf[ 1 ] << 16 ) |
@@ -238,8 +286,12 @@ void I2C1_IRQHandler(void)
             } else if ( ( s_regPtr >= TRES_REG_CHAL_BASE ) &&
                         ( s_regPtr < ( TRES_REG_CHAL_BASE + TRES_REG_CHAL_LEN ) ) ) {
                 /* AES challenge window: 16 bytes big-endian. Bytes land in
-                 * s_chalBuf; the 16th commits (response is computed live on
-                 * the RESPONSE read, so no explicit "commit" action needed). */
+                 * s_chalBuf and the response is computed live from it on
+                 * every RESPONSE read - there is no commit step, and no
+                 * integrity requirement on the challenge itself: it is
+                 * host-chosen and not a secret, so a partial/spliced
+                 * challenge can only make the response mismatch (auth
+                 * fails safe). No completeness gate needed here.        */
                 uint32_t off = (uint32_t)( s_regPtr - TRES_REG_CHAL_BASE );
 
                 s_chalBuf[ off ] = b;

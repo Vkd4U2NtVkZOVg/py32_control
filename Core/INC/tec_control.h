@@ -28,7 +28,8 @@
  * Dependencies (already implemented):
  *   - AHT20_Get_LastTempMilliCelsius() - environment temperature
  *   - Studio_ADC1_ReadHotMilliCelsius() - TEC hot-side temperature
- *   - Studio_ADC1_ReadCurrentMilliamp() - TEC current
+ *   - Studio_ADC1_ReadCurrentMilliamp(&ma) - TEC current (reports sample
+ *     validity: 0 = ADC timeout, the overcurrent guard must not run blind)
  *   - Fan_Get_LastRPM() - fan speed
  *   - TRES_I2C_Slave_GetSdm845TempMilliC() - SDM845 SoC temperature
  *   - TecPid_* - PID controller

@@ -18,7 +18,7 @@ args = parser.parse_args()
 control = (root/'Core/SRC/tec_control.c').read_text(encoding='utf-8')
 control = re.sub(r'^#include.*$', '', control, flags=re.M)
 adc = (root/'Core/SRC/adc.c').read_text(encoding='utf-8')
-adc = adc[adc.index('uint32_t Studio_ADC1_ReadCurrentMilliamp(void)'):adc.index('int32_t Studio_ADC1_ReadHotMilliCelsius(void)')]
+adc = adc[adc.index('uint8_t Studio_ADC1_ReadCurrentMilliamp(uint32_t *out_ma)'):adc.index('int32_t Studio_ADC1_ReadHotMilliCelsius(void)')]
 # Use the production defaults, enum, and exact current-conversion function.
 nv = (root/'Core/SRC/nv_params.c').read_text(encoding='utf-8')
 defaults = re.search(r'static const uint32_t s_defaults\[.*?\n};', nv, re.S).group()
@@ -37,6 +37,7 @@ typedef int TecPid_t;
 typedef int MCP4725_Status_t;
 #define MCP4725_OK 0
 #define MCP4725_VDD_MV 3300
+#define LL_ADC_CHANNEL_6 0   /* stubbed adc1_convert ignores the channel */
 #define GPIOA 0
 #define TEC_VEN_Pin 0
 #define qLowest_Priority 0
@@ -56,7 +57,8 @@ static uint32_t Fan_Get_LastRPM(void) { return rpm; }
 static int32_t Studio_ADC1_ReadHotMilliCelsius(void) { return 35000; }
 static int32_t Studio_ADC1_ReadColdMilliCelsius(void) { return cold; }
 static int32_t AHT20_Get_LastTempMilliCelsius(void) { return 25000; }
-static uint16_t Studio_ADC1_ReadCurrentRaw(void) { return 4000; }
+static uint16_t adc1_convert(uint32_t channel, uint8_t *ok)
+{ (void)channel; *ok = 1u; return 4000u; }   /* fixed sample, never times out */
 static int Sdm845_Boot_IsThermalReady(void) { return 1; }
 static int TecPid_Init(TecPid_t *p, float a, float b, float c, float d,
  float e, float f, float g, float h, float i, float j) { return 0; }
@@ -74,7 +76,12 @@ uint32_t NvParams_Get(uint8_t id) { return s_defaults[id]; }
 uint32_t NvParams_GetDefault(uint8_t id) { return s_defaults[id]; }
 '''
 # Exercise current conversion separately; callback tests need no overcurrent.
-control = control.replace('cur_ma = Studio_ADC1_ReadCurrentMilliamp();', 'cur_ma = 0; /* test fixture: no overcurrent */')
+control, n_cur = re.subn(
+    r'cur_ok = Studio_ADC1_ReadCurrentMilliamp\(\s*&cur_read\s*\);\s*'
+    r'cur_ma = cur_read;',
+    'cur_ok = 1u; cur_ma = 0;   /* test fixture: valid sample, no overcurrent */',
+    control)
+assert n_cur == 1, 'current-read fixture patch did not match the merged callback'
 source = prefix + defaults + nv_stubs + adc + control
 source += (root/'test/tec_fault_harness.c').read_text(encoding='utf-8')
 with tempfile.TemporaryDirectory(dir=root) as directory:

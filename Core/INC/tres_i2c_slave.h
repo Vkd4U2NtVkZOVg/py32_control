@@ -25,20 +25,25 @@
  *   0x14 VERSION  R  interface version (TRES_IF_VERSION)
  *   0x20 SDM845_TEMP RW 4-byte window, SDM845 temperature as int32
  *                    milli-degrees Celsius, written MSB first (big endian).
- *                    The value publishes atomically once all 4 bytes have
- *                    arrived; readers use TRES_I2C_Slave_GetSdm845Temp*().
+ *                    The value publishes atomically once ONE transaction has
+ *                    delivered all 4 bytes from the window base; partial or
+ *                    mid-window writes never publish (they cannot mix
+ *                    staging leftovers with fresh bytes). Readers use
+ *                    TRES_I2C_Slave_GetSdm845Temp*().
  *   0x30 BOOTSTATE R  SDM845 boot FSM state (Sdm845_State_t, sdm845_boot.h)
  *   0x31 BOOTRETRY R  SDM845 boot retry counter (Sdm845_Boot_GetRetries)
  *   0x32 TECFLAGS  R  TEC control alarms (TEC_ALARM_* bitmask, tec_control.h)
  *   0x33 AHTSTAT   R  last AHT20 driver result code (0 OK, negative = error)
  *   0x34 FANDUTY   R  last fan duty commanded by any writer, percent
  *   0x35 TECDUTY   R  last TEC current command to the DAC, percent
- *   0x40..0xC7    RW  NVRAM parameter window: one 4-byte big-endian value per
+ *   0x40..0xCF    RW  NVRAM parameter window: one 4-byte big-endian value per
  *                     slot. Slot n of NvParamTecId_t (nv_params.h) lives at
- *                     0x40 + 4*n. Values are 32-bit big-endian; writing the
- *                     4th byte commits the value into the NVRAM RAM cache.
- *                     Persist with the SAVE_PARAMS command.
- *                     (34 slots: 0x40 + 4*34 = 0xC8, so window 0x40..0xC7.)
+ *                     0x40 + 4*n. Values are 32-bit big-endian; a slot
+ *                     commits when ONE transaction delivers its 4 bytes
+ *                     from the slot base (multi-slot bursts are fine;
+ *                     mid-slot starts never commit). Persist with the
+ *                     SAVE_PARAMS command.
+ *                     (36 slots: 0x40 + 4*36 = 0xD0, so window 0x40..0xCF.)
  ******************************************************************************
  */
 #ifndef __TRES_I2C_SLAVE_H__
@@ -61,8 +66,9 @@ extern "C" {
 #define TRES_REG_VERSION    0x14u
 
 /* SDM845 temperature window: 4 bytes at 0x20..0x23, int32 milli-degree
- * Celsius, transferred MSB first (big endian). Publishes atomically when the
- * 4th byte lands. */
+ * Celsius, transferred MSB first (big endian). Publishes atomically when ONE
+ * transaction has written all 4 bytes from 0x20; partial or mid-window
+ * writes are ignored. */
 #define TRES_REG_SDM845_TEMP      0x20u
 #define TRES_REG_SDM845_TEMP_LEN  4u
 
@@ -77,19 +83,22 @@ extern "C" {
 #define TRES_REG_TECDUTY    0x35u   /**< TEC current cmd to DAC, percent      */
 
 /* NVRAM parameter window: slot n (NvParamTecId_t) at 0x40 + 4*n, 4 bytes
- * big-endian. Reading any byte of a slot returns that byte; writing the 4th
- * byte commits the assembled value into the NVRAM RAM cache. The window is
- * 4 * NVM_PARAM_COUNT bytes. */
+ * big-endian. Reading any byte of a slot returns that byte; a slot commits
+ * when ONE transaction writes its 4 bytes starting at the slot base (a
+ * multi-slot burst commits every slot it covers; mid-slot starts never
+ * commit). The window is 4 * NVM_PARAM_COUNT bytes. */
 #define TRES_REG_NV_BASE    0x40u
 #define TRES_REG_NV_LEN     4u
 #define TRES_REG_NV_END     ( TRES_REG_NV_BASE + TRES_REG_NV_LEN * NVM_PARAM_COUNT )
 
 /* AES challenge-response authentication window (only when TRES_AES_ENABLE).
- *   0xD0..0xDF  CHALLENGE (W) 16 bytes big-endian, assembled like the SDM845
- *                              temp window; the 16th byte commits it.
+ *   0xD0..0xDF  CHALLENGE (W) 16 bytes big-endian; the response is computed
+ *                              live from the buffer on every read, so there
+ *                              is no commit step (a partial write only makes
+ *                              the response mismatch - auth fails safe).
  *   0xE0..0xEF  RESPONSE (R)  16 bytes big-endian: AES-128-ECB(device_key,
  *                              challenge), recomputed live on every read.
- * Placed above the NVRAM parameter window (0x40..0xC7 with 34 slots) so the
+ * Placed above the NVRAM parameter window (0x40..0xCF with 36 slots) so the
  * two never overlap. The windows are only present in the register file when
  * the feature is compiled in; with TRES_AES_ENABLE=0 these addresses read
  * back 0 and writes are ignored, exactly like any other reserved address. */
