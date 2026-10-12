@@ -580,7 +580,7 @@ static void TecControl_Cb( qEvent_t e )
         return;
     }
 
-    #if ( TEC_FAN_FAULT_ENABLE == 1 )
+#if ( TEC_FAN_FAULT_ENABLE == 1 )
     /* A stalled fan must recover before ANY enable write. Alarm clearing
      * by the host cannot clear this interlock. Keep requesting full airflow. */
     if ( s_fan_stalled != 0u ) {

@@ -24,6 +24,7 @@ static void reset_fixture(void)
 int main(int argc, char **argv)
 {
     uint32_t ma = 0;
+    unsigned edges;
     (void)argv;
     if (argc > 1) {
     /* All values pass the calibration envelope, but conversion exceeds u32. */
@@ -43,11 +44,12 @@ int main(int argc, char **argv)
     adc_code = 4000;
     assert(Studio_ADC1_ReadCurrentMilliamp(&ma) == 1);
     assert(ma == 3516);   /* ADC=4000, NVRAM divider 1:2 (div-calibration fix) */
+#if TEC_FAN_FAULT_ENABLE
     reset_fixture();
     rpm = 0;
     for (int i = 0; i < 24; ++i) TecControl_Cb(NULL);
     assert(s_fan_stalled && !s_tec_enabled);
-    unsigned edges = enable_edges;
+    edges = enable_edges;
     for (int i = 0; i < 100; ++i) {
         TecControl_ClearAlarm();
         TecControl_Cb(NULL);
@@ -64,6 +66,18 @@ int main(int argc, char **argv)
         TecControl_Cb(NULL);
     }
     assert(s_fan_stalled && !s_tec_enabled);
+#else
+    reset_fixture(); rpm = 0; tach_reads = 0;
+    for (int i = 0; i < 200; ++i) {
+        TecControl_Cb(NULL);
+        assert(s_tec_enabled && !(s_alarm & TEC_ALARM_FAN_FAULT));
+    }
+    assert(tach_reads == 0); /* bench mode must not consult tach feedback */
+    assert(fan_duty_seen == tec_fan_duty_from_hot(hot));
+#endif
+    /* Overtemperature alone must still shut down in both build modes. */
+    reset_fixture(); hot = 95000; TecControl_Cb(NULL);
+    assert(!s_tec_enabled && fan_duty_seen == 100 && (s_alarm & TEC_ALARM_OVERTEMP));
     reset_fixture(); TecControl_Cb(NULL);
     cold = -40000; TecControl_Cb(NULL);
     assert(!s_tec_enabled && (s_alarm & TEC_ALARM_SENSOR));

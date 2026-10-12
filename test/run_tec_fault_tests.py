@@ -51,13 +51,13 @@ static uint8_t adc_ok = 1, fan_duty_seen, fan_enabled;
 static uint16_t adc_code = 0;
 static uint32_t params[NVM_PARAM_COUNT];
 static float reset_measure;
-static unsigned enable_edges;
+static unsigned enable_edges, tach_reads;
 static void LL_GPIO_SetOutputPin(int a, int b) { (void)a; (void)b; ++enable_edges; }
 static void LL_GPIO_ResetOutputPin(int a, int b) { (void)a; (void)b; }
 static int MCP4725_SetVoltage_mV(uint16_t mv) { (void)mv; return fail_dac; }
 static void Fan_SetEnabled(uint8_t on) { fan_enabled = on; }
 static void Fan_SetDutyPercent(uint8_t duty) { fan_duty_seen = duty; }
-static uint32_t Fan_Get_LastRPM(void) { return rpm; }
+static uint32_t Fan_Get_LastRPM(void) { ++tach_reads; return rpm; }
 static int32_t Studio_ADC1_ReadHotMilliCelsius(void) { return hot; }
 static int32_t Studio_ADC1_ReadColdMilliCelsius(void) { return cold; }
 static int32_t AHT20_Get_LastTempMilliCelsius(void) { return 25000; }
@@ -84,15 +84,27 @@ source += (root/'test/tec_fault_harness.c').read_text(encoding='utf-8')
 with tempfile.TemporaryDirectory(dir=root) as directory:
     source_path = Path(directory)/'tec_fault_test.c'
     source_path.write_text(source, encoding='utf-8')
-    command = args.cc + ['-std=c99', '-I', str(root/'Core/INC')]
+    for mode in (None, 0, 1):
+        label = 'default' if mode is None else str(mode)
+        command = args.cc + ['-std=c99', '-I', str(root/'Core/INC')]
+        if mode is not None:
+            command += ['-DTEC_FAN_FAULT_ENABLE=' + str(mode)]
+        if args.syntax_only:
+            command += ['-fsyntax-only', str(source_path)]
+        else:
+            executable = Path(directory)/('tec_fault_' + label + '.exe')
+            command += [str(source_path), '-o', str(executable)]
+        subprocess.run(command, check=True)
+        if not args.syntax_only:
+            subprocess.run([str(executable)], check=True)
+            subprocess.run([str(executable), 'overflow'], check=True)
+        print('TEC_FAN_FAULT_ENABLE=' + label + ': passed', flush=True)
+    for invalid in ('2', '-1'):
+        command = args.cc + ['-std=c99', '-I', str(root/'Core/INC'),
+            '-DTEC_FAN_FAULT_ENABLE=' + invalid, '-c', str(source_path),
+            '-o', str(Path(directory)/'invalid.o')]
+        result = subprocess.run(command, capture_output=True, text=True)
+        assert result.returncode != 0 and 'must be 0 or 1' in result.stderr, result.stderr
+    print('Invalid numeric switch values rejected')
     if args.syntax_only:
-        command += ['-fsyntax-only', str(source_path)]
-    else:
-        executable = Path(directory)/'tec_fault_test.exe'
-        command += [str(source_path), '-o', str(executable)]
-    subprocess.run(command, check=True)
-    if not args.syntax_only:
-        subprocess.run([str(executable)], check=True)
-        subprocess.run([str(executable), "overflow"], check=True)
-    else:
-        print('C harness syntax check passed; assertions were NOT executed')
+        print('Syntax checks only; runtime assertions were NOT executed')

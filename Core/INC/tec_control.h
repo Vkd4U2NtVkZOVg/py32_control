@@ -70,6 +70,9 @@ extern "C" {
 #ifndef TEC_FAN_FAULT_ENABLE
 #define TEC_FAN_FAULT_ENABLE        (1u)
 #endif
+#if (TEC_FAN_FAULT_ENABLE != 0) && (TEC_FAN_FAULT_ENABLE != 1)
+#error "TEC_FAN_FAULT_ENABLE must be 0 or 1"
+#endif
 
 /**
  * @brief Initialize the TEC control task.
