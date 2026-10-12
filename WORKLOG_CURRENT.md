@@ -1,5 +1,57 @@
 # Mix3_TRES_2 Firmware 当前工作日志（精简版）
 
+## 2026-10-12：合并 GLM 修复并关闭复审遗留项
+
+### 基线与分支
+
+- 工作分支：`codex/tec-fault-interlocks`；先合并 GLM 的 `origin/test/tres-sequencer`（`00e2007401566d66eb708c886abb219d215ad94c`），合并提交 `b6fd359`，无冲突。
+- 本轮修复基于合并结果；不回退 GLM 已完成的事务写入保护、ADC 有效标志、Flash 加锁、报警清理和启动超时成功优先等改动。
+- 保留用户此前确认的调试配置：`target_mc=5000` 以及暂时注释的露点保护；电流校准仍在重启后加载。
+
+### 修复与行为
+
+1. 新发现的组合故障：电流 ADC 超时、可信范围外或换算溢出时关闭 TEC、重置 PID、接管风扇并全速；同轮热端过温也报告 OVERTEMP。恢复依旧经过强制 DAC 锚点。
+2. 原 #2：主机温度超过 5000 ms 未更新即失效，直到完整新样本到达；无符号时间差支持计时回绕。主机应至少每秒更新一次。
+3. 原 #4：NMI、HardFault、Error_Handler 在死循环前用 GPIO 直接关闭 TEC_VEN，不依赖调度器、I2C 或 DAC。此处不是独立硬件看门狗，任意 CPU 锁死仍需板级保护。
+4. 原 #5：电流 uint64 结果超出 uint32 时返回无效而非截断；热端补偿在 int64 内限幅后才缩窄。默认 ADC=4000 的 3516 mA 换算保持不变。
+5. 原 #7/#8：命令邮箱在整个执行期间保持 BUSY；满时明确返回 BUSY 错误。保存失败返回 FLASH 错误；新增完成计数和 RELOAD_PARAMS，主机等待命令执行结束后检查结果，再从 Flash 重载验证，避免 RAM 回读冒充持久化。
+6. 原 #9：DMA RX 环扩为 512 字节，半传输/整传输 IRQ 维护绝对生产位置。未读绕满、复制期间覆盖、延迟 IRQ 的不确定整圈和 DMA 错误均丢弃不可信数据，计数并重置启动检测器，禁止跨缺口拼接 banner。
+7. 原 #11：并线模式下 UART 初始化全过程保持 PA0 高阻、USART2 RX-only，首次主动发送才按 GLM 的隔离顺序接管。
+8. 原 #12：NVRAM v5 CRC 覆盖序列号及全部参数；新旧记录比较支持 uint32 回绕；有效 v5 优先于 v4。首次加载有效 v4 校准时向另一个槽写入 v5，保留旧槽；迁移中断可以恢复旧记录，不主动恢复默认校准。
+9. 原 #13：AHT20 初始化失败延迟重试，成功后重新检查校准状态；触发失败不继续读取旧结果；数据超过 25 s 失效。ISR 查询状态不修改 FSM 正在使用的初始化/触发结果。
+10. 原 #14：NVRAM 仿真从源码读取版本和参数数量，实际模拟逐页擦写，并补充逐字断电、序列号位翻转和 v4 迁移。启动回放改为执行生产 C 回调，不再维护过时的 Python 重试状态机。
+11. 原 #15/#16/#17：MCP4725 EEPROM 改发三字节包；Q16 解析先识别十六进制等整数前缀，拒绝无穷大；探针默认只读，REPORT_FAIL 测试必须显式传 `--commands`。
+
+### 接口与升级约定
+
+- I2C VERSION 从 `0x02` 升为 `0x03`，主机脚本随固件一起升级。
+- STATUS bit5 为命令 BUSY；LASTERR 新增 3=FLASH、4=BUSY；`0x15` 为已执行命令计数（成功/失败都计数，模 256），`0x16` 为 UART 接收缺口计数（模 256）。
+- 命令 6=RELOAD_PARAMS：从有效 Flash 记录重载 RAM，失败不覆盖 RAM。主机协议要求单一写入者串行发命令；参数读取地址保持不变。
+- NVRAM v5 保持 36 槽及原字段偏移，升级读取 v4；旧固件不能读取 v5，降级应先导出参数并安排恢复，不能假设双向兼容。
+- `--params` 仍是显式修改 Flash 的测试，整体备份/恢复沿用 GLM 修复；进程或设备掉电、总线中断可能使恢复无法完成，不声明异常情况下绝对恢复。
+
+### 验证结果
+
+- 使用工作区独立 Zig 0.16.0 C 编译器实际执行 `test/run_tec_fault_tests.py`：原故障联锁、真实电流 ADC 超时、过流/可信度、组合过温、恢复、64 位补偿限幅通过；另起进程验证首次校准溢出反例，避免静态校准缓存影响用例。
+- `test/run_boundary_tests.py`：7 组真实 C 函数测试通过，涵盖启动超时成功优先/终止策略、AHT20 重试与过期、主机温度回绕/失效、命令忙与失败确认、DMA 绕满/延迟 IRQ/错误、NVRAM 记录选择、EEPROM 包格式。
+- `test/nv_dualslot_sim.py`：232 项原有断电场景、v4 迁移及代数回绕、65 个逐字断电位置、32 个序列号单比特翻转通过。
+- `test/test_probe.py`：8 项离线测试通过，涵盖默认无写入、显式命令、整表恢复、保存失败反馈、忙时拒发、完成计数回绕、保存重载及 Q16 输入。
+- 所有 Core C 翻译单元已用 Cortex-M0+ 目标生成临时对象文件，使用真实项目设备头文件和现有 newlib 头文件；这不是 EIDE/GNU ARM 的完整固件链接，也不是上板验证。`git diff --check` 通过。
+- 待实机验收：电流故障并发过温、主机断更、AHT20 断开/恢复、MCU 异常、持续 UART 日志及 Flash 操作期间接收缺口、v4 升级断电、UART 上电引脚波形。未烧录或操作设备。
+
+### 复现命令
+
+```text
+python test/run_tec_fault_tests.py --cc <zig.exe> cc
+python test/run_boundary_tests.py --cc <zig.exe> cc
+python test/replay_boot_fsm.py --cc <zig.exe> cc
+python -B test/nv_dualslot_sim.py
+python -B test/test_probe.py
+```
+
+也可将 `--cc <zig.exe> cc` 换为 `--cc gcc`。完整 ARM 构建使用现有 EIDE 工程及正式 GNU ARM 工具链。
+
+
 ## 2026-10-11：TEC 故障联锁修复（codex/tec-fault-interlocks）
 
 基于 af0ce6833fe8224659bfad15c61e02d23ed9ffb5。用户确认 target_mc=5000 和露点保护注释用于调试，本次保持原样。分压还原公式 div_den/div_num 正确，未额外添加 ×2。

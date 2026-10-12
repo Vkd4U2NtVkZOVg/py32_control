@@ -2,19 +2,12 @@
  * @file nv_params.c
  * @brief Non-volatile parameter storage over the internal FLASH.
  *
- * Implements a single-block parameter store in the last FLASH sector
- * (page 0x0800F000). The block is one 128-byte flash page, packed by a union:
- *
- *     [ magic 4B ][ version 4B ][ crc32 4B ][ params[COUNT] ][ auto pad ]
- *
- * The pad is derived at compile time (union with a 128-byte page array), so
- * adding a parameter never needs manual byte bookkeeping.
- *
- * On power-up NvParams_Init() copies the stored block into the RAM cache after
- * validating magic/version/crc; on any mismatch it fills the cache with the
- * firmware defaults (TEC-specific, see s_defaults below - no tunable macros
- * remain in the controller code). NvParams_Save() erases the page and programms
- * the whole block again (single-block direct write, ~10k cycle endurance).
+ * Two page-aligned A/B records occupy the reserved last FLASH sector.
+ * Each v5 record stores [magic][version][seq][crc][params][page padding].
+ * CRC covers seq + params. Save writes and verifies the inactive record;
+ * a torn write preserves the previous complete record. Sequence ordering
+ * handles uint32 wrap. Valid legacy v4 records are migrated copy-on-write
+ * at startup without resetting calibration; v5 records take precedence.
  *
  * All flash access is done directly on the FLASH registers (unlock with the
  * key sequence, page erase, page program) because this project is a pure LL
@@ -36,7 +29,7 @@
 /*============================================================================*/
 #define NVM_BASE        (0x0800F000UL)  /**< last flash sector, page-aligned  */
 #define NVM_MAGIC       (0x4E564433u)   /**< 'NVD3'                            */
-#define NVM_VERSION     (4u)            /**< v4: + EN anti-hiccup deadband slot */
+#define NVM_VERSION     (5u)            /**< v5: CRC protects sequence and parameters */
 #define NVM_PAGE_BYTES  (128u)          /**< PY32F030 flash page size          */
 #define NVM_SLOTS       (2u)            /**< A/B slots; Save flips between them*/
 
@@ -79,7 +72,7 @@ typedef struct {
     uint32_t magic;
     uint32_t version;
     uint32_t seq;                       /**< write generation (monotonic)      */
-    uint32_t crc;                       /**< CRC-32 over params[]             */
+    uint32_t crc;                       /**< CRC-32 over seq + params[]             */
     uint32_t params[ NVM_PARAM_COUNT ];
 } Nvm_Block_Data_t;
 
@@ -218,6 +211,24 @@ static uint32_t nv_crc32( const uint8_t *data, uint32_t length )
     return ~crc;
 }
 
+/* Include the generation without changing the existing on-flash offsets. */
+static uint32_t nv_block_crc(const Nvm_Block_Data_t *block)
+{
+    const uint8_t *seq = (const uint8_t *)&block->seq;
+    const uint8_t *params = (const uint8_t *)block->params;
+    uint32_t crc = 0xFFFFFFFFu;
+    uint32_t i;
+    uint8_t bit;
+    /* Stream both regions without a second parameter-sized stack buffer. */
+    for (i = 0u; i < sizeof(block->seq) + sizeof(block->params); ++i) {
+        crc ^= (i < sizeof(block->seq)) ? seq[i] : params[i - sizeof(block->seq)];
+        for (bit = 0u; bit < 8u; ++bit) {
+            crc = (crc & 1u) ? (crc >> 1u) ^ 0xEDB88320u : (crc >> 1u);
+        }
+    }
+    return ~crc;
+}
+
 static void nv_load_defaults( void )
 {
     memcpy( s_cache, s_defaults, sizeof( s_cache ) );
@@ -250,7 +261,7 @@ static void nv_flash_timing_config( void )
 /*============================================================================*/
 /* Public API                                                                  */
 /*============================================================================*/
-void NvParams_Init( void )
+int NvParams_Reload( void )
 {
     static const Nvm_Block_t * const slot[ NVM_SLOTS ] = {
         (const Nvm_Block_t *)NVM_SLOT_ADDR( 0 ),
@@ -260,17 +271,24 @@ void NvParams_Init( void )
     uint32_t i;
 
     for ( i = 0u ; i < NVM_SLOTS ; ++i ) {
-        valid[ i ] = ( ( slot[ i ]->data.magic == NVM_MAGIC ) &&
-                       ( slot[ i ]->data.version == NVM_VERSION ) &&
-                       ( slot[ i ]->data.crc == nv_crc32( (const uint8_t *)slot[ i ]->data.params,
-                                                          sizeof( slot[ i ]->data.params ) ) ) ) ? 1u : 0u;
+        uint32_t version = slot[i]->data.version;
+        valid[i] = (slot[i]->data.magic == NVM_MAGIC) &&
+            (((version == NVM_VERSION) && (slot[i]->data.crc == nv_block_crc(&slot[i]->data))) ||
+             ((version == 4u) && (slot[i]->data.crc == nv_crc32(
+                 (const uint8_t *)slot[i]->data.params, sizeof(slot[i]->data.params)))));
     }
 
-    /* Newest good block wins: with both slots valid the higher seq is the
+    /* Newest good block wins: with both slots valid wrap-aware sequence order identifies the
      * last completed Save (a Save that was interrupted mid-write leaves its
      * target slot CRC-invalid, so the previous slot still wins). */
     if ( valid[ 0 ] != 0u && valid[ 1 ] != 0u ) {
-        s_active_slot = ( slot[ 1 ]->data.seq > slot[ 0 ]->data.seq ) ? 1u : 0u;
+        /* A protected v5 record always wins over a legacy v4 record. */
+        if (slot[0]->data.version != slot[1]->data.version) {
+            s_active_slot = (slot[1]->data.version == NVM_VERSION) ? 1u : 0u;
+        } else {
+            uint32_t delta = slot[1]->data.seq - slot[0]->data.seq;
+            s_active_slot = (delta != 0u && delta < 0x80000000u) ? 1u : 0u;
+        }
     } else if ( valid[ 1 ] != 0u ) {
         s_active_slot = 1u;
     } else {
@@ -281,13 +299,23 @@ void NvParams_Init( void )
     if ( s_active_valid != 0u ) {
         s_active_seq = slot[ s_active_slot ]->data.seq;
         memcpy( s_cache, slot[ s_active_slot ]->data.params, sizeof( s_cache ) );
-    } else {
+        return NVM_OK;
+    }
+    return NVM_ERR_CRC; /* leave the RAM table untouched on reload failure */
+}
+
+void NvParams_Init(void)
+{
+    if (NvParams_Reload() != NVM_OK) {
         nv_load_defaults();
         s_active_seq = 0u;
-        /* First boot / both slots unusable: persist the defaults immediately
-         * so the store is valid (and no longer "unwritten") on every later
-         * power-up. Save() targets the (invalid) active slot, i.e. slot 0. */
         (void)NvParams_Save();
+    } else {
+        const Nvm_Block_t *active = (const Nvm_Block_t *)NVM_SLOT_ADDR(s_active_slot);
+        if (active->data.version == 4u) {
+            /* Copy-on-write migration: keep the old calibrated record intact. */
+            (void)NvParams_Save();
+        }
     }
 }
 
@@ -329,8 +357,7 @@ int NvParams_Save( void )
     block.data.version = NVM_VERSION;
     block.data.seq     = s_active_seq + 1u;
     memcpy( block.data.params, s_cache, sizeof( s_cache ) );
-    block.data.crc     = nv_crc32( (const uint8_t *)block.data.params,
-                                   sizeof( block.data.params ) );
+    block.data.crc     = nv_block_crc(&block.data);
 
     /* Dual-slot power-fail strategy: always write the slot that does NOT
      * hold the newest good block. A reset mid-write only damages that

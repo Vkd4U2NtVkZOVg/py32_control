@@ -4,7 +4,7 @@
 Exercises the PY32F030 TRES register file (tres_i2c_slave.c) end to end:
 
   1. probe the slave and read the whole register window 0x10..0x14
-  2. send CMD_REPORT_FAIL twice, verify the RETRIES counter increments
+  2. optionally (--commands) send CMD_REPORT_FAIL twice (mutates RETRIES)
      (this path runs: I2C1 ISR -> mailbox -> parser task -> counter)
   3. optionally (--reset / --dfu) issue a real power command, which
      pulses the SDM845 reset line - off by default.
@@ -20,17 +20,19 @@ Protocol (tres_i2c_slave.h):
   cmd  : reg 0x00 <- [0xA5] [cmdId] [param]
 
 Registers:
-  0x10 STATUS   bit[3:0]=state bit[4]=host_ready bit[7]=last_err
+  0x10 STATUS   bit[3:0]=state bit[4]=host_ready bit[5]=cmd_busy bit[7]=last_err
   0x11 RETRIES  CMD_REPORT_FAIL counter
   0x12 PINS     control-pin snapshot
-  0x13 LASTERR  0 none / 1 illegal-in-state / 2 bad magic
-  0x14 VERSION  0x02
+  0x13 LASTERR  0 none / 1 illegal / 2 bad magic / 3 FLASH / 4 BUSY
+  0x14 VERSION  0x03
+  0x15 COMPLETED  executed commands modulo 256
+  0x16 RX_OVERRUN detected UART gaps modulo 256
   0x30-0x35 machine-state block: BOOTSTATE / BOOTRETRY / TECFLAGS /
                                  AHTSTAT / FANDUTY / TECDUTY
   0x40-0xCF NVRAM parameter window: 36 slots x 4-byte big-endian values
 
 Commands (0x00 <- [0xA5][cmdId][param]):
-  1 RESET, 2 ENTER_DFU, 3 REPORT_FAIL, 4 SAVE_PARAMS, 5 DEFAULT_PARAMS
+  1 RESET, 2 ENTER_DFU, 3 REPORT_FAIL, 4 SAVE_PARAMS, 5 DEFAULT_PARAMS, 6 RELOAD_PARAMS
 
 States (STATUS bit[3:0], TRES_State_t):
   0 PWR_UP, 1 BOOT_WAIT_NORMAL, 2 RUNNING, 3 PULSE_RESET_NORMAL,
@@ -133,7 +135,7 @@ def nv_slot_index(s):
         i = int(s, 0)
         if 0 <= i < len(NV_PARAMS):
             return i
-    except ValueError:
+    except (ValueError, OverflowError):
         pass
     return -1
 
@@ -149,13 +151,13 @@ def nv_value_to_raw(text, scale):
     """
     s = text.strip()
     try:
-        if scale < 1 and ('.' in s or 'e' in s.lower()):
+        if scale < 1 and not s.lower().lstrip('+-').startswith(('0x', '0b', '0o')) and ('.' in s or 'e' in s.lower()):
             return int(round(float(s) * NVM_Q16_SCALE))
         return int(s, 0)
-    except ValueError:
+    except (ValueError, OverflowError):
         return -1
 
-TRES_ERR_NAMES = {0: "NONE", 1: "ILLEGAL", 2: "MAGIC"}
+TRES_ERR_NAMES = {0: "NONE", 1: "ILLEGAL", 2: "MAGIC", 3: "FLASH", 4: "BUSY"}
 TRES_STATE_NAMES = {
     0: "PWR_UP", 1: "BOOT_WAIT_NORMAL", 2: "RUNNING",
     3: "PULSE_RESET_NORMAL", 4: "PULSE_RESET_DFU",
@@ -195,9 +197,22 @@ class Tres:
         return list(rd)
 
     def write_cmd(self, magic, cmd, param=0):
-        """One transaction: regPtr=0x00 then the 3 command bytes."""
-        self.bus.write_i2c_block_data(self.addr, TRES_REG_CMD,
-                                      [magic, cmd, param])
+        """Single-writer protocol v3: wait for this command's completion."""
+        before = self.read_reg(0x15)[0]
+        if self.status() & 0x20:
+            raise RuntimeError("MCU command mailbox busy; command not sent")
+        self.bus.write_i2c_block_data(self.addr, TRES_REG_CMD, [magic, cmd, param])
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            status = self.status()
+            done = self.read_reg(0x15)[0]
+            if done == ((before + 1) & 0xff) and not (status & 0x20):
+                error = self.read_reg(TRES_REG_LASTERR)[0]
+                if error:
+                    raise RuntimeError("command failed: " + TRES_ERR_NAMES.get(error, str(error)))
+                return
+            time.sleep(0.01)
+        raise TimeoutError("MCU did not acknowledge command completion")
 
     def read_slot(self, slot):
         """Read one NVRAM slot as a big-endian uint32."""
@@ -221,6 +236,8 @@ def fmt_status(v):
     flags = []
     if v & 0x10:
         flags.append("HOST_READY")
+    if v & 0x20:
+        flags.append("CMD_BUSY")
     if v & 0x80:
         flags.append("LAST_ERR")
     return "{}(0x{:X}){}".format(TRES_STATE_NAMES.get(state, "?"), state,
@@ -245,13 +262,13 @@ def main():
 Probe the TRES I2C1 slave register file on the PY32F030 from Linux.
 
 The tool talks to the TRES MCU over Linux I2C (smbus2) and exercises the
-slave end to end, in three read-only steps plus one optional destructive
-step:
+slave with read-only inspection by default. --commands and the optional
+write modes below mutate device state:
 
   [1] probe:    read 0x10..0x14 (STATUS/RETRIES/PINS/LASTERR/VERSION)
   [2] status:   read the machine-state block 0x30..0x35
                 (SDM845 boot state, TEC alarms, AHT20 status, fan/TEC duty)
-  [3] commands: CMD_REPORT_FAIL x2 and verify the RETRIES counter advances
+  [3] --commands only: CMD_REPORT_FAIL x2 (changes RETRIES)
   [4] params:   dump the NVRAM parameter window 0x40..0xCF (36 slots x 4B)
   [5] action:   one of --reset / --dfu / --params / --set, or skipped
 
@@ -333,7 +350,7 @@ Exit status:
 
 Prerequisites:
   smbus2 (pip3 install smbus2) and /dev/i2c-<bus> readable by the user.
-  The slave must be powered and the VERSION register must read 0x02.
+  The slave must be powered and the VERSION register must read 0x03.
 """
     ap = argparse.ArgumentParser(
         description=description,
@@ -362,6 +379,7 @@ Prerequisites:
                            "the CHALLENGE window, read RESPONSE back, and "
                            "verify AES-128-ECB(device_key, challenge) matches "
                            "(requires firmware built with TRES_AES_ENABLE=1)")
+    ap.add_argument("--commands", action="store_true", help="mutating test: send REPORT_FAIL twice")
     ap.add_argument("--save", action="store_true",
                     help="with --set: also send SAVE_PARAMS to persist the "
                          "slot to FLASH (page erase+program)")
@@ -393,9 +411,10 @@ Prerequisites:
     print("    GPIO: PINS=0x{:02X} [{}]".format(pins, fmt_pins(pins)))
     print("    RETRIES={}  LASTERR={}  VERSION=0x{:02X}".format(
         retries, TRES_ERR_NAMES.get(lasterr, "?"), version))
-    if version != 0x02:
+    if version != 0x03:
         sys.exit("    VERSION mismatch - slave not responding as expected")
 
+    print("    UART receive gaps: {}".format(t.read_reg(0x16)[0]))
     print("[2] machine-state block: read 0x30..0x35 (auto-increment)")
     bootstate, bootretry, tecflags, ahtstat, fanduty, tecduty = \
         t.read_reg(TRES_REG_BOOTSTATE, 6)
@@ -407,16 +426,19 @@ Prerequisites:
     print("    TEC alarms: {}(0x{:02X})  AHT20 status: {}".format(
         flags, tecflags, ahtstat))
 
-    print("[3] command path: CMD_REPORT_FAIL x2, RETRIES must go up by 2")
-    before = t.read_reg(TRES_REG_RETRIES)[0]
-    for _ in range(2):
-        t.write_cmd(TRES_CMD_MAGIC, TRES_CMD_REPORT_FAIL)
-        time.sleep(0.2)  # parser task is woken by the ISR
-    after = t.read_reg(TRES_REG_RETRIES)[0]
-    print("    RETRIES: {} -> {}".format(before, after))
-    if after != (before + 2) & 0xFF:
-        sys.exit("    FAIL: counter did not advance; "
-                 "check STATUS bit7/LASTERR")
+    if args.commands:
+        print("[3] command path: CMD_REPORT_FAIL x2, RETRIES must go up by 2")
+        before = t.read_reg(TRES_REG_RETRIES)[0]
+        for _ in range(2):
+            t.write_cmd(TRES_CMD_MAGIC, TRES_CMD_REPORT_FAIL)
+            time.sleep(0.2)  # parser task is woken by the ISR
+        after = t.read_reg(TRES_REG_RETRIES)[0]
+        print("    RETRIES: {} -> {}".format(before, after))
+        if after != (before + 2) & 0xFF:
+            sys.exit("    FAIL: counter did not advance; "
+                     "check STATUS bit7/LASTERR")
+    else:
+        print("[3] command writes skipped (enable with --commands)")
 
     print("[4] NVRAM parameter window: read 0x40..0x{:02X}".format(
         TRES_REG_NV_BASE + TRES_REG_NV_LEN * len(NV_PARAMS) - 1))
@@ -454,6 +476,7 @@ Prerequisites:
             t.write_slot(slot, probe)
             t.write_cmd(TRES_CMD_MAGIC, TRES_CMD_SAVE_PARAMS)
             time.sleep(0.2)   # parser task persists RAM -> FLASH
+            t.write_cmd(TRES_CMD_MAGIC, 6)  # RELOAD_PARAMS: read CRC-validated FLASH
             saved = t.read_slot(slot)
             print("    after SAVE_PARAMS: {} = {} (probe {})".format(
                 name, saved, probe))
@@ -480,8 +503,8 @@ Prerequisites:
             time.sleep(0.2)
 
         # Acceptance: EVERY slot must match the pre-test backup, not just
-        # the probe slot. (Readback is the RAM cache; the FLASH save
-        # mechanism itself was already proven by the probe round-trip.)
+        # the probe slot. Reload validates FLASH before reading its RAM copy.
+        t.write_cmd(TRES_CMD_MAGIC, 6)
         now = [t.read_slot(i) for i in range(len(NV_PARAMS))]
         mismatch = [i for i in range(len(NV_PARAMS)) if now[i] != backup[i]]
         if mismatch:
@@ -525,7 +548,10 @@ Prerequisites:
         if args.save:
             t.write_cmd(TRES_CMD_MAGIC, TRES_CMD_SAVE_PARAMS)
             time.sleep(0.2)
-            print("    SAVE_PARAMS sent - {} persisted to FLASH".format(name))
+            t.write_cmd(TRES_CMD_MAGIC, 6)
+            if t.read_slot(slot) != value:
+                sys.exit("FLASH reload mismatch")
+            print("    FLASH save acknowledged and reloaded: {}".format(name))
         else:
             print("    RAM cache only - send --save to persist to FLASH "
                   "(or CMD_SAVE_PARAMS manually)")

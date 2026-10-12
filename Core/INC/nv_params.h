@@ -41,7 +41,7 @@
  *   NvParams_Save();                    // persist the RAM cache to FLASH
  *
  * The I2C slave exposes every slot as a 4-byte big-endian window at
- * 0x40..0xC3 (tres_i2c_slave.h), plus SAVE_PARAMS / DEFAULT_PARAMS commands.
+ * 0x40..0xCF (tres_i2c_slave.h), plus SAVE_PARAMS / DEFAULT_PARAMS / RELOAD_PARAMS commands.
  */
 #ifndef __NV_PARAMS_H__
 #define __NV_PARAMS_H__
@@ -162,12 +162,14 @@ typedef enum {
 
 /**
  * @brief Load the parameter cache from FLASH at power-up. Validates both
- *        slots (magic, version, CRC) and takes the newest good one (higher
- *        seq); if neither slot holds a valid block, fills the cache with
+ *        slots (magic, version, CRC) and takes the newest good one (wrap-aware
+ *        seq, preferring protected v5 over legacy v4); if neither slot holds a valid block, fills the cache with
  *        the firmware defaults and persists them to FLASH immediately
  *        (so the store is valid on every later power-up).
  */
 void  NvParams_Init(void);
+/* Reload saved FLASH into RAM; 0 on success, cache unchanged on failure. */
+int NvParams_Reload(void);
 
 /**
  * @brief Read a parameter from the RAM cache.

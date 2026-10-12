@@ -32,7 +32,7 @@ extern "C" {
 #endif
 
 /* Size of the circular DMA receive buffer. Must be <= 0xFFFF (DMA_NbData). */
-#define USART2_DMA_RX_BUF_LEN   (256u)
+#define USART2_DMA_RX_BUF_LEN   (512u)
 
 /**
  * @brief Configure USART2 DMA reception and start receiving.
@@ -89,6 +89,10 @@ uint8_t USART2_DMA_Send(const uint8_t *data, size_t len);
  *        most one transfer is ever in flight.
  */
 uint8_t USART2_DMA_TxBusy(void);
+
+/* A stream gap invalidates partial boot banner matches. */
+uint8_t USART2_DMA_TakeRxLoss(void);
+uint8_t USART2_DMA_GetOverruns(void);
 
 #ifdef __cplusplus
 }

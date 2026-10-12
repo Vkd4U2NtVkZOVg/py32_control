@@ -164,3 +164,18 @@ void Studio_GPIO_Init(void)
 /* USER CODE BEGIN 1 */
 
 /* USER CODE END 1 */
+
+/* GPIO-only fatal shutdown: independent of scheduler, DAC and interrupts. */
+void Board_FatalShutdown(void)
+{
+    LL_GPIO_InitTypeDef pin = {0};
+    __disable_irq();
+    LL_IOP_GRP1_EnableClock(LL_IOP_GRP1_PERIPH_GPIOA);
+    LL_GPIO_ResetOutputPin(TEC_VEN_Port, TEC_VEN_Pin);
+    pin.Pin = TEC_VEN_Pin;
+    pin.Mode = LL_GPIO_MODE_OUTPUT;
+    pin.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
+    pin.Pull = LL_GPIO_PULL_NO;
+    pin.Speed = LL_GPIO_SPEED_FREQ_LOW;
+    LL_GPIO_Init(TEC_VEN_Port, &pin);
+}

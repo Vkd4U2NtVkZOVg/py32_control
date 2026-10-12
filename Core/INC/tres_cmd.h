@@ -14,12 +14,14 @@
   * "count, do not react" behavior of the state diagram).
   *
   * Host register values exposed to the I2C layer:
- *     0x10 STATUS   : bit[3:0]=state, 4=host_ready, 7=last_cmd_rejected
+ *     0x10 STATUS   : bit[3:0]=state, 4=host_ready, 5=cmd_busy, 7=last_cmd_rejected
  *     0x11 RETRIES  : CMD_REPORT_FAIL counter
  *     0x12 PINS     : live control-pin snapshot
  *     0x13 LASTERR  : detail code of the last rejected command
  *     0x14 VERSION  : interface version
- *     0x40..0xC7    : NVRAM parameter window (see tres_i2c_slave.h)
+ *     0x15 COMPLETED: executed command count, modulo 256
+ *     0x16 RX_OVERRUN: detected receive gaps, modulo 256
+ *     0x40..0xCF    : NVRAM parameter window (see tres_i2c_slave.h)
  ******************************************************************************
  */
 #ifndef __TRES_CMD_H__
@@ -39,6 +41,7 @@ typedef enum {
     TRES_CMD_ENTER_DFU   = 2u,  /**< reset pulse, boot DFU (BOOT0=1, USB on) */
     TRES_CMD_REPORT_FAIL = 3u,  /**< count-only failure report (no reaction) */
     TRES_CMD_SAVE_PARAMS = 4u,  /**< persist the NVRAM RAM cache to FLASH    */
+    TRES_CMD_RELOAD_PARAMS = 6u, /**< reload CRC-validated FLASH into RAM */
     TRES_CMD_DEFAULT_PARAMS = 5u /**< reload NVRAM firmware defaults (RAM)    */
 } TRES_CmdId_t;
 
@@ -49,7 +52,10 @@ typedef enum {
 #define TRES_ERR_ILLEGAL        1u      /**< command illegal in this state  */
 #define TRES_ERR_MAGIC          2u      /**< command write missed 0xA5      */
 
-#define TRES_IF_VERSION         0x02u   /**< register-file interface version */
+#define TRES_ERR_FLASH          3u
+#define TRES_ERR_BUSY           4u
+
+#define TRES_IF_VERSION         0x03u   /**< register-file interface version */
 
 /* Exported functions --------------------------------------------------------*/
 void TRES_Cmd_Init(void);                 /**< create the parser task         */
@@ -64,6 +70,7 @@ void TRES_Cmd_PostBadMagicFromISR(void);
 uint8_t TRES_Cmd_StatusByte(void);
 uint8_t TRES_Cmd_Retries(void);
 uint8_t TRES_Cmd_LastErr(void);
+uint8_t TRES_Cmd_Completed(void);
 
 #ifdef __cplusplus
 }

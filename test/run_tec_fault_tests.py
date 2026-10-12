@@ -12,7 +12,7 @@ import tempfile
 
 root = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser()
-parser.add_argument('--cc', default='cc')
+parser.add_argument('--cc', nargs='+', default=['cc'])
 parser.add_argument('--syntax-only', action='store_true')
 args = parser.parse_args()
 control = (root/'Core/SRC/tec_control.c').read_text(encoding='utf-8')
@@ -46,19 +46,23 @@ typedef int MCP4725_Status_t;
 static int32_t cold = 45000;
 static uint32_t rpm = 1000;
 static int fail_dac, demand = 50;
+static int32_t hot = 35000;
+static uint8_t adc_ok = 1, fan_duty_seen, fan_enabled;
+static uint16_t adc_code = 0;
+static uint32_t params[NVM_PARAM_COUNT];
 static float reset_measure;
 static unsigned enable_edges;
 static void LL_GPIO_SetOutputPin(int a, int b) { (void)a; (void)b; ++enable_edges; }
 static void LL_GPIO_ResetOutputPin(int a, int b) { (void)a; (void)b; }
 static int MCP4725_SetVoltage_mV(uint16_t mv) { (void)mv; return fail_dac; }
-static void Fan_SetEnabled(uint8_t on) { (void)on; }
-static void Fan_SetDutyPercent(uint8_t duty) { (void)duty; }
+static void Fan_SetEnabled(uint8_t on) { fan_enabled = on; }
+static void Fan_SetDutyPercent(uint8_t duty) { fan_duty_seen = duty; }
 static uint32_t Fan_Get_LastRPM(void) { return rpm; }
-static int32_t Studio_ADC1_ReadHotMilliCelsius(void) { return 35000; }
+static int32_t Studio_ADC1_ReadHotMilliCelsius(void) { return hot; }
 static int32_t Studio_ADC1_ReadColdMilliCelsius(void) { return cold; }
 static int32_t AHT20_Get_LastTempMilliCelsius(void) { return 25000; }
 static uint16_t adc1_convert(uint32_t channel, uint8_t *ok)
-{ (void)channel; *ok = 1u; return 4000u; }   /* fixed sample, never times out */
+{ (void)channel; *ok = adc_ok; return adc_code; }
 static int Sdm845_Boot_IsThermalReady(void) { return 1; }
 static int TecPid_Init(TecPid_t *p, float a, float b, float c, float d,
  float e, float f, float g, float h, float i, float j) { return 0; }
@@ -72,22 +76,15 @@ static int qOS_Add_Task(qTask_t *t, void (*cb)(qEvent_t), int pr,
 # Callback uses qEvent_t as supplied by QuarkTS; fixtures pass a null event.
 prefix = prefix.replace('typedef int qEvent_t;', 'typedef void *qEvent_t;')
 nv_stubs = '''
-uint32_t NvParams_Get(uint8_t id) { return s_defaults[id]; }
+uint32_t NvParams_Get(uint8_t id) { return params[id]; }
 uint32_t NvParams_GetDefault(uint8_t id) { return s_defaults[id]; }
 '''
-# Exercise current conversion separately; callback tests need no overcurrent.
-control, n_cur = re.subn(
-    r'cur_ok = Studio_ADC1_ReadCurrentMilliamp\(\s*&cur_read\s*\);\s*'
-    r'cur_ma = cur_read;',
-    'cur_ok = 1u; cur_ma = 0;   /* test fixture: valid sample, no overcurrent */',
-    control)
-assert n_cur == 1, 'current-read fixture patch did not match the merged callback'
 source = prefix + defaults + nv_stubs + adc + control
 source += (root/'test/tec_fault_harness.c').read_text(encoding='utf-8')
 with tempfile.TemporaryDirectory(dir=root) as directory:
     source_path = Path(directory)/'tec_fault_test.c'
     source_path.write_text(source, encoding='utf-8')
-    command = [args.cc, '-std=c99', '-I', str(root/'Core/INC')]
+    command = args.cc + ['-std=c99', '-I', str(root/'Core/INC')]
     if args.syntax_only:
         command += ['-fsyntax-only', str(source_path)]
     else:
@@ -96,5 +93,6 @@ with tempfile.TemporaryDirectory(dir=root) as directory:
     subprocess.run(command, check=True)
     if not args.syntax_only:
         subprocess.run([str(executable)], check=True)
+        subprocess.run([str(executable), "overflow"], check=True)
     else:
         print('C harness syntax check passed; assertions were NOT executed')

@@ -52,14 +52,15 @@ MCP4725_Status_t MCP4725_SetVoltage_mV(uint16_t millivolts)
 
 MCP4725_Status_t MCP4725_WriteEEPROM(uint16_t code)
 {
-    uint8_t data[2];
+    uint8_t data[3];
 
     if (code > MCP4725_MAX_CODE) {
         code = MCP4725_MAX_CODE;
     }
 
     /* Write DAC register and EEPROM, normal power-down mode. */
-    data[0] = (uint8_t)(MCP4725_CMD_EEPROM | ((code >> 8U) & 0x0FU));
-    data[1] = (uint8_t)(code & 0xFFU);
-    return mcp_status(SoftI2C_Master_Write(MCP4725_I2C_ADDR, data, 2U));
+    data[0] = MCP4725_CMD_EEPROM;
+    data[1] = (uint8_t)(code >> 4U);
+    data[2] = (uint8_t)((code & 0x0FU) << 4U);
+    return mcp_status(SoftI2C_Master_Write(MCP4725_I2C_ADDR, data, 3U));
 }

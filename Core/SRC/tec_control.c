@@ -476,14 +476,17 @@ static void TecControl_Cb( qEvent_t e )
      * NVRAM plausibility window (current_valid_max_ma - previously loaded
      * and validated but never consulted): a reading above it means the sense
      * chain itself is no longer trustworthy. danger < valid_max is enforced
-     * in tec_params_load(), so a genuine overcurrent still trips the
-     * OVERCURRENT path (with its PID reset) before this one can label it a
-     * sensor fault. */
+     * in tec_params_load(): readings between danger and valid_max use the
+     * OVERCURRENT path; readings beyond valid_max use this SENSOR path. */
     if ( ( cur_ok == 0u ) ||
          ( cur_ma > (uint32_t)s_p.current_valid_max_ma ) ) {
         tec_set_enabled( 0u );
         (void)tec_dac_set( 0u );
+        Fan_SetEnabled( 1u );
+        Fan_SetDutyPercent( 100u );
+        TecPid_Reset( &s_pid, -(float)sdm_mc );
         s_alarm |= TEC_ALARM_SENSOR;
+        if ( hot_mc > s_p.hot_danger_millic ) s_alarm |= TEC_ALARM_OVERTEMP;
         return;
     }
 
@@ -507,17 +510,17 @@ static void TecControl_Cb( qEvent_t e )
     hot_lift = 0;
     if ( hot_mc > s_p.hot_overtemp_millic ) {
         int32_t excess = hot_mc - s_p.hot_overtemp_millic;
-        int32_t lift;
+        int64_t lift;
 
-        lift = (int32_t)( ( (int64_t)excess * (int64_t)s_p.hot_fb_gain_q16 ) >> 16 );
+        lift = ( (int64_t)excess * (int64_t)s_p.hot_fb_gain_q16 ) >> 16;
         if ( lift > s_p.hot_fb_max_millic ) {
             lift = s_p.hot_fb_max_millic;
         }
         if ( lift < 0 ) {
             lift = 0;
         }
-        target_mc += lift;
-        hot_lift = lift;
+        target_mc += (int32_t)lift;
+        hot_lift = (int32_t)lift;
     }
 
     /*--- 4. fault protection (highest priority first) ----------------------*/

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Dual-slot NVRAM power-fail simulation.
 
-Mirrors the v7 layout of Core/SRC/nv_params.c (slot = [magic][version][seq]
+Mirrors the v5 layout of Core/SRC/nv_params.c (slot = [magic][version][seq]
 [crc][params[]], two 256-byte slots) and enumerates every possible power-loss
 point inside NvParams_Save(): at each step boundary the FLASH keeps its
 current contents and the RAM state (cache/active-slot/seq) is lost, exactly
@@ -17,12 +17,17 @@ parameters are asserted:
 Run:  python3 test/nv_dualslot_sim.py   (no deps beyond stdlib)
 """
 
+from pathlib import Path
+import re
 import struct
 import zlib
 
 NVM_MAGIC = 0x4E564433            # 'NVD3', must match nv_params.c
-NVM_VERSION = 7                   # must match nv_params.c
-NVM_PARAM_COUNT = 36              # keep in sync with NV_PARAM_COUNT_MARKER
+SOURCE = (Path(__file__).resolve().parents[1] / 'Core/SRC/nv_params.c').read_text(encoding='utf-8')
+NVM_VERSION = int(re.search(r'#define NVM_VERSION\s+\((\d+)u\)', SOURCE)[1])
+HEADER = (Path(__file__).resolve().parents[1] / 'Core/INC/nv_params.h').read_text(encoding='utf-8')
+ENUM = re.search(r'typedef enum\s*\{(.*?)NV_PARAM_COUNT_MARKER', HEADER, re.S)[1]
+NVM_PARAM_COUNT = len(re.findall(r'^\s*NV_TEC_\w+', ENUM, re.M))
 BLOCK_SIZE = 256                  # 2 x 128-byte pages per slot
 SLOTS = 2
 
@@ -31,11 +36,12 @@ SLOTS = 2
 assert zlib.crc32(b"123456789") == 0xCBF43926, "CRC-32 reference check"
 
 
-def block_image(seq, params):
+def block_image(seq, params, version=NVM_VERSION):
     """Serialize one slot image exactly like Nvm_Block_t (zero pad)."""
-    img = struct.pack("<III", NVM_MAGIC, NVM_VERSION, seq)
-    img += struct.pack("<I", zlib.crc32(struct.pack(
-        "<%dI" % NVM_PARAM_COUNT, *params)) & 0xFFFFFFFF)
+    img = struct.pack("<III", NVM_MAGIC, version, seq)
+    payload = struct.pack("<%dI" % NVM_PARAM_COUNT, *params)
+    checked = (struct.pack("<I", seq) if version == NVM_VERSION else b"") + payload
+    img += struct.pack("<I", zlib.crc32(checked) & 0xFFFFFFFF)
     img += struct.pack("<%dI" % NVM_PARAM_COUNT, *params)
     assert len(img) <= BLOCK_SIZE
     return img.ljust(BLOCK_SIZE, b"\x00")
@@ -60,10 +66,10 @@ class Flash:
 def crc_ok(img):
     """Validate one slot image the way NvParams_Init() does."""
     magic, version, seq, crc = struct.unpack_from("<IIII", img, 0)
-    if magic != NVM_MAGIC or version != NVM_VERSION:
+    if magic != NVM_MAGIC or version not in (4, NVM_VERSION):
         return False
     params = img[16:16 + 4 * NVM_PARAM_COUNT]
-    return crc == (zlib.crc32(params) & 0xFFFFFFFF)
+    return crc == (zlib.crc32((struct.pack("<I", seq) if version == NVM_VERSION else b"") + params) & 0xFFFFFFFF)
 
 
 def unpack_params(img):
@@ -78,7 +84,12 @@ def sim_init(flash):
     if valid[0] and valid[1]:
         s0 = struct.unpack_from("<I", flash.read(0), 8)[0]
         s1 = struct.unpack_from("<I", flash.read(1), 8)[0]
-        active = 1 if s1 > s0 else 0
+        v0 = struct.unpack_from("<I", flash.read(0), 4)[0]
+        v1 = struct.unpack_from("<I", flash.read(1), 4)[0]
+        if v0 != v1:
+            active = int(v1 == NVM_VERSION)
+        else:
+            active = int(0 < ((s1 - s0) & 0xffffffff) < 0x80000000)
     elif valid[1]:
         active = 1
     else:
@@ -104,13 +115,13 @@ def sim_save(flash, active, active_seq, active_valid, params, abort_at):
         if step == abort_at:
             return target, seq                      # power lost here
         if step == "erase_p0":
-            flash.erase(target)
+            flash.mem[target][:128] = b"\xff" * 128
         elif step == "erase_p1":
-            pass                                    # one 256B slot, page 2
+            flash.mem[target][128:] = b"\xff" * 128
         elif step == "prog_p0":
-            pass                                    # programmed as a whole
+            flash.mem[target][:128] = image[:128]
         elif step == "prog_p1":
-            flash.program(target, image)
+            flash.mem[target][128:] = image[128:]
         elif step == "verify":
             if not crc_ok(flash.read(target)) or \
                     flash.read(target) != image:
@@ -253,3 +264,37 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# Metadata corruption and generation rollover must not select stale records.
+p0 = list(range(NVM_PARAM_COUNT))
+p1 = [i + 100 for i in p0]
+f = Flash()
+f.program(0, block_image(0xffffffff, p0))
+f.program(1, block_image(0, p1))
+assert sim_init(f)[3] == p1
+f.mem[1][8] ^= 1
+assert sim_init(f)[3] == p0
+# v4 calibration survives copy-on-write migration, including interrupted saves.
+f = Flash()
+f.program(0, block_image(99, p0, version=4))
+for step in ('erase_p0', 'erase_p1', 'prog_p0', 'prog_p1', 'verify', 'flip', None):
+    g = Flash(); g.mem = [bytearray(x) for x in f.mem]
+    active, seq, valid, values = sim_init(g)
+    sim_save(g, active, seq, valid, values, step)
+    assert sim_init(g)[3] == p0
+print('Metadata CRC, rollover and v4 migration tests passed')
+
+# Cut power after each programmed word (including header / sequence / CRC).
+for n in range(0, BLOCK_SIZE + 1, 4):
+    f = Flash()
+    f.program(0, block_image(50, p0))
+    f.erase(1)
+    f.program(1, block_image(51, p1)[:n])
+    assert sim_init(f)[3] in (p0, p1)
+for bit in range(32):
+    f = Flash()
+    f.program(0, block_image(50, p0))
+    f.program(1, block_image(51, p1))
+    f.mem[1][8 + bit // 8] ^= 1 << (bit % 8)
+    assert sim_init(f)[3] == p0
+print('65 word-boundary power cuts and 32 sequence-bit flips passed')

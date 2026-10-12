@@ -353,6 +353,10 @@ uint8_t Studio_ADC1_ReadCurrentMilliamp(uint32_t *out_ma)
   shunt_voltage_uV = (adc_voltage_uV * div_den) / div_num;
   current_mA = (shunt_voltage_uV * 1000ULL) /
                ((uint64_t)shunt_uohm * amp_gain);
+  if ( current_mA > UINT32_MAX ) {
+    *out_ma = UINT32_MAX;
+    return 0U; /* unrepresentable calibration result is never zero current */
+  }
   *out_ma = (uint32_t)current_mA;
   return 1U;
 }

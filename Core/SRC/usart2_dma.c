@@ -11,9 +11,41 @@
 /* Local state                                                                 */
 /*---------------------------------------------------------------------------*/
 /* Circular DMA receive buffer. DMA writes here continuously. */
-static uint8_t  s_rx_buf[ USART2_DMA_RX_BUF_LEN ];
+static volatile uint8_t s_rx_buf[ USART2_DMA_RX_BUF_LEN ];
 /* Read cursor: index of the next unread byte (consumed by USART2_DMA_Read). */
-static volatile uint32_t s_mark;
+static uint32_t s_mark; /* absolute consumer count, unsigned wrap-safe */
+static volatile uint32_t s_rx_base;
+static volatile uint8_t s_rx_gap;
+static uint8_t s_rx_loss;
+static volatile uint8_t s_rx_overruns;
+
+/* Both half/full flags pending means the IRQ was delayed by >= half a ring;
+ * several wraps are indistinguishable, so discard rather than invent data. */
+void DMA1_Channel1_IRQHandler(void)
+{
+    uint32_t half = LL_DMA_IsActiveFlag_HT1(DMA1);
+    uint32_t full = LL_DMA_IsActiveFlag_TC1(DMA1);
+    if (half && full) s_rx_gap = 1u;
+    if (half) LL_DMA_ClearFlag_HT1(DMA1);
+    if (full) {
+        LL_DMA_ClearFlag_TC1(DMA1);
+        s_rx_base += USART2_DMA_RX_BUF_LEN;
+    }
+    if (LL_DMA_IsActiveFlag_TE1(DMA1)) {
+        LL_DMA_ClearFlag_TE1(DMA1);
+        s_rx_gap = 1u;
+    }
+}
+
+uint8_t USART2_DMA_TakeRxLoss(void)
+{
+    uint8_t loss = s_rx_loss;
+    s_rx_loss = 0u;
+    return loss;
+}
+
+uint8_t USART2_DMA_GetOverruns(void) { return s_rx_overruns; }
+
 
 /*---------------------------------------------------------------------------*/
 /* DMA write position: how many bytes the DMA has written into the ring.      */
@@ -22,8 +54,16 @@ static volatile uint32_t s_mark;
 /*---------------------------------------------------------------------------*/
 static uint32_t usart2_dma_write_pos( void )
 {
-    return USART2_DMA_RX_BUF_LEN -
-           LL_DMA_GetDataLength( DMA1, LL_DMA_CHANNEL_1 );
+    uint32_t primask = __get_PRIMASK();
+    uint32_t remaining, position;
+    __disable_irq();
+    do {
+        DMA1_Channel1_IRQHandler(); /* account for a pending wrap atomically */
+        remaining = LL_DMA_GetDataLength(DMA1, LL_DMA_CHANNEL_1);
+    } while (LL_DMA_IsActiveFlag_TC1(DMA1));
+    position = s_rx_base + USART2_DMA_RX_BUF_LEN - remaining;
+    __set_PRIMASK(primask);
+    return position;
 }
 
 /*---------------------------------------------------------------------------*/
@@ -69,9 +109,15 @@ void USART2_DMA_Start( void )
      * No IDLE interrupt is used anywhere: frame/content decisions belong to
      * the consumer (sdm845_detect), which polls USART2_DMA_Read(). */
     LL_USART_EnableDMAReq_RX( USART2 );
+    s_mark = s_rx_base = 0u;
+    s_rx_gap = s_rx_loss = s_rx_overruns = 0u;
+    LL_DMA_ClearFlag_GI1(DMA1);
+    LL_DMA_EnableIT_HT(DMA1, LL_DMA_CHANNEL_1);
+    LL_DMA_EnableIT_TC(DMA1, LL_DMA_CHANNEL_1);
+    LL_DMA_EnableIT_TE(DMA1, LL_DMA_CHANNEL_1);
+    NVIC_SetPriority(DMA1_Channel1_IRQn, 1u);
+    NVIC_EnableIRQ(DMA1_Channel1_IRQn);
     LL_DMA_EnableChannel( DMA1, LL_DMA_CHANNEL_1 );
-
-    s_mark = 0u;
 }
 
 void USART2_DMA_Stop( void )
@@ -86,19 +132,28 @@ size_t USART2_DMA_Read( uint8_t *out, size_t max_len )
     uint32_t available;
     uint32_t i;
 
-    /* New bytes are [s_mark, write) in ring order (wrapping at BUF_LEN). */
-    available = ( write >= s_mark )
-                ? ( write - s_mark )
-                : ( USART2_DMA_RX_BUF_LEN - s_mark + write );
-
-    if ( available > max_len ) {
-        available = (uint32_t)max_len;
+    available = write - s_mark;
+    if (s_rx_gap || available >= USART2_DMA_RX_BUF_LEN) {
+        s_rx_gap = 0u;
+        s_mark = write;
+        s_rx_loss = 1u;
+        ++s_rx_overruns;
+        return 0u;
     }
-
-    for ( i = 0u ; i < available ; ++i ) {
-        out[ i ] = s_rx_buf[ s_mark ];
-        s_mark = ( s_mark + 1u ) % USART2_DMA_RX_BUF_LEN;
+    if (available > max_len) available = (uint32_t)max_len;
+    for (i = 0u; i < available; ++i) {
+        out[i] = s_rx_buf[(s_mark + i) % USART2_DMA_RX_BUF_LEN];
     }
+    /* DMA keeps running while copying; do not publish overwritten bytes. */
+    write = usart2_dma_write_pos();
+    if (s_rx_gap || (uint32_t)(write - s_mark) >= USART2_DMA_RX_BUF_LEN) {
+        s_rx_gap = 0u;
+        s_mark = write;
+        s_rx_loss = 1u;
+        ++s_rx_overruns;
+        return 0u;
+    }
+    s_mark += available;
     return (size_t)available;
 }
 

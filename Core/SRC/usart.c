@@ -131,14 +131,21 @@ void Studio_USART2_Init(void)
 
   LL_IOP_GRP1_EnableClock(LL_IOP_GRP1_PERIPH_GPIOA);
   /**USART2 GPIO Configuration
-   * Both pins are muxed TX+RX here (generator-native). While the
-   * USART2_TXSW_LINEMODE gate is 1, USART2_SetTxSource() reconfigures PA0
-   * at the end of this init: it starts on the CH343 throw, so PA0 goes to
-   * a high-Z input (RX-only) until the PY32 sends.
+   * With USART2_TXSW_LINEMODE=1, PA0 stays high impedance throughout
+   * initialization and USART2 starts RX-only. Only PA1 is muxed here.
+   * The first explicit PY32 selection disconnects CH343 before driving PA0.
    *PA0     ------> USART2_TX (push-pull AF9 while the PY32 sends)
    *PA1     ------> USART2_RX (always AF9)
    */
+#if ( USART2_TXSW_LINEMODE == 1 )
+  GPIO_InitStruct.Pin = LL_GPIO_PIN_0;
+  GPIO_InitStruct.Mode = LL_GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
+  LL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+  GPIO_InitStruct.Pin = LL_GPIO_PIN_1;
+#else
   GPIO_InitStruct.Pin = LL_GPIO_PIN_0|LL_GPIO_PIN_1;
+#endif
   GPIO_InitStruct.Mode = LL_GPIO_MODE_ALTERNATE;
   GPIO_InitStruct.Pull = LL_GPIO_PULL_UP;
   GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_VERY_HIGH;
@@ -153,7 +160,11 @@ void Studio_USART2_Init(void)
   USART_InitStruct.DataWidth = LL_USART_DATAWIDTH_8B;
   USART_InitStruct.Parity = LL_USART_PARITY_NONE;
   USART_InitStruct.StopBits = LL_USART_STOPBITS_1;
+#if ( USART2_TXSW_LINEMODE == 1 )
+  USART_InitStruct.TransferDirection = LL_USART_DIRECTION_RX;
+#else
   USART_InitStruct.TransferDirection = LL_USART_DIRECTION_TX_RX;
+#endif
   USART_InitStruct.HardwareFlowControl = LL_USART_HWCONTROL_NONE;
   USART_InitStruct.OverSampling = LL_USART_OVERSAMPLING_16;
   LL_USART_Init(USART2, &USART_InitStruct);

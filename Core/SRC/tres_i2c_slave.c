@@ -11,6 +11,8 @@
   ******************************************************************************
   */
 #include "main.h"
+#include "qport_py32.h"
+#include "usart2_dma.h"
 #include "tres_i2c_slave.h"
 #include "tres_cmd.h"
 #include "tres_seq.h"
@@ -52,6 +54,7 @@ static uint8_t  s_wr_ovr;
 static uint8_t  s_tempBuf[ TRES_REG_SDM845_TEMP_LEN ];
 static volatile uint32_t s_temp_raw;
 static volatile uint8_t  s_temp_valid;
+static volatile uint32_t s_temp_tick;
 
 /* NVRAM parameter window staging: 4 bytes per slot, big-endian. Bytes land in
  * s_nvBuf indexed by their offset within the slot; the 4th byte commits the
@@ -98,6 +101,8 @@ static uint8_t Reg_Read(uint8_t addr)
         case TRES_REG_PINS:    return TRES_Seq_GetPinsSnapshot();
         case TRES_REG_LASTERR: return TRES_Cmd_LastErr();
         case TRES_REG_VERSION: return TRES_IF_VERSION;
+        case TRES_REG_COMPLETED: return TRES_Cmd_Completed();
+        case TRES_REG_RX_OVERRUN: return USART2_DMA_GetOverruns();
         default: break;
     }
 
@@ -133,6 +138,7 @@ static uint8_t Reg_Read(uint8_t addr)
 /*============================================================================*/
 void TRES_I2C_Slave_Init(void)
 {
+    s_temp_valid = 0u;
     s_regPtr    = 0u;
     s_expectPtr = 1u;
     s_tx        = 0u;
@@ -161,7 +167,14 @@ int32_t TRES_I2C_Slave_GetSdm845TempMilliC( void )
 
 uint8_t TRES_I2C_Slave_GetSdm845TempValid( void )
 {
-    return s_temp_valid;
+    uint32_t primask = __get_PRIMASK();
+    uint8_t valid;
+    __disable_irq();
+    /* Latch expiry until a complete new sample arrives, including tick wrap. */
+    if ( (uint32_t)(QOS_Tick_Get() - s_temp_tick) >= 5000u ) s_temp_valid = 0u;
+    valid = s_temp_valid;
+    __set_PRIMASK(primask);
+    return valid;
 }
 
 /*============================================================================*/
@@ -247,6 +260,7 @@ void I2C1_IRQHandler(void)
                                  ( (uint32_t)s_tempBuf[ 1 ] << 16 ) |
                                  ( (uint32_t)s_tempBuf[ 2 ] << 8  ) |
                                  ( (uint32_t)s_tempBuf[ 3 ]       );
+                    s_temp_tick = QOS_Tick_Get();
                     s_temp_valid = 1u;
                 }
                 /* auto-advance the register pointer for a burst write */

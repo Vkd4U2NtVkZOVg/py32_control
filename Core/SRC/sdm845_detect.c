@@ -111,6 +111,11 @@ static void sdm845_task_cb( qEvent_t e )
     (void)e;
 
     n = USART2_DMA_Read( tmp, sizeof( tmp ) );
+    if (USART2_DMA_TakeRxLoss()) {
+        Sdm845_Detect_ResetAll();
+        s_any_rx = 0u;
+        return;
+    }
     if ( n > 0u ) {
         for ( i = 0u ; i < n ; ++i ) {
             sdm845_matcher_feed( &s_stage1, tmp[ i ] );

@@ -18,18 +18,21 @@
   *
  * Registers:
  *   0x00 CMD      W  command port (magic 0xA5 + TRES_CmdId_t + mode param)
- *   0x10 STATUS   R  bit[3:0]=state 4=host_ready 5=fault 6=busy 7=last_err
+ *   0x10 STATUS   R  bit[3:0]=state 4=host_ready 5=cmd_busy 6=reserved 7=last_err
  *   0x11 RETRIES  R  consecutive failure counter
  *   0x12 PINS     R  control-pin snapshot
  *   0x13 LASTERR  R  detail code of the last rejected command
  *   0x14 VERSION  R  interface version (TRES_IF_VERSION)
+ *   0x15 COMPLETED R commands executed, modulo 256 (success or failure)
+ *   0x16 RX_OVERRUN R detected/discarded UART receive gaps, modulo 256
  *   0x20 SDM845_TEMP RW 4-byte window, SDM845 temperature as int32
  *                    milli-degrees Celsius, written MSB first (big endian).
  *                    The value publishes atomically once ONE transaction has
  *                    delivered all 4 bytes from the window base; partial or
  *                    mid-window writes never publish (they cannot mix
  *                    staging leftovers with fresh bytes). Readers use
- *                    TRES_I2C_Slave_GetSdm845Temp*().
+ *                    TRES_I2C_Slave_GetSdm845Temp*(). Expires after 5000 ms;
+ *                    host should publish at least once per second.
  *   0x30 BOOTSTATE R  SDM845 boot FSM state (Sdm845_State_t, sdm845_boot.h)
  *   0x31 BOOTRETRY R  SDM845 boot retry counter (Sdm845_Boot_GetRetries)
  *   0x32 TECFLAGS  R  TEC control alarms (TEC_ALARM_* bitmask, tec_control.h)
@@ -64,6 +67,8 @@ extern "C" {
 #define TRES_REG_PINS       0x12u
 #define TRES_REG_LASTERR    0x13u
 #define TRES_REG_VERSION    0x14u
+#define TRES_REG_COMPLETED  0x15u
+#define TRES_REG_RX_OVERRUN 0x16u
 
 /* SDM845 temperature window: 4 bytes at 0x20..0x23, int32 milli-degree
  * Celsius, transferred MSB first (big endian). Publishes atomically when ONE
@@ -118,7 +123,7 @@ void TRES_I2C_Slave_Init(void);
 int32_t TRES_I2C_Slave_GetSdm845TempMilliC(void);
 
 /**
- * @brief Non-zero once the host has completed at least one temperature write.
+ * @brief Non-zero only while a complete host temperature sample is < 5000 ms old.
  *        Reads before the first complete write return 0 milli-Celsius.
  */
 uint8_t TRES_I2C_Slave_GetSdm845TempValid(void);

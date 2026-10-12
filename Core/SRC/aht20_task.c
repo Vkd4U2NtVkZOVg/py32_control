@@ -6,7 +6,8 @@
  *
  *     [*] --> POWER_ON_WAIT --t_pwup--> CHECK_STATUS
  *     CHECK_STATUS --已校准(0x18)--> PRE_TRIGGER
- *     CHECK_STATUS --未校准/读失败--> SPECIAL_INIT --t_init--> PRE_TRIGGER
+ *     CHECK_STATUS --未校准/读失败--> SPECIAL_INIT --t_init--> CHECK_STATUS
+ *     SPECIAL_INIT --失败--> SAMPLE_WAIT --t_cycle--> CHECK_STATUS
  *     PRE_TRIGGER --t_pre--> TRIGGER
  *     TRIGGER --> WAIT_MEASURE --t_conv--> READ_DATA
  *     READ_DATA --成功/失败--> SAMPLE_WAIT --t_cycle--> TRIGGER (loop)
@@ -22,8 +23,8 @@
  *   WAIT_MEASURE   waits the 80 ms conversion time (t_conv), then READ_DATA.
  *   READ_DATA      reads 7 bytes + CRC + converts temperature/humidity on entry,
  *                  then computes and caches the dew point (only when the read
- *                  succeeded; old cached value kept on failure).
- *   SAMPLE_WAIT    holds the sample interval (t_cycle) until the next TRIGGER.
+ *                  succeeded; cached data expires after 25 s).
+ *   SAMPLE_WAIT    holds t_cycle, then TRIGGER on success or CHECK_STATUS on error.
  *
  * Every long delay is a state-machine timeout, so the task yields the CPU
  * between states; the only busy-work is the ~0.1 ms bit-banged I2C
@@ -37,6 +38,7 @@
  * does deliver through StateOnSignal. All fixed delays use timeout tables.
  */
 #include "main.h"
+#include "qport_py32.h"
 #include "QuarkTS.h"
 #include "aht20_task.h"
 #include "aht20.h"
@@ -65,6 +67,8 @@ typedef struct {
     qSM_Signal_t      sigStack[8];
     int32_t           latestDewPointC;  /**< cached, read by the getter      */
     int32_t           latestTempC;      /**< cached ambient temp (milli-°C)  */
+    uint32_t          sampleTick;
+    volatile uint8_t  sampleValid;
     int               lastStatus;       /**< last AHT20_* result code        */
     AHT20_Data_t      lastData;         /**< last successful measurement     */
     uint8_t           statusByte;       /**< raw status from CHECK_STATUS    */
@@ -122,7 +126,7 @@ static qSM_Status_t st_SpecialInit_Cb( qSM_Handler_t h )
             s_aht.lastStatus = AHT20_Init();
             break;
         case AHT20_TIMEOUT:
-            h->NextState = &stPreTrigger;
+            h->NextState = (s_aht.lastStatus == AHT20_OK) ? &stCheckStatus : &stSampleWait;
             return qSM_STATUS_SIGNAL_HANDLED;
         default:
             break;
@@ -153,7 +157,7 @@ static qSM_Status_t st_Trigger_Cb( qSM_Handler_t h )
         default:
             break;
     }
-    h->NextState = &stWaitMeasure;
+    h->NextState = (s_aht.lastStatus == AHT20_OK) ? &stWaitMeasure : &stSampleWait;
     return qSM_STATUS_SIGNAL_HANDLED;
 }
 
@@ -178,10 +182,13 @@ static qSM_Status_t st_ReadData_Cb( qSM_Handler_t h )
         case QSM_SIGNAL_ENTRY:
             s_aht.lastStatus = AHT20_ReadResult( &s_aht.lastData );
             if ( s_aht.lastStatus == AHT20_OK ) {
+                s_aht.sampleValid = 0u;
+                s_aht.sampleTick = QOS_Tick_Get();
                 s_aht.latestTempC      = s_aht.lastData.temperature_milli_celsius;
                 s_aht.latestDewPointC = AHT20_DewPointMilliCelsius(
                     s_aht.lastData.temperature_milli_celsius,
                     s_aht.lastData.humidity_milli_percent );
+                s_aht.sampleValid = 1u;
             }
             return qSM_STATUS_EXIT_SUCCESS;
         default:
@@ -196,7 +203,7 @@ static qSM_Status_t st_SampleWait_Cb( qSM_Handler_t h )
 {
     switch ( h->Signal ) {
         case AHT20_TIMEOUT:
-            h->NextState = &stTrigger;
+            h->NextState = (s_aht.lastStatus == AHT20_OK) ? &stTrigger : &stCheckStatus;
             return qSM_STATUS_SIGNAL_HANDLED;
         default:
             break;
@@ -233,6 +240,7 @@ static const qSM_TimeoutStateDefinition_t s_toCycle[] = {
 /*============================================================================*/
 void AHT20_Task_Init( void )
 {
+    s_aht.sampleValid = 0u;
     s_aht.latestDewPointC = INT32_MIN;
     s_aht.latestTempC     = INT32_MIN;
     s_aht.lastStatus      = AHT20_ERR_NOT_READY;
@@ -266,17 +274,33 @@ void AHT20_Task_Init( void )
                                     (qTime_t)0.01f, qEnabled, NULL );
 }
 
-int32_t AHT20_Get_LastDewPointMilliCelsius( void )
+/* Do not modify lastStatus here: the I2C ISR also calls the getters, and
+ * lastStatus belongs to the FSM's in-flight init/trigger result. */
+static uint8_t aht_sample_fresh(void)
 {
-    return s_aht.latestDewPointC;
+    uint32_t primask = __get_PRIMASK();
+    uint8_t valid;
+    __disable_irq();
+    if ((uint32_t)(QOS_Tick_Get() - s_aht.sampleTick) >= 25000u) {
+        s_aht.sampleValid = 0u;
+    }
+    valid = s_aht.sampleValid;
+    __set_PRIMASK(primask);
+    return valid;
 }
 
-int32_t AHT20_Get_LastTempMilliCelsius( void )
+int32_t AHT20_Get_LastDewPointMilliCelsius(void)
 {
-    return s_aht.latestTempC;
+    return aht_sample_fresh() ? s_aht.latestDewPointC : INT32_MIN;
 }
 
-int AHT20_Get_LastStatus( void )
+int32_t AHT20_Get_LastTempMilliCelsius(void)
 {
-    return s_aht.lastStatus;
+    return aht_sample_fresh() ? s_aht.latestTempC : INT32_MIN;
+}
+
+int AHT20_Get_LastStatus(void)
+{
+    if (s_aht.lastStatus != AHT20_OK) return s_aht.lastStatus;
+    return aht_sample_fresh() ? AHT20_OK : AHT20_ERR_NOT_READY;
 }

@@ -15,7 +15,7 @@ Registers:
   0x00 CMD          W 3-byte command mailbox ([0xA5][cmd][param]) - see
                     tres_i2c_probe.py, not used here.
   0x10 STATUS       R   0x11 RETRIES R   0x12 PINS R
-  0x13 LASTERR      R   0x14 VERSION R (0x02)
+  0x13 LASTERR      R   0x14 VERSION R (0x03)
   0x20 SDM845_TEMP  RW 4-byte window: SDM845 temperature as int32
                     milli-degrees Celsius, MSB first (big endian). The value
                     publishes atomically once all 4 bytes have landed.
@@ -45,7 +45,7 @@ TRES_REG_VERSION = 0x14
 TRES_REG_SDM845_TEMP = 0x20
 TRES_REG_SDM845_TEMP_LEN = 4
 
-TRES_IF_VERSION = 0x02
+TRES_IF_VERSION = 0x03
 
 # milli-degree Celsius values exercised by the "test" subcommand: negative
 # (two's complement over the bus), zero, and positive extremes.

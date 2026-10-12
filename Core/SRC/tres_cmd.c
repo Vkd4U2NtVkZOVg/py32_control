@@ -26,7 +26,8 @@ typedef struct {
 /* Private variables ---------------------------------------------------------*/
 static qTask_t      s_parserTask;
 static Cmd_Mailbox_t s_mailbox;
-static uint8_t      s_lastErr  = TRES_ERR_NONE;
+static volatile uint8_t s_completed;
+static volatile uint8_t s_lastErr  = TRES_ERR_NONE;
 static uint8_t      s_failCnt  = 0u;   /**< CMD_REPORT_FAIL counter (RETRIES) */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -49,7 +50,17 @@ static uint8_t Policy_Apply(uint8_t cmd, uint8_t param)
 
     /* NVRAM housekeeping is legal in every state and never migrates.        */
     if ( cmd == TRES_CMD_SAVE_PARAMS ) {
-        (void)NvParams_Save();
+        if (NvParams_Save() != 0) {
+            s_lastErr = TRES_ERR_FLASH;
+            return 0u;
+        }
+        return 1u;
+    }
+    if (cmd == TRES_CMD_RELOAD_PARAMS) {
+        if (NvParams_Reload() != 0) {
+            s_lastErr = TRES_ERR_FLASH;
+            return 0u;
+        }
         return 1u;
     }
     if ( cmd == TRES_CMD_DEFAULT_PARAMS ) {
@@ -85,9 +96,14 @@ static void Parser_TaskCb(qEvent_t e)
     if ( s_mailbox.valid != 0u ) {
         uint8_t cmd   = s_mailbox.cmd;
         uint8_t param = s_mailbox.param;
-        s_mailbox.valid = 0u;          /* ISR may refill from here on        */
-
+        uint32_t primask;
+        /* Keep BUSY through execution; no second command can overwrite state. */
         (void)Policy_Apply( cmd, param );
+        primask = __get_PRIMASK();
+        __disable_irq();
+        ++s_completed;
+        s_mailbox.valid = 0u;
+        __set_PRIMASK(primask);
     }
 }
 
@@ -97,8 +113,10 @@ static void Parser_TaskCb(qEvent_t e)
 void TRES_Cmd_PostFromISR(uint8_t cmd, uint8_t param)
 {
     if ( s_mailbox.valid != 0u ) {
-        return;                        /* dropped: host polls STATUS/retries */
+        s_lastErr = TRES_ERR_BUSY;
+        return; /* explicit rejection, completion counter does not advance */
     }
+    s_lastErr = TRES_ERR_NONE;
     s_mailbox.cmd   = cmd;
     s_mailbox.param = param;
     s_mailbox.valid = 1u;              /* written last: release to the task  */
@@ -117,6 +135,7 @@ uint8_t TRES_Cmd_StatusByte(void)
 {
     uint8_t v = (uint8_t)( TRES_Seq_GetState() & 0x0Fu );
 
+    if (s_mailbox.valid != 0u) { v |= 0x20u; }
     if ( TRES_Seq_HostReady() != 0u )  { v |= 0x10u; }
     if ( s_lastErr != TRES_ERR_NONE )  { v |= 0x80u; }
     return v;
@@ -125,6 +144,11 @@ uint8_t TRES_Cmd_StatusByte(void)
 uint8_t TRES_Cmd_Retries(void)
 {
     return s_failCnt;
+}
+
+uint8_t TRES_Cmd_Completed(void)
+{
+    return s_completed;
 }
 
 uint8_t TRES_Cmd_LastErr(void)
@@ -137,6 +161,7 @@ uint8_t TRES_Cmd_LastErr(void)
 /*============================================================================*/
 void TRES_Cmd_Init(void)
 {
+    s_completed = 0u;
     s_mailbox.valid = 0u;
     s_mailbox.cmd   = 0u;
     s_mailbox.param = 0u;

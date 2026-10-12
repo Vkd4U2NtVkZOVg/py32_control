@@ -129,7 +129,7 @@ int main(void)
   /* Initialize all configured peripherals */
   Studio_GPIO_Init();
   Studio_I2C1_Init();
-  NvParams_Init();          /* load non-volatile parameters (FLASH, no write) */
+  NvParams_Init();          /* load parameters; initialize/migrate FLASH if needed */
   SoftI2C_Init();
   MCP4725_Init();               /* DAC out to 0V: TEC current only by control task */
   Studio_ADC1_Init();
@@ -184,6 +184,7 @@ int main(void)
   */
 void Error_Handler(void)
 {
+  Board_FatalShutdown();
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
   __disable_irq();

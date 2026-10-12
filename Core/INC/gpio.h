@@ -79,6 +79,7 @@ extern "C" {
 #define UART2_TX_SW_Port GPIOF
 
 void Studio_GPIO_Init(void);
+void Board_FatalShutdown(void);
 
 /* USER CODE BEGIN Prototypes */
 

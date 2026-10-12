@@ -34,6 +34,7 @@
 /* USER CODE BEGIN Includes */
 #include "qport_py32.h"
 #include "fan.h"
+#include "gpio.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -80,6 +81,7 @@
  */
 void NMI_Handler(void)
 {
+  Board_FatalShutdown();
   /* USER CODE BEGIN NMI_Handler 0 */
 
   /* USER CODE END NMI_Handler 0 */
@@ -95,6 +97,7 @@ void NMI_Handler(void)
  */
 void HardFault_Handler(void)
 {
+  Board_FatalShutdown();
   /* USER CODE BEGIN HardFault_Handler 0 */
 
   /* USER CODE END HardFault_Handler 0 */
