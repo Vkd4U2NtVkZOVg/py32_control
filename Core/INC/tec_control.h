@@ -61,6 +61,16 @@ extern "C" {
                                              NTC open/short, ADC timeout - TEC
                                              driven to a safe state               */
 
+/* Bench/build switch: compile out the tachometer stall detection entirely.
+ * When no fan is fitted (bench bring-up, no tach pulses -> RPM always 0),
+ * the stall logic would latch TEC_ALARM_FAN_FAULT and the sustained-stall
+ * interlock would permanently block the first-enable path. Set to 0 to
+ * disable FAN_FAULT detection, the stall cut and the spool-up grace timer;
+ * the fan PWM itself (hot-side ramp) is unaffected. Default 1 = enabled. */
+#ifndef TEC_FAN_FAULT_ENABLE
+#define TEC_FAN_FAULT_ENABLE        (1u)
+#endif
+
 /**
  * @brief Initialize the TEC control task.
  *

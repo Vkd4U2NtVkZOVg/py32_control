@@ -3495,3 +3495,35 @@ grep 复核:`NvParams_Save` 共 9 个返回点,现在 8 个带锁返回 + 1 个"
 ### 验证
 
 编译 0 项目警告;`test/replay_boot_fsm.py` 三场景(A 故障复现/B 修复/C 诚实超时)重放结果不变——该离线模型本就按"先查锁存再判超时"的语义书写,与修复后固件一致。
+
+---
+
+## 2026-10-11 — 风扇故障检测可编译开关（TEC_FAN_FAULT_ENABLE，无风扇调试）
+
+### 背景
+
+板级调试/裸机 bring-up 时无风扇：tach 无脉冲 → RPM 恒 0 → 风扇失速检测持续置 `TEC_ALARM_FAN_FAULT`，且"失速联锁"（`s_fan_stalled`）会**永久阻塞首次使能路径**——没风扇时 TEC 根本无法开启。
+
+### 实现
+
+`tec_control.h` 新增编译开关（默认 1 = 启用）：
+
+```c
+#ifndef TEC_FAN_FAULT_ENABLE
+#define TEC_FAN_FAULT_ENABLE (1u)
+#endif
+```
+
+`tec_control.c` 用 `#if (TEC_FAN_FAULT_ENABLE == 1)` 包住全部风扇故障逻辑：
+
+1. 静态变量 `s_fan_stall_ms / s_fan_grace_ms / s_fan_stalled / s_fan_started` 声明 + `TecControl_Init()` 清零；
+2. 失速联锁块（PID 前，"stalled fan 必须恢复才能 enable"）；
+3. 首次使能时的 spool-up grace 武装；
+4. §8 stall 检测段（FAN_FAULT 报警 + 持续失速切 TEC + 100% 驱动）——**保留** `fan_duty = tec_fan_duty_from_hot()` 的计算和 `Fan_SetDutyPercent(fan_duty)` 输出（热端风扇斜坡不受开关影响），只包住 tach 判定/覆写/计时。
+
+宏关时：无 FAN_FAULT 报警、无失速切 TEC、无联锁，风扇仍按热端斜坡驱动；RPM 恒 0 不再干扰 TEC 使能。
+
+### 验证
+
+- `TEC_FAN_FAULT_ENABLE=1` 与 `=0` 双态编译 tec_control.c：均 0 错 0 警；
+- 全量 Core/SRC（宏开）编译 0 警；`nv_dualslot_sim.py` 232 + CRC/回绕/迁移 + 掉电枚举全过。

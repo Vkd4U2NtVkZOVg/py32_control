@@ -290,10 +290,12 @@ static uint8_t     s_dac_percent = 0xFFu; /* last duty written to the DAC;
                                            0xFF = "unknown" sentinel so the
                                            first tec_dac_set() is never
                                            short-circuited                    */
+#if ( TEC_FAN_FAULT_ENABLE == 1 )
 static uint32_t    s_fan_stall_ms;  /* accumulated below-RPM time            */
 static uint32_t    s_fan_grace_ms;  /* remaining fan spool-up grace          */
 static uint8_t     s_fan_stalled;   /* interlock: only healthy RPM clears it */
 static uint8_t     s_fan_started;   /* do not renew grace on each TEC enable */
+#endif /* TEC_FAN_FAULT_ENABLE */
 static uint8_t     s_cold_fault;    /* reset PID from real feedback on recovery */
 static volatile int32_t hot_mc;
 static volatile int32_t env_mc;
@@ -414,7 +416,9 @@ static void TecControl_Cb( qEvent_t e )
     int32_t feedforward;
 
     uint8_t fan_duty;
+#if ( TEC_FAN_FAULT_ENABLE == 1 )
     uint32_t fan_rpm;
+#endif
     uint32_t cur_read;
     uint8_t  cur_ok;
     uint8_t drive;                  /* 0 = hold the converter off this cycle */
@@ -576,6 +580,7 @@ static void TecControl_Cb( qEvent_t e )
         return;
     }
 
+    #if ( TEC_FAN_FAULT_ENABLE == 1 )
     /* A stalled fan must recover before ANY enable write. Alarm clearing
      * by the host cannot clear this interlock. Keep requesting full airflow. */
     if ( s_fan_stalled != 0u ) {
@@ -590,6 +595,7 @@ static void TecControl_Cb( qEvent_t e )
         s_fan_stall_ms = 0u;
         TecPid_Reset( &s_pid, -(float)sdm_mc );
     }
+#endif /* TEC_FAN_FAULT_ENABLE */
 
     /*--- 5. PID main loop --------------------------------------------------*/
     /* The controlled variable is the COLD side (sdm_mc); the hot side and
@@ -737,6 +743,7 @@ static void TecControl_Cb( qEvent_t e )
          * the PY32. Without this the TEC loop's fan ramps (full speed on
          * overtemp, hot-side following) never reach the fan. */
         Fan_SetEnabled( 1u );
+#if ( TEC_FAN_FAULT_ENABLE == 1 )
         /* Fresh fan start: arm the spool-up grace and clear the stall timer
          * so the first tach windows (which still read ~0 RPM) cannot trip
          * the sustained-stall cut. */
@@ -745,6 +752,7 @@ static void TecControl_Cb( qEvent_t e )
             s_fan_stall_ms = 0u;
             s_fan_started = 1u;
         }
+#endif /* TEC_FAN_FAULT_ENABLE */
     }
 
     /*--- 7c. soft-start ramp (only while driving) ---------------------------*/
@@ -783,6 +791,13 @@ static void TecControl_Cb( qEvent_t e )
      *   - recovery is automatic: a healthy RPM sample clears the timer and
      *     the TEC re-enables through the normal deadband/first-enable path. */
     fan_duty = tec_fan_duty_from_hot( hot_mc );
+
+#if ( TEC_FAN_FAULT_ENABLE == 1 )
+    /* Tachometer-based stall detection (see rules above): the hot-side ramp
+     * below is bypassed while a stall holds (fan driven at 100 %), and a
+     * sustained stall cuts the TEC. Compiled out when TEC_FAN_FAULT_ENABLE
+     * is 0 (no fan fitted on the bench: RPM reads 0 forever, which would
+     * otherwise latch FAN_FAULT and block the first-enable interlock). */
     fan_rpm  = Fan_Get_LastRPM();
 
     if ( s_fan_grace_ms != 0u ) {
@@ -817,6 +832,7 @@ static void TecControl_Cb( qEvent_t e )
     } else {
         s_fan_stall_ms = 0u;   /* healthy sample: restart the stall timer */
     }
+#endif /* TEC_FAN_FAULT_ENABLE */
 
     Fan_SetDutyPercent( fan_duty );        /* heatsink fan: follows hot side */
     if ( drive != 0u ) {
@@ -872,10 +888,12 @@ void TecControl_Init( void )
 
     s_alarm        = TEC_ALARM_NONE;
     s_tec_enabled  = 0u;
+#if ( TEC_FAN_FAULT_ENABLE == 1 )
     s_fan_stall_ms = 0u;
     s_fan_grace_ms = 0u;     /* armed at the first-enable (fresh fan start) */
     s_fan_stalled  = 0u;
     s_fan_started  = 0u;
+#endif
     s_cold_fault   = 0u;
     tec_set_enabled( 0u );   /* held off until the SDM845 thermal precheck passes */
 
