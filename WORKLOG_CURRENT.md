@@ -1,5 +1,14 @@
 # Mix3_TRES_2 Firmware 当前工作日志（精简版）
 
+## 2026-10-12：接口 v3 配套主机工具
+
+新增 `test/tres_host.py`，复用已验证的命令确认与参数协议，提供只读状态/参数查询、JSON 整表备份恢复、单槽修改、整表保存后 Flash 重载校验、默认值/重载、TRES reset/DFU、单次温度写入和 Linux thermal sysfs 持续上报。默认总线 3、地址 0x50；操作前检查接口版本 0x03。温度上报每轮重新读取实际源，读取/总线错误直接退出，不重播旧样本，不自动更改 COLD_SOURCE。
+
+- 新增 `test/HOST_README.md`、`test/requirements-host.txt`，打包时依赖文件命名为 requirements.txt；支持 Python 3.8+。
+- 新增 `test/test_host.py` 的 6 项离线测试，覆盖默认只读、保存和负温度编码、备份恢复、损坏备份写入前拒绝、真实温度读取及错误停止、Flash 失败和资源关闭；与原有 8 项探针测试全部通过。
+- 提供仓库内独立压缩包 `dist/tres-host-v3.zip`，包含 CLI、协议依赖、低层诊断脚本、说明和离线测试。未连接或操作实际 I2C 硬件。
+
+
 ## 2026-10-12：合并 GLM 修复并关闭复审遗留项
 
 ### 基线与分支
