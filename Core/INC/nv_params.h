@@ -197,6 +197,24 @@ uint32_t NvParams_GetDefault(uint8_t id);
 void NvParams_Set(uint8_t id, uint32_t val);
 
 /**
+ * @brief Monotonic generation counter for the RAM cache.
+ *
+ * Bumped by every path that changes the cache: #NvParams_Set, a successful
+ * #NvParams_Reload, #NvParams_RestoreDefaults and the power-up default fill.
+ * A consumer that snapshots parameter values at init (for example the TEC
+ * control task, which copies the whole table once) compares this against its
+ * own copy to detect that the values it is using are stale, then reloads.
+ *
+ * Only equality matters - treat it as "changed / unchanged", never as an
+ * ordering or a timestamp. Safe to call from task context even though
+ * #NvParams_Set may run in an ISR: a lost update at worst delays a consumer's
+ * reload by one of its own cycles.
+ *
+ * @return The current cache generation.
+ */
+uint32_t NvParams_GetCacheGeneration(void);
+
+/**
  * @brief Persist the RAM cache to FLASH: erase and program the slot that
  *        does NOT hold the newest good block (with recomputed CRC and a
  *        monotonically increasing seq), verify the programmed image by

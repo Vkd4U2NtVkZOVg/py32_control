@@ -153,6 +153,50 @@ int main(int argc, char **argv)
     assert(!s_tec_enabled && (s_alarm & TEC_ALARM_OVERCURRENT));
     adc_code = 0; fail_dac = 1; TecControl_Cb(NULL);
     assert(!s_tec_enabled && (s_alarm & TEC_ALARM_DAC_FAULT));
+
+    /* A parameter written over the I2C window must take effect at runtime:
+     * no reboot, and within one control cycle of the generation moving. */
+    reset_fixture(); demand = 50;
+    assert((int32_t)params[NV_TEC_EN_OFF_PCT] == 8);
+    for (int i = 0; i < 10; ++i) TecControl_Cb(NULL);
+    assert(s_tec_enabled && s_dac_percent == 50);
+    params[NV_TEC_EN_OFF_PCT] = 60;     /* duty 50 is now inside the deadband */
+    nv_cache_gen++;                     /* the host write bumps the cache gen */
+    TecControl_Cb(NULL);
+    assert(!s_tec_enabled);             /* live-reloaded: EN dropped this cycle */
+
+    /* An unrelated slot must NOT re-initialise the PID: TecPid_Init() clears
+     * the integrator and history, so resetting a running controller on every
+     * parameter write is exactly what the guard has to prevent. */
+    {
+        unsigned before = pid_inits;
+        for (int i = 0; i < 8; ++i) {
+            params[NV_TEC_DEWPOINT_MARGIN_MILLIC]++;   /* unrelated to the PID */
+            nv_cache_gen++;
+            TecControl_Cb(NULL);
+        }
+        assert(pid_inits == before);
+    }
+    /* A real gain change must go the other way: the new gains have to reach the
+     * controller (re-initialising, which is the documented cost). */
+    {
+        unsigned before = pid_inits;
+        params[NV_TEC_PID_KP_Q16] = NVM_Q16(2.0f);
+        nv_cache_gen++;
+        TecControl_Cb(NULL);
+        assert(pid_inits == before + 1);
+        assert(s_tec_enabled);          /* duty 50 is outside the deadband again */
+    }
+
+    /* The loop period is owned by the scheduler, so a mid-run write to it must
+     * NOT reach the fan-stall timers and rescale their millisecond maths. */
+    assert(s_p.control_period_ms == 500);
+    params[NV_TEC_CONTROL_PERIOD_MS] = 5000;
+    nv_cache_gen++;
+    TecControl_Cb(NULL);
+    assert(s_p.control_period_ms == 500);
+    params[NV_TEC_CONTROL_PERIOD_MS] = 500;
+    nv_cache_gen++;
     puts("TEC fault callback tests passed");
     return 0;
 }

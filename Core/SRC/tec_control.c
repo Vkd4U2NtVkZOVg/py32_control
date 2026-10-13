@@ -73,6 +73,11 @@
 #define TEC_D_FILTER_TAU_S        ( 2.0f )
 #define TEC_I_SLEW_PCT_PER_S      ( 50.0f )
 
+/* Quiet NaN as a constant expression, for the "no gains applied yet" seed of
+ * the PID-gain change detector (see s_pid_kp). A bit pattern is used instead of
+ * math.h's NAN to avoid depending on a header in a static initialiser. */
+#define FLOAT_NAN                 ( __builtin_nanf( "" ) )
+
 /* Fan-stall protection: the tachometer RPM is the direct, fast indicator of a
  * dead heatsink fan, but it is a 2 s-window average (fan_task) that still
  * reads ~0 until the fan has spooled up and its first window completes.
@@ -305,6 +310,95 @@ static volatile int32_t sdm_mc;
 static volatile uint32_t cur_ma;
 static volatile int32_t target_mc;
 static volatile int32_t duty;
+
+/* Live parameter reload bookkeeping.
+ *
+ * The snapshot in s_p is refreshed whenever the NVRAM cache generation moves
+ * (see NvParams_GetCacheGeneration), so a host write to the I2C parameter
+ * window takes effect on the next control cycle instead of requiring a
+ * reboot. Two quantities are deliberately NOT refreshed:
+ *
+ *   - the loop period: it is fixed by the QuarkTS schedule created at init,
+ *     and it normalizes the PID's ki/kd and the fan-stall timers. A host write
+ *     to NV_TEC_CONTROL_PERIOD_MS cannot change the running schedule, so the
+ *     boot value is authoritative - using the newly written value would
+ *     silently rescale every physical gain;
+ *   - the PID gains: applied only when the GAIN VALUES change, never merely
+ *     because some other slot was written (TecPid_Init clears the integrator
+ *     and history - see tec_apply_pid_params()). */
+static int32_t     s_loop_period_ms = 1000;  /* effective loop period, set once */
+static uint32_t    s_nv_gen;        /* s_cache_gen s_p was last loaded from      */
+
+/* The gains currently loaded in s_pid. Initialised to NaN so the first
+ * comparison is always unequal (NaN != NaN) and the controller is set up
+ * regardless of which gain value is in NVRAM. */
+static float       s_pid_kp = FLOAT_NAN;
+static float       s_pid_ki = FLOAT_NAN;
+static float       s_pid_kd = FLOAT_NAN;
+
+/* (Re-)apply the parameter snapshot to the PID controller.
+ *
+ * The sample period is the boot-time loop period, NOT s_p.control_period_ms:
+ * a host write to NV_TEC_CONTROL_PERIOD_MS cannot change the running QuarkTS
+ * schedule, and ki/kd are physical per-second gains that this period scales -
+ * honouring a mid-run write here would silently rescale them. Boot-time-only
+ * is therefore the honest mapping (see s_loop_period_ms).
+ *
+ * The decision to re-initialise is made on the GAIN VALUES, not on the NVRAM
+ * cache generation: TecPid_Init() clears the integrator and history, and every
+ * parameter write (including slots with nothing to do with the PID) moves the
+ * generation. Keying off the generation would therefore reset a running
+ * controller on any unrelated write - exactly what this guard exists to
+ * prevent. Re-initialising on a genuine gain change IS wanted: the alternative
+ * is quietly running the new gains against the old tuning. */
+static void tec_apply_pid_params( void )
+{
+    float period_s;
+
+    if ( ( s_p.pid_kp == s_pid_kp ) &&
+         ( s_p.pid_ki == s_pid_ki ) &&
+         ( s_p.pid_kd == s_pid_kd ) ) {
+        return;
+    }
+
+    period_s = (float)s_loop_period_ms / 1000.0f;
+
+    (void)TecPid_Init( &s_pid,
+                       s_p.pid_kp, s_p.pid_ki, s_p.pid_kd,
+                       period_s,
+                       -(float)s_p.target_base_millic,
+                       0.0f, 100.0f,
+                       -( TEC_I_SLEW_PCT_PER_S * period_s ),
+                       ( TEC_I_SLEW_PCT_PER_S * period_s ),
+                       period_s / ( TEC_D_FILTER_TAU_S + period_s ) );
+    s_pid_kp = s_p.pid_kp;
+    s_pid_ki = s_p.pid_ki;
+    s_pid_kd = s_p.pid_kd;
+}
+
+/* Refresh the parameter snapshot when the NVRAM cache has moved, then re-apply
+ * the PID gains if they are among the changed values. Called once per control
+ * cycle, before anything reads s_p, so every decision in that cycle uses one
+ * consistent, validated parameter set. */
+static void tec_params_reload_if_needed( void )
+{
+    uint32_t gen = NvParams_GetCacheGeneration();
+
+    if ( gen == s_nv_gen ) {
+        return;
+    }
+
+    s_nv_gen = gen;
+    tec_params_load( &s_p );
+
+    /* The running schedule owns the period, so a value written over the I2C
+     * window must not reach the fan-stall timers - they accumulate in ms and
+     * would otherwise measure against a period the loop does not run at. */
+    s_p.control_period_ms = s_loop_period_ms;
+
+    tec_apply_pid_params();
+}
+
 /*============================================================================*/
 /* Helpers                                                                     */
 /*============================================================================*/
@@ -434,6 +528,11 @@ static void TecControl_Cb( qEvent_t e )
      * (e.g. an OVERCURRENT or DAC_FAULT whose condition has since gone). */
     s_alarm = TEC_ALARM_NONE;
 
+    /*--- 0. pick up parameter writes made over the I2C window --------------*/
+    /* Host-tunable values take effect from the NEXT cycle; nothing below reads
+     * a parameter from any other source, so this cycle stays self-consistent. */
+    tec_params_reload_if_needed();
+
     /*--- 1. read all sources ------------------------------------------------*/
     hot_mc = Studio_ADC1_ReadHotMilliCelsius();
     env_mc = AHT20_Get_LastTempMilliCelsius();   /* ambient, not dew point */
@@ -506,7 +605,6 @@ static void TecControl_Cb( qEvent_t e )
     if ( sdm_mc > s_p.soc_tighten_temp_millic ) {
         target_mc -= s_p.soc_tighten_delta_millic;
     }
-    target_mc = 5000;
     /*--- 2b. hot-side foldback: lift the cold target to shed TEC load ------*/
     /* A TEC pumps waste heat into its hot side, so the way to relieve an
      * overheating heatsink is to cool LESS, not harder. Instead of dropping
@@ -820,8 +918,8 @@ static void TecControl_Cb( qEvent_t e )
     if ( s_fan_grace_ms != 0u ) {
         /* Unconditional per-cycle countdown - decrementing only inside the
          * fault branch would grant a fresh grace at every later stall. */
-        s_fan_grace_ms = ( s_fan_grace_ms > (uint32_t)s_p.control_period_ms )
-                         ? ( s_fan_grace_ms - (uint32_t)s_p.control_period_ms )
+        s_fan_grace_ms = ( s_fan_grace_ms > (uint32_t)s_loop_period_ms )
+                         ? ( s_fan_grace_ms - (uint32_t)s_loop_period_ms )
                          : 0u;
     }
 
@@ -832,7 +930,7 @@ static void TecControl_Cb( qEvent_t e )
         fan_duty = 100u;   /* stalled: hot-follow ramp is meaningless, max drive */
 
         if ( s_fan_grace_ms == 0u ) {
-            s_fan_stall_ms += (uint32_t)s_p.control_period_ms;
+            s_fan_stall_ms += (uint32_t)s_loop_period_ms;
             if ( s_fan_stall_ms >= ( TEC_FAN_STALL_S * 1000u ) ) {
                 /* Sustained stall: the heatsink has no airflow, so drop the
                  * TEC now instead of baking it until the hot side trips. */
@@ -870,20 +968,24 @@ static void TecControl_Cb( qEvent_t e )
 void TecControl_Init( void )
 {
     float period_s;
-    float i_lim;
-    float d_filter_a;
 
     tec_params_load( &s_p );
 
     if ( s_p.control_period_ms < 1 ) {
         s_p.control_period_ms = 1000;   /* sanity: never schedule faster than 1 ms */
     }
-    period_s = (float)s_p.control_period_ms / 1000.0f;
+    /* The loop period is fixed here, once: it defines the QuarkTS schedule
+     * created below AND normalizes the PID's ki/kd. A later host write to
+     * NV_TEC_CONTROL_PERIOD_MS cannot change the running schedule, so
+     * tec_params_reload_if_needed() deliberately restores this value - see
+     * s_loop_period_ms. Changing the period therefore requires a reboot. */
+    s_loop_period_ms = s_p.control_period_ms;
+    period_s = (float)s_loop_period_ms / 1000.0f;
 
     /* PID: output 0..100 %, I-term clamped for anti-windup, D-term filtered.
      * Gain convention (tec_pid.h): ki/kd are per-second rates, normalized
      * internally (ki*Ts, kd/Ts), so tuning stays valid if the task period
-     * changes - only period_s has to follow the QuarkTS schedule below. The
+     * changes - only the period has to follow the QuarkTS schedule below. The
      * I-clamp and the D-filter factor are derived from the PHYSICAL-time
      * macros above for the same reason (period-independent dynamics).
      * The EPID is "heating semantics"; TecControl_Cb flips the sign of both
@@ -892,16 +994,12 @@ void TecControl_Init( void )
      * Update computes P/D against a +45 V..+45 C seed vs -sdm and slams the
      * output to 100 % even at zero error. Seed with the (negated) base
      * target: at init no measurement exists yet, and the first real
-     * measurement replaces it next cycle. */
-    i_lim      = TEC_I_SLEW_PCT_PER_S * period_s;
-    d_filter_a = period_s / ( TEC_D_FILTER_TAU_S + period_s );
-    (void)TecPid_Init( &s_pid,
-                       s_p.pid_kp, s_p.pid_ki, s_p.pid_kd,
-                       period_s,
-                       -(float)s_p.target_base_millic,
-                       0.0f, 100.0f,
-                       -i_lim, i_lim,
-                       d_filter_a );
+     * measurement replaces it next cycle.
+     * tec_apply_pid_params() owns this call so the live-reload path applies
+     * the gains through exactly the same expression - the two cannot drift.
+     * The NaN seed makes the first call always take effect. */
+    s_nv_gen  = NvParams_GetCacheGeneration();
+    tec_apply_pid_params();
 
     s_alarm        = TEC_ALARM_NONE;
     s_tec_enabled  = 0u;

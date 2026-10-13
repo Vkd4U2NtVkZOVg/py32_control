@@ -25,6 +25,18 @@
  * parameter window (0x40.., see tres_i2c_slave.h) and save, or via the host
  * command SAVE_PARAMS.
  *
+ * A change made over that window takes effect from the NEXT control cycle: the
+ * task watches NvParams_GetCacheGeneration() and re-reads the table whenever it
+ * moves, so no reboot is needed. Two values are deliberately exempt and stay at
+ * their boot-time setting until the MCU is restarted:
+ *   - NV_TEC_CONTROL_PERIOD_MS - it defines the running QuarkTS schedule and
+ *     normalizes the PID's ki/kd, so it cannot follow a mid-run write;
+ *   - NV_TEC_PID_*_Q16 - applied when the gain VALUES change, because
+ *     re-applying them clears the PID integrator and history. A write to any
+ *     other slot does not disturb the controller.
+ * PID gains edited over the window are therefore picked up live (with a
+ * deliberate integrator reset); the control period needs a reboot.
+ *
  * Dependencies (already implemented):
  *   - AHT20_Get_LastTempMilliCelsius() - environment temperature
  *   - Studio_ADC1_ReadHotMilliCelsius() - TEC hot-side temperature

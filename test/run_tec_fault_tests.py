@@ -51,8 +51,9 @@ static float tracked_output;
 static uint8_t adc_ok = 1, fan_duty_seen, fan_enabled;
 static uint16_t adc_code = 0;
 static uint32_t params[NVM_PARAM_COUNT];
+static uint32_t nv_cache_gen;   /* stands in for NvParams_GetCacheGeneration() */
 static float reset_measure;
-static unsigned enable_edges, tach_reads;
+static unsigned enable_edges, tach_reads, pid_inits;
 static void LL_GPIO_SetOutputPin(int a, int b) { (void)a; (void)b; ++enable_edges; }
 static void LL_GPIO_ResetOutputPin(int a, int b) { (void)a; (void)b; }
 static int MCP4725_SetVoltage_mV(uint16_t mv) { (void)mv; return fail_dac; }
@@ -67,7 +68,7 @@ static uint16_t adc1_convert(uint32_t channel, uint8_t *ok)
 { (void)channel; *ok = adc_ok; return adc_code; }
 static int Sdm845_Boot_IsThermalReady(void) { return 1; }
 static int TecPid_Init(TecPid_t *p, float a, float b, float c, float d,
- float e, float f, float g, float h, float i, float j) { return 0; }
+ float e, float f, float g, float h, float i, float j) { ++pid_inits; return 0; }
 static void TecPid_Reset(TecPid_t *p, float m) { reset_measure = m; }
 static void TecPid_TrackOutput(TecPid_t *p, float m, float out) { reset_measure = m; tracked_output = out; }
 static void TecPid_SetSetpoint(TecPid_t *p, float s) {}
@@ -81,6 +82,7 @@ prefix = prefix.replace('typedef int qEvent_t;', 'typedef void *qEvent_t;')
 nv_stubs = '''
 uint32_t NvParams_Get(uint8_t id) { return params[id]; }
 uint32_t NvParams_GetDefault(uint8_t id) { return s_defaults[id]; }
+uint32_t NvParams_GetCacheGeneration(void) { return nv_cache_gen; }
 '''
 source = prefix + defaults + nv_stubs + adc + control
 source += (root/'test/tec_fault_harness.c').read_text(encoding='utf-8')

@@ -103,6 +103,25 @@ static uint32_t s_active_slot;      /**< slot holding the newest good block  */
 static uint32_t s_active_seq;       /**< its seq (next Save writes seq+1)    */
 static uint8_t  s_active_valid;     /**< 0 until a good block was seen/written*/
 
+/* Cache generation: bumped by EVERY path that changes s_cache, so consumers
+ * that snapshot parameter values (tec_control.c's Tec_Params_t) can tell that
+ * their copy is stale and reload it. Never decremented; comparisons are
+ * "different from my copy", not ordering, so a single wrap after 2^32 changes
+ * is harmless.
+ *
+ * volatile because NvParams_Set() is called from the I2C slave ISR while the
+ * readers run in task context. It is a pure change indicator, so a lost update
+ * under a race at worst delays a consumer's reload by one of its own cycles -
+ * it can never make a consumer miss a change permanently. */
+static volatile uint32_t s_cache_gen;
+
+/* Single funnel for every cache mutation: keeps the generation count honest
+ * instead of requiring each writer to remember to bump it. */
+static void nv_cache_bump( void )
+{
+    s_cache_gen++;
+}
+
 /* Production defaults for every TEC slot (index order = NvParamTecId_t).
  * These match the previous tunable macros in tec_control.h/adc.h. The unit
  * is stored as-is, with float gains in Q16; scale back with
@@ -232,6 +251,7 @@ static uint32_t nv_block_crc(const Nvm_Block_Data_t *block)
 static void nv_load_defaults( void )
 {
     memcpy( s_cache, s_defaults, sizeof( s_cache ) );
+    nv_cache_bump();
 }
 
 /* Mirror HAL __HAL_FLASH_TIMMING_SEQUENCE_CONFIG: pick the timing table from
@@ -299,6 +319,7 @@ int NvParams_Reload( void )
     if ( s_active_valid != 0u ) {
         s_active_seq = slot[ s_active_slot ]->data.seq;
         memcpy( s_cache, slot[ s_active_slot ]->data.params, sizeof( s_cache ) );
+        nv_cache_bump();
         return NVM_OK;
     }
     return NVM_ERR_CRC; /* leave the RAM table untouched on reload failure */
@@ -341,6 +362,12 @@ void NvParams_Set( uint8_t id, uint32_t val )
         return;
     }
     s_cache[ id ] = val;
+    nv_cache_bump();
+}
+
+uint32_t NvParams_GetCacheGeneration( void )
+{
+    return s_cache_gen;
 }
 
 int NvParams_Save( void )

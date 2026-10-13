@@ -3544,3 +3544,35 @@ grep 复核:`NvParams_Save` 共 9 个返回点,现在 8 个带锁返回 + 1 个"
 
 - `TEC_FAN_FAULT_ENABLE=1` 与 `=0` 双态编译 tec_control.c：均 0 错 0 警；
 - 全量 Core/SRC（宏开）编译 0 警；`nv_dualslot_sim.py` 232 + CRC/回绕/迁移 + 掉电枚举全过。
+
+---
+
+## 2026-10-12 — NVRAM 运行期热加载（deepseek 实现 + glm 审查修复）
+
+### 背景
+
+运行期通过 I2C 窗口改 NVRAM 参数全部不生效——`TecControl_Init()` 只快照一次 `Tec_Params_t`（`s_p`），控制循环每周期读 `s_p`，而 I2C 写只更新 `s_cache`（RAM），两者脱节，必须重启才生效。
+
+### deepseek 实现（cache generation + 每周期重读）
+
+- `nv_params.c`：新增 `s_cache_gen`（volatile），`NvParams_Set/Reload/load_defaults` 统一经 `nv_cache_bump()` 递增；新增 `NvParams_GetCacheGeneration()`；
+- `tec_control.c`：`TecControl_Cb` 周期开头 `tec_params_reload_if_needed()` 对比 generation，变化则重读 `s_p` + 重应用 PID；
+- **周期豁免**：`CONTROL_PERIOD_MS` 固定启动值（QuarkTS 调度 + PID ki/kd 归一化由它决定，运行期改会静默重标定所有物理增益）——`s_loop_period_ms` 兜底，风扇 stall 计时也用固定周期；
+- **PID 增益豁免**：仅在增益**值**变化时重置 PID（`TecPid_Init` 会清积分器/历史），改无关槽位不打扰运行中的控制器；`FLOAT_NAN` 种子保证首次必初始化；
+- 测试：`run_tec_fault_tests.py` + `tec_fault_harness.c` 补热加载用例（无关槽位不重置 PID、真实增益变化才重置、周期写不改风扇计时）。
+
+### glm 审查修复
+
+1. **删 `target_mc = 5000` 调试残留**（GPT `2cbc2f6` 带入）：它把目标温度硬钉 5°C，热加载改 `TARGET_BASE` 也失效、冷端被过度制冷——这是"恒定 duty"问题的另一根源；
+2. `TEC_FAN_FAULT_ENABLE` 恢复默认 `1u`（deepseek 调试时改成了 0）；
+3. 确认 PID 重置按值比较（deepseek 初版按 generation 比较会误重置，二次修改已修正，测试覆盖）。
+
+### 验证
+
+- 全量 Core/SRC 编译 0 错 0 警（`TEC_FAN_FAULT_ENABLE=1`）；
+- `run_tec_fault_tests.py --syntax-only`：default/0/1 三态 + 非法值拒绝全通过（运行时断言需主机 gcc，当前 Windows 无主机编译器，仅做语法检查）。
+
+### 遗留
+
+- 运行期改 `CONTROL_PERIOD_MS` 仍须重启（有意设计，注释已说明）；
+- 热加载只影响 TEC 控制任务，ADC/AHT20/fan_task 等其余快照不受此机制覆盖。
