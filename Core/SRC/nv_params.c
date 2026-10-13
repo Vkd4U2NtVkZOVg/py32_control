@@ -382,9 +382,6 @@ int NvParams_Save( void )
 
     block.data.magic   = NVM_MAGIC;
     block.data.version = NVM_VERSION;
-    block.data.seq     = s_active_seq + 1u;
-    memcpy( block.data.params, s_cache, sizeof( s_cache ) );
-    block.data.crc     = nv_block_crc(&block.data);
 
     /* Dual-slot power-fail strategy: always write the slot that does NOT
      * hold the newest good block. A reset mid-write only damages that
@@ -397,6 +394,15 @@ int NvParams_Save( void )
 
     primask = __get_PRIMASK();
     __disable_irq();
+
+    /* Snapshot the cache inside the critical section: the I2C slave ISR
+     * writes s_cache one slot at a time, so the FLASH image must capture a
+     * consistent table, not one mixing several in-flight host writes.
+     * (The FLASH erase/program/verify below is already IRQ-blocked: the
+     * CPU fetches its ISR code from the very array being programmed.) */
+    block.data.seq     = s_active_seq + 1u;
+    memcpy( block.data.params, s_cache, sizeof( s_cache ) );
+    block.data.crc     = nv_block_crc(&block.data);
 
     /* Unlock the FLASH interface (LL official sequence). */
     LL_FLASH_Unlock( FLASH );
