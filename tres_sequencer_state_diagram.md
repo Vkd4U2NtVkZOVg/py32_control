@@ -35,6 +35,23 @@ flowchart LR
 
 ## ③ 时序层完整状态图(最终版)
 
+> **状态名对应关系**（本图用描述性命名，`tres_seq.c` 用 `st*` 命名）：
+>
+> | 本图 | `tres_seq.c` |
+> |---|---|
+> | `STATE_POWER_ON` | `stPwrUp` / `PWR_UP` |
+> | `STATE_BOOT_WAIT_NORMAL` | `stBootWaitN` / `BOOT_WAIT_NORMAL` |
+> | `STATE_RUNNING` | `stRunning` / `RUNNING` |
+> | `STATE_RESET_PULSE` | `stPulseResetNormal` / `PULSE_RESET_NORMAL` |
+> | `STATE_RESET_PULSE_DFU` | `stPulseResetDfu` / `PULSE_RESET_DFU` |
+> | `STATE_BOOT_WAIT_DFU` | `stBootWaitD` / `BOOT_WAIT_DFU` |
+> | `STATE_DFU_ACTIVE` | `stDfuActive` / `DFU_ACTIVE` |
+>
+> 图内的 `Rail_Up` / `Assert` / `Release_RST` / `Check_SOM` 等子步骤只是示意，
+> 代码中没有对应子状态。**引脚时序以代码为准**：`BOOT0` 与 `VDD33USB` 在
+> `PULSE_RESET_*` 的 entry 就设好（此时 RST 仍被断言），`BOOT_WAIT_*` 只负责
+> 释放 RST 并等待 `t_enum`。文末"状态-引脚矩阵"与实现一致，可直接对照。
+
 ```mermaid
 stateDiagram-v2
     direction TB

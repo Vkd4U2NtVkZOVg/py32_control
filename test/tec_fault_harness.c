@@ -110,12 +110,26 @@ int main(int argc, char **argv)
     reset_fixture(); adc_code = 4000;
     TecControl_Cb(NULL);
     assert(!s_tec_enabled && (s_alarm & TEC_ALARM_OVERCURRENT));
+    /* An uncalibrated ADC is a fail-safe condition, and this harness compiles
+     * the REAL current path (the temperature getters are stubbed above, so
+     * their calibration gate is not reachable from here). An invalid sample
+     * must be reported - never a silent 0 mA - because 0 mA is a legitimate
+     * TEC-off reading and would let the overcurrent guard run blind. */
+    reset_fixture();
+    s_calib_failed = 1u;
+    assert(Studio_ADC1_ReadCurrentMilliamp(&ma) == 0u && ma == 0u);
+    TecControl_Cb(NULL);
+    assert(!s_tec_enabled && (s_alarm & TEC_ALARM_SENSOR));
+    s_calib_failed = 0u;
     /* Clamp the 64-bit foldback before narrowing. */
     reset_fixture(); hot = 100000;
     s_p.hot_overtemp_millic = 0; s_p.hot_danger_millic = 110000;
     s_p.hot_fb_gain_q16 = UINT32_MAX; s_p.hot_fb_max_millic = 200000;
     TecControl_Cb(NULL);
-    assert(target_mc == 205000);
+    /* The foldback adds the clamped lift to the DYNAMIC base target, so the
+     * expected value follows s_p.target_base_millic (= 45000), not a fixed
+     * constant: base + hot_fb_max = 45000 + 200000 = 245000. */
+    assert(target_mc == 245000);
     /* Entering the hold from high power preserves EN and ramps down. */
     reset_fixture(); demand = 80;
     for (int i = 0; i < 30; ++i) TecControl_Cb(NULL);
@@ -181,6 +195,10 @@ int main(int argc, char **argv)
      * controller (re-initialising, which is the documented cost). */
     {
         unsigned before = pid_inits;
+        /* This block asserts that duty 50 drives the TEC, so the EN deadband
+         * has to sit below it again: the deadband case above left the live
+         * en_off_pct at 60, which the reload carries across fixtures. */
+        params[NV_TEC_EN_OFF_PCT] = 8;
         params[NV_TEC_PID_KP_Q16] = NVM_Q16(2.0f);
         nv_cache_gen++;
         TecControl_Cb(NULL);

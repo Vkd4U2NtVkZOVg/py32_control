@@ -7,7 +7,8 @@ import struct
 import sys
 import time
 
-from tres_i2c_probe import Tres, NV_PARAMS, nv_slot_index, nv_value_to_raw, fmt_status
+from tres_i2c_probe import (Tres, NV_PARAMS, NV_SIGNED_SLOTS, nv_raw_to_signed,
+                            nv_slot_index, nv_value_to_raw, fmt_status)
 
 
 def check_version(device):
@@ -120,7 +121,10 @@ def main(argv=None):
         elif args.action == 'params':
             for i, raw in enumerate(read_params(device)):
                 name, unit, scale = NV_PARAMS[i]
-                print('%2d %-20s raw=%10d value=%s %s' % (i, name, raw, raw * scale, unit))
+                # Signed mC slots are carried as two's complement in the
+                # unsigned window: show the value the firmware will read back.
+                value = nv_raw_to_signed(raw) if name in NV_SIGNED_SLOTS else raw
+                print('%2d %-20s raw=%10d value=%s %s' % (i, name, raw, value * scale, unit))
         elif args.action == 'backup':
             data = dict(format='tres-params-v1', interface=3, raw=read_params(device))
             # Do not silently replace an earlier calibration backup.

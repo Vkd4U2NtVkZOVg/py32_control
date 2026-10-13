@@ -529,19 +529,19 @@ duty 100% -> DAC_MIN_CTRL_MV -> VOUT 分压自然点 / 满制冷端
 
 | 参数 | 当前默认/理论值 | 说明 |
 |---|---:|---|
-| `PID_KP/KI/KD` | 2.0 / 0.1 / 0.5 | Q16 存储 |
+| `PID_KP/KI/KD` | 0.1 / 0.1 / 0.1 | Q16 存储；周期 500 ms 时 `ki_eff=0.05`/周期、`kd_eff=0.2` |
 | `TARGET_BASE` | 45°C | 冷端（被控对象）基准目标 |
 | `HOT_OVERTEMP` | 80°C | 热警告（折返起点） |
 | `HOT_DANGER` | 90°C | 危险关断（最后防线，NVRAM 可设） |
 | `HOT_FB_GAIN` | 2.0 | 折返增益：热端每超 1°C 冷端目标抬 2°C |
 | `HOT_FB_MAX` | +30°C | 折返抬升上限 |
-| `DAC_MIN_CTRL` | 0 mV 默认占位 | 需实机标定，理论约 740 mV |
-| `DAC_MAX_CTRL` | 1200 mV 默认占位 | 需实机标定，理论约 2360 mV |
-| `DAC_STARTUP_PCT` | 60% | 启动锚点 |
+| `DAC_MIN_CTRL` | 760 mV | FB 注入窗口低端（理论约 740 mV），需实机标定 |
+| `DAC_MAX_CTRL` | 1600 mV | FB 注入窗口高端 = TEC 关闭端（理论约 2360 mV），需实机标定 |
+| `DAC_STARTUP_PCT` | 10% | 启动锚点 |
 | `RAMP_STEP_PERCENT` | 5% | 每控制周期最大变化 |
 | `DEWPOINT_MARGIN` | 2000 m°C | 凝露保护下限余量 |
 | `FF_GAIN` | 1.0 %/°C | COMMON-MODE 前馈（环境-目标梯度） |
-| `CONTROL_PERIOD` | 1000 ms | 控制周期 |
+| `CONTROL_PERIOD` | 500 ms | 控制周期；下限 10 ms（受 3 路 ADC 各 1 ms 稳定延时约束） |
 | `CURRENT_DANGER` | 3000 mA | 电流危险阈值 |
 | `COLD_SOURCE` | 0 | 0=TEC_COLD NTC，1=SDM845 温度 |
 

@@ -125,6 +125,26 @@ NV_PARAMS = [
 # Slot name -> index, case-insensitive (e.g. "target_base", "TARGET_BASE").
 NV_SLOT_BY_NAME = {name.lower(): i for i, (name, _, _) in enumerate(NV_PARAMS)}
 
+# Slots whose value is a SIGNED int32 carried in the unsigned 32-bit window
+# (two's complement on the wire). Every milli-degree temperature can be
+# negative - TEMP_VALID_MIN defaults to -20000 - so a raw read must be
+# interpreted as signed before it is shown to the user or compared.
+# The firmware stores uint32 and casts back to int32; there is no sign bit in
+# the protocol, so this list is the contract. Keep it in step with the unit
+# comments in Core/INC/nv_params.h.
+NV_SIGNED_SLOTS = frozenset((
+    "TARGET_BASE",
+    "TEMP_VALID_MIN",
+    "TEMP_VALID_MAX",
+))
+
+
+def nv_raw_to_signed(raw):
+    """Reinterpret an unsigned 32-bit slot value as a signed int32."""
+    raw &= 0xFFFFFFFF
+    return raw - 0x100000000 if raw >= 0x80000000 else raw
+
+
 def nv_slot_index(s):
     """Resolve a --set slot argument to an index: name (case-insensitive) or
     a decimal/hex number. Returns the index or -1 if unknown."""
@@ -332,6 +352,12 @@ NVRAM parameter window (0x40..0xCF, 4-byte big-endian per slot):
     SOC_TIGHTEN_TEMP / SOC_TIGHTEN_DELTA (mC)  SoC compensation
     COLD_SOURCE (-)                   cold-side source: 0=TEC_COLD ADC, 1=SDM845
 
+  Signed slots: the window is 4-byte unsigned, but TARGET_BASE,
+  TEMP_VALID_MIN and TEMP_VALID_MAX are SIGNED int32 milli-degC (two's
+  complement on the wire). Pass a negative decimal such as -20000 to --set;
+  --dump and the probe display them as negative. Every other slot is
+  non-negative by construction.
+
 Examples:
   python3 tres_i2c_probe.py --bus 3                      # safe read-only probe
   python3 tres_i2c_probe.py --bus 3 --set TARGET_BASE 45000   # RAM only
@@ -445,10 +471,13 @@ Prerequisites:
     raw = t.read_reg(TRES_REG_NV_BASE, TRES_REG_NV_LEN * len(NV_PARAMS))
     for i, (name, unit, scale) in enumerate(NV_PARAMS):
         val = int.from_bytes(raw[i * 4:(i + 1) * 4], "big")
+        if name in NV_SIGNED_SLOTS:
+            val = nv_raw_to_signed(val)   # signed int32 carried in a uint32 slot
         disp = (val * scale) if scale < 1 else val
         print("    [{:2}] {:<16} = {:<12} {}".format(
             i, name, int(disp) if scale >= 1 else disp, unit))
     print("    (Q16 slots PID_KP/KI/KD are stored as int(raw)/65536)")
+    print("    (signed mC slots: {})".format(", ".join(sorted(NV_SIGNED_SLOTS))))
 
     if args.params:
         # NVRAM persistence round-trip: pick a slot that is safe to disturb,

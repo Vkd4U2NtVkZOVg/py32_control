@@ -64,6 +64,16 @@ extern "C" {
  * @brief TEC parameter slots (also the I2C window slot index: slot n lives at
  *        register 0x40 + 4*n, big-endian). Do not reorder once deployed; bump
  *        NVM_VERSION instead on a layout change.
+ *
+ * SIGN CONVENTION: every slot is transferred as a 4-byte UNSIGNED big-endian
+ * word, but the milli-degree temperature slots are SIGNED int32 inside the
+ * firmware and are carried as two's complement on the wire (the firmware
+ * casts the uint32 back to int32). A host must reinterpret those slots as
+ * signed: reading TEMP_VALID_MIN's default 0xFFFFB1E0 as 4294947296 instead
+ * of -20000 is the classic mistake. The affected slots are TARGET_BASE,
+ * TEMP_VALID_MIN and TEMP_VALID_MAX - the latter two hold negative
+ * temperatures by definition; TARGET_BASE is signed for symmetry.
+ * test/tres_i2c_probe.py keeps the matching NV_SIGNED_SLOTS list.
  */
 typedef enum {
     NV_TEC_PID_KP_Q16 = 0u,            /**< PID P gain (Q16): %out per m°C      */

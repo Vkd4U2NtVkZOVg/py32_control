@@ -110,6 +110,13 @@ void HardFault_Handler(void)
 }
 /**
  * @brief This function handles System service call via SWI instruction.
+ *
+ * Intentionally unreachable: the kernel is QuarkTS in cooperative mode (the
+ * qOS_Run loop plus the 1 kHz SysTick time base), so no code executes an SVC
+ * and nothing pends an exception. The handler is kept as a halt trap rather
+ * than a silent return, so that enabling a preemptive kernel later - or a
+ * stray `svc` instruction - stops here instead of returning into an
+ * undefined frame.
  */
 void SVC_Handler(void)
 {
@@ -125,6 +132,9 @@ void SVC_Handler(void)
 }
 /**
  * @brief This function handles Pendable request for system service.
+ *
+ * Same rationale as SVC_Handler above: unused by the cooperative scheduler,
+ * kept as a deliberate halt trap.
  */
 void PendSV_Handler(void)
 {

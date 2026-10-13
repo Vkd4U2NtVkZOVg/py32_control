@@ -548,6 +548,17 @@ static qSM_Status_t st_StrapFail_Cb( qSM_Handler_t h )
             Pin_PwrKey( 0u );             /* release */
             Pin_RstKey( 0u );             /* release */
             USART2_SetTxSource( USART2_TXSRC_CH343 );  /* end the TX window */
+            /* Terminal state: nothing else will ever drive the fan again.
+             * The precheck only commands full speed while it is actively
+             * cooling (precheckCooling != 0), so if it failed-open or the
+             * ambient sensor was invalid, the last command was
+             * Fan_SetDutyPercent(0) and the heatsink would sit with no
+             * airflow until power-off while the enclosure keeps heating.
+             * Claim the channel and hold full airflow for the halt state.
+             * Fan_SetEnabled() is what moves FAN_CH_SW to the PY32 - writing
+             * the duty alone would be a no-op if the SoC still owned it. */
+            Fan_SetEnabled( 1u );
+            Fan_SetDutyPercent( 100u );
             break;
         default:
             break;

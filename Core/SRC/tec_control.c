@@ -56,9 +56,21 @@
 
 /* Control-period bounds: this same task drives the overtemp/overcurrent/
  * fan-stall protection checks, so an unbounded period would silently
- * stretch every fault reaction. [1 ms, 5 s] keeps the scheduler load sane
- * while still allowing slow bench sweeps. */
-#define TEC_PERIOD_MIN_MS              ( 1 )
+ * stretch every fault reaction. The upper bound keeps the scheduler load
+ * sane while still allowing slow bench sweeps.
+ *
+ * The LOWER bound is a floor on the task's own RUN TIME, not a scheduling
+ * preference: TecControl_Cb() performs three ADC conversions (hot, cold,
+ * current) and each one blocks at least one millisecond inside
+ * Studio_ADC1_ReadChannel()'s LL_mDelay(1) stabilisation, before any EOC
+ * wait or the soft-I2C DAC write. A period shorter than the body's worst
+ * case cannot be honoured - the task would overrun its slot, so the loop
+ * would silently run at the body's rate while the PID, the I-term slew and
+ * the fan-stall timers all still assume the configured one. TEC_PERIOD_MIN_MS
+ * covers the three mandatory milliseconds plus the EOC waits and the DAC
+ * transaction with margin; it is an order-of-magnitude floor, not a measured
+ * worst case. Anything faster than this has no meaning on this hardware. */
+#define TEC_PERIOD_MIN_MS              ( 10 )
 #define TEC_PERIOD_MAX_MS              ( 5000 )
 
 /* Physical-time constants for the PID housekeeping that used to be fixed

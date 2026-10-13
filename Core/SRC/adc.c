@@ -45,7 +45,15 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN Define */
-
+/* Factory-calibration attempt policy. Each attempt runs the 5-sample
+ * median-of-5 sequence; an attempt is rejected when the hardware reports
+ * CALFAIL or the calibration never completes. The sequence is retried a few
+ * times before the ADC is declared unusable - see s_calib_failed. */
+#define ADC_CAL_ATTEMPTS              ( 3 )
+/* Bounded wait for "calibration ongoing" to clear. The 64-cycle conversion is
+ * ~8 us at the 8 MHz ADC clock, so this is orders of magnitude of margin and
+ * only ever reached if the peripheral is not responding at all. */
+#define ADC_CAL_SPIN_LIMIT            ( 200000U )
 /* USER CODE END Define */
 
 /* Private macro -------------------------------------------------------------*/
@@ -60,10 +68,22 @@
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN Private */
 
+/* Set when the factory calibration could not be completed. The TEC control
+ * task derives its over-temperature, over-current and dew-point guards from
+ * this ADC, so an uncalibrated converter is a fail-safe condition, not a
+ * warning: every temperature getter reports "no data" (INT32_MIN) and the
+ * current getter reports an invalid sample, which routes the control loop
+ * into its existing sensor-fault paths (TEC off, DAC parked, fan full,
+ * TEC_ALARM_SENSOR) and is visible to the host over the I2C status block.
+ * Uncalibrated readings would otherwise be silent: the guards would compare
+ * against wrong temperatures and still look healthy. */
+static uint8_t s_calib_failed;
+
 /* USER CODE END Private */
 
 /* Private function prototypes -----------------------------------------------*/
 static void Studio_ADC1_Calibrate(void);
+static uint8_t Studio_ADC1_CalibrateOnce(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -99,6 +119,48 @@ static void Studio_ADC1_QuickSort(int32_t arr[], int32_t length)
   }
 }
 
+/* One calibration attempt: 5 samples, median written back. Returns 1 when the
+ * sequence completed without CALFAIL, 0 when the hardware reported a failure
+ * or the calibration never finished. The vendor sequence (median of 5) is kept
+ * as-is; only the failure detection is added. */
+static uint8_t Studio_ADC1_CalibrateOnce(void)
+{
+  uint32_t ADC_CALRR1_Buff[5];
+  int32_t ADC_CALRR1_BuffInt[5];
+
+  for (int i = 0; i < 5; i++)
+  {
+    uint32_t spin = ADC_CAL_SPIN_LIMIT;
+
+    LL_ADC_StartCalibration(ADC1);
+
+    while (LL_ADC_IsCalibrationOnGoing(ADC1) != 0)
+    {
+      if (spin-- == 0u)
+      {
+        return 0u;                    /* calibration never completed */
+      }
+    }
+
+    if (LL_ADC_GetCalibrationStatus(ADC1) == LL_ADC_CAL_STATUS_FAIL)
+    {
+      LL_ADC_ClearCalibrationStatus(ADC1);
+      return 0u;                      /* hardware refused this calibration */
+    }
+
+    ADC_CALRR1_Buff[i] = *((__IO uint32_t *)(0x40012448));
+    ADC_CALRR1_BuffInt[i] = (int32_t)(ADC_CALRR1_Buff[i] << 9);
+  }
+
+  Studio_ADC1_QuickSort(ADC_CALRR1_BuffInt, 5);
+  *((__IO uint32_t *)(0x40012450)) = (ADC_CALRR1_BuffInt[2] >> 9);
+  *((__IO uint32_t *)(0x40012454)) = *((__IO uint32_t *)(0x4001244C));
+  *((__IO uint32_t *)(0x40012444)) |= 0x8000;
+  /* Delay between ADC calibration end and ADC enable: minimum 4 ADC Clock cycles */
+  LL_mDelay(1);
+  return 1u;
+}
+
 /**
   * @brief  ADC calibration function
   * @param  None
@@ -107,58 +169,36 @@ static void Studio_ADC1_QuickSort(int32_t arr[], int32_t length)
 static void Studio_ADC1_Calibrate(void)
 {
   __IO uint32_t backup_setting_adc_dma_transfer = 0;
-  uint32_t ADC_CALRR1_Buff[5];
-  int32_t ADC_CALRR1_BuffInt[5];
-#if (USE_TIMEOUT == 1)
-  uint32_t Timeout = 0;
-#endif
+  int attempt;
 
-  if (LL_ADC_IsEnabled(ADC1) == 0)
+  s_calib_failed = 0u;
+
+  if (LL_ADC_IsEnabled(ADC1) != 0)
   {
+    return;                           /* already running: nothing to calibrate */
+  }
+
+  for (attempt = 0; attempt < ADC_CAL_ATTEMPTS; attempt++)
+  {
+    uint8_t ok;
+
 #if (defined(DMA) || defined(DMA1))
     /* Disable ADC DMA transfer during calibration */
     backup_setting_adc_dma_transfer = LL_ADC_REG_GetDMATransfer(ADC1);
     LL_ADC_REG_SetDMATransfer(ADC1, LL_ADC_REG_DMA_TRANSFER_NONE);
 #endif
-
-    for(int i=0;i<5;i++)
-    {
-      /* Enable calibration */
-      LL_ADC_StartCalibration(ADC1);
-
-#if (USE_TIMEOUT == 1)
-    Timeout = ADC_CALIBRATION_TIMEOUT_MS;
-#endif
-
-      while (LL_ADC_IsCalibrationOnGoing(ADC1) != 0)
-      {
-#if (USE_TIMEOUT == 1)
-        /* Check if calibration is timeout */
-        if (LL_SYSTICK_IsActiveCounterFlag())
-        {
-          if(Timeout-- == 0)
-          {
-
-          }
-        }
-#endif
-     }
-      ADC_CALRR1_Buff[i]= *((__IO uint32_t *)(0x40012448));
-      ADC_CALRR1_BuffInt[i]=(int32_t)(ADC_CALRR1_Buff[i]<<9);
-   }
-
-    Studio_ADC1_QuickSort(ADC_CALRR1_BuffInt,5);
-    *((__IO uint32_t *)(0x40012450)) = (ADC_CALRR1_BuffInt[2]>>9);
-    *((__IO uint32_t *)(0x40012454)) = *((__IO uint32_t *)(0x4001244C));
-    *((__IO uint32_t *)(0x40012444)) |= 0x8000;
-    /* Delay between ADC calibration end and ADC enable: minimum 4 ADC Clock cycles */
-    LL_mDelay(1);
-
+    ok = Studio_ADC1_CalibrateOnce();
 #if (defined(DMA) || defined(DMA1))
     /* Restore ADC DMA configuration */
     LL_ADC_REG_SetDMATransfer(ADC1, backup_setting_adc_dma_transfer);
 #endif
+    if (ok != 0u)
+    {
+      return;
+    }
   }
+
+  s_calib_failed = 1u;
 }
 
 /***************************************
@@ -290,6 +330,14 @@ uint16_t Studio_ADC1_ReadCurrentRaw(void)
 
 uint8_t Studio_ADC1_ReadCurrentMilliamp(uint32_t *out_ma)
 {
+  /* Uncalibrated converter: the sample is meaningless. Report the same
+   * invalid-sample shape as an ADC timeout (0 = "no valid sample", never a
+   * silent 0 mA) so the overcurrent guard runs its fail-safe path instead of
+   * comparing a bogus current against the danger threshold. */
+  if ( s_calib_failed != 0u ) {
+    *out_ma = 0u;
+    return 0U;
+  }
   /* Current-sense chain calibration from NVRAM (INA181A2 + divider). Values
    * are snapshotted once; changing NVRAM takes effect after reboot. Zero OR
    * out-of-envelope values refetch and, if still bad, fall back to the
@@ -363,6 +411,9 @@ uint8_t Studio_ADC1_ReadCurrentMilliamp(uint32_t *out_ma)
 
 int32_t Studio_ADC1_ReadHotMilliCelsius(void)
 {
+  if ( s_calib_failed != 0u ) {
+    return INT32_MIN;   /* uncalibrated: report no data, not a wrong temperature */
+  }
   return NTC3950_AdcToMilliCelsius(Studio_ADC1_ReadHotRaw());
 }
 
@@ -379,6 +430,9 @@ int32_t Studio_ADC1_ReadColdMilliCelsius(void)
       return INT32_MIN;
     }
     return TRES_I2C_Slave_GetSdm845TempMilliC();
+  }
+  if ( s_calib_failed != 0u ) {
+    return INT32_MIN;   /* ADC path needs the calibration; the SoC path does not */
   }
   return NTC3950_AdcToMilliCelsius(Studio_ADC1_ReadColdRaw());
 }

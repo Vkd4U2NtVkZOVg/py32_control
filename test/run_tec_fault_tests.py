@@ -12,7 +12,7 @@ import tempfile
 
 root = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser()
-parser.add_argument('--cc', nargs='+', default=['cc'])
+parser.add_argument('--cc', nargs='+', default=['gcc'])
 parser.add_argument('--syntax-only', action='store_true')
 args = parser.parse_args()
 control = (root/'Core/SRC/tec_control.c').read_text(encoding='utf-8')
@@ -38,6 +38,10 @@ typedef int MCP4725_Status_t;
 #define MCP4725_OK 0
 #define MCP4725_VDD_MV 3300
 #define LL_ADC_CHANNEL_6 0   /* stubbed adc1_convert ignores the channel */
+/* adc.c's calibration-failure latch. It is defined outside the slice of adc.c
+ * that this harness compiles (Studio_ADC1_ReadCurrentMilliamp ..
+ * ReadHotMilliCelsius), so the harness owns it. 0 = calibrated. */
+static uint8_t s_calib_failed;
 #define GPIOA 0
 #define TEC_VEN_Pin 0
 #define qLowest_Priority 0
