@@ -215,6 +215,26 @@ int main(int argc, char **argv)
     assert(s_p.control_period_ms == 500);
     params[NV_TEC_CONTROL_PERIOD_MS] = 500;
     nv_cache_gen++;
+
+    /* Every value derived from a parameter must be computed AFTER the reload.
+     * dew_min_duty follows EN_OFF_PCT: if it were still derived from the
+     * previous snapshot (as it was when declared in the block above the
+     * reload), a host writing EN_OFF_PCT would get one cycle whose dew-point
+     * hold still used the OLD minimum - a hold weaker than the new deadband,
+     * which the EN deadband would then cut instead of holding.
+     *
+     * ramp_step_percent is raised in the same write so the ramp cannot mask
+     * the result: with ramp 5 a 12 -> 24 change would be clamped to 17 either
+     * way, and the test would pass without the fix. */
+    reset_fixture(); demand = 80; cold = 12000;   /* at the floor: dew hold */
+    for (int i = 0; i < 30; ++i) TecControl_Cb(NULL);
+    assert(s_dew_hold && s_dac_percent == 12);    /* 8 + TEC_EN_HYST_PCT */
+    params[NV_TEC_EN_OFF_PCT] = 20;
+    params[NV_TEC_RAMP_STEP_PERCENT] = 100;
+    nv_cache_gen++;
+    TecControl_Cb(NULL);                          /* first cycle after the write */
+    assert(s_dew_hold && s_tec_enabled && s_dac_percent == 24);  /* 20 + 4 */
+
     puts("TEC fault callback tests passed");
     return 0;
 }

@@ -1,14 +1,14 @@
-# 修复说明：CODE_AUDIT 六项处置
+# 修复说明：审核缺陷处置
 
 | 项 | 值 |
 |---|---|
 | 日期 | 2026-10-13 |
-| 基线 | 分支 `codex/tec-fault-interlocks`，HEAD `300efa8` |
-| 输入 | `CODE_AUDIT.md`（静态审核报告，7 条缺陷） |
-| 范围 | 处置其中的 L2、H1、M2、L1、L3、M4（共 6 项） |
-| 状态 | **全部完成；EIDE 构建通过，全部测试套件通过；改动尚未提交** |
+| 基线 | 分支 `codex/tec-fault-interlocks`，起点 HEAD `300efa8` |
+| 输入 | `CODE_AUDIT.md`（7 条缺陷）+ 后续复核提出的 2 项（P1-1 / P1-2） |
+| 范围 | L2、H1、M2、L1、L3、M4（共 6 项）+ P1-1、P1-2（共 2 项） |
+| 状态 | **全部完成**；EIDE 构建通过，全部测试套件通过。L2/H1/M2/L1/L3/M4 已提交为 `f67e873`；P1-1/P1-2 待提交 |
 
-本文档只记录**本轮实际落地的修复**，作为 `CODE_AUDIT.md` 的执行结果。审核报告中两处结论经复核不成立，见文末 §7。
+本文档只记录**实际落地的修复**，作为 `CODE_AUDIT.md` 的执行结果。审核报告中两处结论经复核不成立，见 §7。
 
 ---
 
@@ -22,15 +22,17 @@
 | L1 | SVC/PendSV 为死循环 | 低 | 补设计意图说明 | `Core/SRC/py32f030_it.c:121` |
 | L3 | 文档与实现不符 | 低 | 按实现修正两处文档 | `WORKLOG_CURRENT.md`、`tres_sequencer_state_diagram.md` |
 | M4 | 带符号槽未标注 | 低 | 头文件声明 + 主机工具带符号解码 | `Core/INC/nv_params.h`、`test/tres_i2c_probe.py`、`test/tres_host.py` |
+| P1-1 | 露点保持下限用了过期参数 | 中 | 派生量移到 reload 之后计算 | `Core/SRC/tec_control.c:533,554` |
+| P1-2 | `Reload` / `RestoreDefaults` 未关中断 | 中 | 缓存替换加临界区 | `Core/SRC/nv_params.c:325-345,527-537` |
 
 **验证结论**
 
 ```
 EIDE 全量构建:  build successfully
                 RAM   4912 B / 8 KB  (59.96%)
-                FLASH 37084 B / 60 KB (60.36%)
+                FLASH 37104 B / 60 KB (60.39%)
 
-相对改动前(4904 / 36912):  +8 B RAM,  +172 B FLASH
+相对本轮开始(4904 / 36912):  +8 B RAM,  +192 B FLASH
 ```
 
 | 测试套件 | 结果 |
@@ -129,6 +131,45 @@ if (LL_ADC_GetCalibrationStatus(ADC1) == LL_ADC_CAL_STATUS_FAIL) {
 - **未覆盖**：两个温度 getter 被 `test/run_tec_fault_tests.py` 的桩替换（`return hot;` / `return cold;`），其校准门**无法从该框架执行**，目前只有源码级保证。
 - 因 `s_calib_failed` 定义在被截取的代码片段之外，测试桩中补充了同名定义（`test/run_tec_fault_tests.py`）。
 
+### 3.5 P1-1 —— 露点保持下限用了过期参数
+
+**文件**：`Core/SRC/tec_control.c:533`（原声明）、`:554`（现计算）
+
+`dew_min_duty` 原先在函数开头的声明处就计算：
+
+```c
+- int32_t dew_min_duty = s_p.en_off_pct + TEC_EN_HYST_PCT;   /* 声明即计算 */
+...
+  tec_params_reload_if_needed();                            /* 之后才刷新 s_p */
+```
+
+而它在该周期内被用于 PID 输出（`:731`）、启动锚点（`:853`）与斜坡下限（`:909`）——全部**跨过了刷新点**。于是主机写入 `EN_OFF_PCT` 的那一个周期里，同周期的死区判断、目标、风扇阈值都用新快照，唯独 `dew_min_duty` 用旧值，与文件注释宣称的"每周期自洽"矛盾。具体后果：露点保持的最小输出可能**低于新死区**，于是一个本应"保持最小制冷"的周期反而被 EN 死区判为深度轻载而**切断 TEC**。下个周期自愈，但违背设计意图。
+
+**修法**：声明与赋值分离，计算移到 `tec_params_reload_if_needed()` 之后（`:554`）。
+
+**回归护栏**（`test/tec_fault_harness.c`）：进入露点保持后把 `EN_OFF_PCT` 由 8 改为 20，并**在同一次写入中把 `ramp_step_percent` 提到 100**——否则斜坡（5 %/周期）会把 12→24 的变化限制到 17，修复前后都是 17，断言将失去区分力。断言要求**写入后的第一个周期** `s_dac_percent == 24`。
+
+已在实施中验证该护栏有效：临时把代码改回旧顺序后测试失败（SIGABRT），还原后通过。
+
+### 3.6 P1-2 —— `NvParams_Reload` / `RestoreDefaults` 未关中断
+
+**文件**：`Core/SRC/nv_params.c:325-345`（Reload）、`:527-537`（RestoreDefaults）
+
+`NvParams_Set()` 运行在 **I2C 从机 ISR** 中并逐槽写 `s_cache`，而这两个函数的 `memcpy` 是整表替换、原先在任务上下文**无保护**执行：
+
+```c
+memcpy( s_cache, slot[ s_active_slot ]->data.params, sizeof( s_cache ) );
+nv_cache_bump();
+```
+
+ISR 可在 memcpy 中途抢占，留下**新旧混合的参数表**；随后的 `nv_cache_bump()` 又把这个撕裂的表**宣告为当前版本**，于是所有快照型消费者（`tec_control` 的 `s_p`）都会读到并长期使用它，直到下一次变更才自愈。
+
+**修法**：把整表替换 + 代数递增放进 `__disable_irq()` / `__set_PRIMASK(primask)` 保护区，与 `NvParams_Save()` 的快照保护一致。代数递增**必须在区内**，否则读者可能观察到"新代数 + 旧表"。
+
+**为什么在这里丢弃并发的单槽 ISR 写入是正确的**：`Reload` 的语义就是"丢弃 RAM 表、改取 FLASH 镜像"，主机发 `RELOAD_PARAMS` 时本就要求放弃未保存的 RAM 修改。
+
+**`nv_load_defaults()` 保持不加保护并已注明**：它在三种上下文被调用——`NvParams_Init()`（启动期，从机 ISR 尚不存在）、`NvParams_Set()`（已是单槽对齐写）、以及这两个整表替换点。保护责任留给调用方，避免在 ISR 路径里嵌套一次无意义的关中断。
+
 ---
 
 ## 4. M2 —— 热预检失败后风扇无所有者
@@ -221,7 +262,9 @@ default:
 
 ---
 
-## 8. 改动文件清单（未提交）
+## 8. 改动文件清单
+
+**已提交（`f67e873`，L2/H1/M2/L1/L3/M4）**
 
 | 文件 | 增/删 | 说明 |
 |---|---|---|
@@ -236,8 +279,15 @@ default:
 | `test/run_tec_fault_tests.py` | +5 / -1 | H1 桩 + `--cc` 默认值 |
 | `WORKLOG_CURRENT.md` | +5 / -5 | L3 |
 | `tres_sequencer_state_diagram.md` | +17 / -0 | L3 |
+| `FIXES.md` / `CODE_AUDIT.md` / `TEC_CONTROL_AUDIT.md` | 新增 | 审核与修复记录 |
 
-合计 11 个文件，+222 / -53。
+**待提交（P1-1 / P1-2）**
+
+| 文件 | 增/删 | 说明 |
+|---|---|---|
+| `Core/SRC/nv_params.c` | +28 / -0 | P1-2 临界区 + `nv_load_defaults` 说明 |
+| `Core/SRC/tec_control.c` | +10 / -2 | P1-1 派生量移到 reload 之后 |
+| `test/tec_fault_harness.c` | +20 / -0 | P1-1 回归护栏 |
 
 ---
 
@@ -248,11 +298,14 @@ default:
 | EIDE 全量构建（工程自带 `unify_builder` + `builder.params`） | ✅ 通过，无错误/警告 |
 | 上述 6 套测试（WSL Debian，gcc 14.2.0） | ✅ 全部通过 |
 | H1 电流路径断言（真实编译 `adc.c` 片段） | ✅ 已执行 |
+| P1-1 回归护栏的区分力 | ✅ **已实测验证** —— 临时改回旧顺序后测试失败（SIGABRT），还原后通过；还原经 SHA256 逐字节比对确认无损 |
 | **H1 温度校准门断言** | ❌ **未执行** —— 两个温度 getter 被测试桩替换，无法从该框架触达 |
+| **P1-2 临界区的并发正确性** | ❌ **未执行** —— 需真实 ISR 并发才能验证；无主机侧仿真 |
 | 上板验证 | ❌ **未做** —— 无硬件操作 |
 
 **未做台架确认的风险点**：
 
 1. ADC 校准失败路径（`CALFAIL` / 超时）在真机上的实际触发条件与表现未验证；
 2. `STRAP_FAIL` 强制满速风扇的时序与噪声表现未验证；
-3. 控制周期 10 ms 下限是量级估计，非实测最坏执行时间；真机若要跑更短周期，应先测量 `TecControl_Cb()` 的最坏执行时间。
+3. 控制周期 10 ms 下限是量级估计，非实测最坏执行时间；真机若要跑更短周期，应先测量 `TecControl_Cb()` 的最坏执行时间；
+4. P1-2 的临界区把一次 132 字节 memcpy 纳入中断屏蔽，时长在微秒级，但未实测其对从机时序的影响。

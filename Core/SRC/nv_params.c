@@ -248,6 +248,12 @@ static uint32_t nv_block_crc(const Nvm_Block_Data_t *block)
     return ~crc;
 }
 
+/* Raw table replacement - NO critical section of its own. Callers decide,
+ * because the required protection differs: NvParams_Init() runs before the
+ * I2C slave ISR exists (nothing to guard against), NvParams_Set() is already
+ * a single aligned slot store, while the bulk writers
+ * (NvParams_Reload/NvParams_RestoreDefaults) must disable interrupts around
+ * it or the ISR can interleave a one-slot write into the copy. */
 static void nv_load_defaults( void )
 {
     memcpy( s_cache, s_defaults, sizeof( s_cache ) );
@@ -317,9 +323,24 @@ int NvParams_Reload( void )
     s_active_valid = valid[ s_active_slot ];
 
     if ( s_active_valid != 0u ) {
+        uint32_t primask = __get_PRIMASK();
+
+        /* Replace the table inside a critical section. NvParams_Set() runs in
+         * the I2C slave ISR and writes s_cache one slot at a time, so an
+         * unprotected memcpy could leave a permanently torn table (old and new
+         * slots mixed) for every reader to snapshot - the generation bump that
+         * follows would then advertise that torn table as the current one.
+         * NvParams_Save() already guards its own snapshot the same way.
+         * Losing a concurrent one-slot ISR write here is CORRECT, not a bug:
+         * reload means "discard the RAM table and take the FLASH image".
+         *
+         * The bump is inside the region as well, so readers cannot observe the
+         * new generation together with the old (or a half-copied) table. */
+        __disable_irq();
         s_active_seq = slot[ s_active_slot ]->data.seq;
         memcpy( s_cache, slot[ s_active_slot ]->data.params, sizeof( s_cache ) );
         nv_cache_bump();
+        __set_PRIMASK( primask );
         return NVM_OK;
     }
     return NVM_ERR_CRC; /* leave the RAM table untouched on reload failure */
@@ -505,5 +526,12 @@ int NvParams_Save( void )
 
 void NvParams_RestoreDefaults( void )
 {
+    uint32_t primask = __get_PRIMASK();
+
+    /* Same torn-table hazard as NvParams_Reload(): the ISR writes s_cache slot
+     * by slot, so the bulk replacement and the generation bump must be atomic
+     * with respect to it. */
+    __disable_irq();
     nv_load_defaults();
+    __set_PRIMASK( primask );
 }

@@ -530,7 +530,7 @@ static void TecControl_Cb( qEvent_t e )
     uint32_t cur_read;
     uint8_t  cur_ok;
     uint8_t dew_was_hold;
-    int32_t dew_min_duty = s_p.en_off_pct + TEC_EN_HYST_PCT;
+    int32_t dew_min_duty;           /* derived from s_p: set AFTER the reload */
     uint8_t drive;                  /* 0 = hold the converter off this cycle */
 
     (void)e;
@@ -542,8 +542,16 @@ static void TecControl_Cb( qEvent_t e )
 
     /*--- 0. pick up parameter writes made over the I2C window --------------*/
     /* Host-tunable values take effect from the NEXT cycle; nothing below reads
-     * a parameter from any other source, so this cycle stays self-consistent. */
+     * a parameter from any other source, so this cycle stays self-consistent.
+     * Everything derived from s_p must therefore be computed AFTER this call -
+     * a value hoisted into the declarations above (as dew_min_duty once was)
+     * would silently mix the previous cycle's EN_OFF_PCT with this cycle's
+     * deadband, target and fan thresholds. */
     tec_params_reload_if_needed();
+
+    /* Minimum cooling held during a dew-point event: just above the EN
+     * deadband exit, so the hold is never mistaken for the anti-hiccup cut. */
+    dew_min_duty = s_p.en_off_pct + TEC_EN_HYST_PCT;
 
     /*--- 1. read all sources ------------------------------------------------*/
     hot_mc = Studio_ADC1_ReadHotMilliCelsius();
