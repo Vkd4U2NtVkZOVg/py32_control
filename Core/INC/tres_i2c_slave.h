@@ -45,14 +45,17 @@
  *                        milli-degC, last TEC control-cycle measure.
  *   0x3C-0x3F HOTTEMP  R live hot-side temperature, int32 big-endian
  *                        milli-degC, last TEC control-cycle measure.
- *   0x40..0xCF    RW  NVRAM parameter window: one 4-byte big-endian value per
+ *   0x40-0x43 DEWPOINT R live dew-point temperature, int32 big-endian
+ *                        milli-degC, from the AHT20 measurement task
+ *                        (INT32_MIN until the first successful sample).
+ *   0x44..0xD3    RW  NVRAM parameter window: one 4-byte big-endian value per
  *                     slot. Slot n of NvParamTecId_t (nv_params.h) lives at
- *                     0x40 + 4*n. Values are 32-bit big-endian; a slot
+ *                     0x44 + 4*n. Values are 32-bit big-endian; a slot
  *                     commits when ONE transaction delivers its 4 bytes
  *                     from the slot base (multi-slot bursts are fine;
  *                     mid-slot starts never commit). Persist with the
  *                     SAVE_PARAMS command.
- *                     (36 slots: 0x40 + 4*36 = 0xD0, so window 0x40..0xCF.)
+ *                     (36 slots: 0x44 + 4*36 = 0xD4, so window 0x44..0xD3.)
  ******************************************************************************
  */
 #ifndef __TRES_I2C_SLAVE_H__
@@ -95,38 +98,40 @@ extern "C" {
 #define TRES_REG_FANRPM    0x36u   /**< live fan speed, uint16 BE (RPM)      */
 #define TRES_REG_COLDTEMP  0x38u   /**< cold-side temperature, int32 m°C BE  */
 #define TRES_REG_HOTTEMP   0x3Cu   /**< hot-side temperature, int32 m°C BE   */
+#define TRES_REG_DEWPOINT  0x40u   /**< dew-point temperature, int32 m°C BE  */
 
-/* Live sensor/temperature block (0x36..0x3F, read-only):
+/* Live sensor/temperature block (0x36..0x43, read-only):
  *   0x36-0x37 FANRPM   u16 BE   fan speed from Fan_Get_LastRPM()
  *   0x38-0x3B COLDTEMP s32 BE   cold-side temperature (milli-degC)
  *   0x3C-0x3F HOTTEMP  s32 BE   hot-side temperature (milli-degC)
+ *   0x40-0x43 DEWPOINT s32 BE   dew-point temperature from AHT20 task
  * Automatically derived from live firmware state each read; nothing to
  * write. DUTY returns the last commanded duty; temperature windows return
  * the most recent TEC control cycle measurement (0 before first cycle). */
 
-/* NVRAM parameter window: slot n (NvParamTecId_t) at 0x40 + 4*n, 4 bytes
+/* NVRAM parameter window: slot n (NvParamTecId_t) at 0x44 + 4*n, 4 bytes
  * big-endian. Reading any byte of a slot returns that byte; a slot commits
  * when ONE transaction writes its 4 bytes starting at the slot base (a
  * multi-slot burst commits every slot it covers; mid-slot starts never
  * commit). The window is 4 * NVM_PARAM_COUNT bytes. */
-#define TRES_REG_NV_BASE    0x40u
+#define TRES_REG_NV_BASE    0x44u
 #define TRES_REG_NV_LEN     4u
 #define TRES_REG_NV_END     ( TRES_REG_NV_BASE + TRES_REG_NV_LEN * NVM_PARAM_COUNT )
 
 /* AES challenge-response authentication window (only when TRES_AES_ENABLE).
- *   0xD0..0xDF  CHALLENGE (W) 16 bytes big-endian; the response is computed
+ *   0xD4..0xE3  CHALLENGE (W) 16 bytes big-endian; the response is computed
  *                              live from the buffer on every read, so there
  *                              is no commit step (a partial write only makes
  *                              the response mismatch - auth fails safe).
- *   0xE0..0xEF  RESPONSE (R)  16 bytes big-endian: AES-128-ECB(device_key,
+ *   0xE4..0xF3  RESPONSE (R)  16 bytes big-endian: AES-128-ECB(device_key,
  *                              challenge), recomputed live on every read.
- * Placed above the NVRAM parameter window (0x40..0xCF with 36 slots) so the
+ * Placed above the NVRAM parameter window (0x44..0xD3 with 36 slots) so the
  * two never overlap. The windows are only present in the register file when
  * the feature is compiled in; with TRES_AES_ENABLE=0 these addresses read
  * back 0 and writes are ignored, exactly like any other reserved address. */
-#define TRES_REG_CHAL_BASE   0xD0u
+#define TRES_REG_CHAL_BASE   0xD4u
 #define TRES_REG_CHAL_LEN    16u
-#define TRES_REG_RESP_BASE   0xE0u
+#define TRES_REG_RESP_BASE   0xE4u
 #define TRES_REG_RESP_LEN    16u
 
 /* Exported functions --------------------------------------------------------*/

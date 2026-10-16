@@ -29,8 +29,9 @@ Registers:
   0x16 RX_OVERRUN detected UART gaps modulo 256
   0x30-0x35 machine-state block: BOOTSTATE / BOOTRETRY / TECFLAGS /
                                     AHTSTAT / FANDUTY / TECDUTY
-  0x36-0x3F live sensors: FANRPM(u16BE) / COLDTEMP(s32BE) / HOTTEMP(s32BE)
-  0x40-0xCF NVRAM parameter window: 36 slots x 4-byte big-endian values
+  0x36-0x43 live sensors: FANRPM(u16BE) / COLDTEMP(s32BE) / HOTTEMP(s32BE) /
+                         DEWPOINT(s32BE)
+  0x44-0xD3 NVRAM parameter window: 36 slots x 4-byte big-endian values
 
 Commands (0x00 <- [0xA5][cmdId][param]):
   1 RESET, 2 ENTER_DFU, 3 REPORT_FAIL, 4 SAVE_PARAMS, 5 DEFAULT_PARAMS, 6 RELOAD_PARAMS,
@@ -65,6 +66,7 @@ TRES_REG_TECDUTY = 0x35
 TRES_REG_FANRPM = 0x36
 TRES_REG_COLDTEMP = 0x38
 TRES_REG_HOTTEMP = 0x3C
+TRES_REG_DEWPOINT = 0x40
 
 TRES_CMD_MAGIC = 0xA5
 TRES_CMD_RESET = 1
@@ -76,16 +78,16 @@ TRES_CMD_RELOAD_PARAMS = 6
 TRES_CMD_RESET_MCU = 7
 
 # NVRAM parameter window: slot index -> (name, unit, scale-for-display)
-TRES_REG_NV_BASE = 0x40
+TRES_REG_NV_BASE = 0x44
 TRES_REG_NV_LEN = 4
 NVM_Q16_SCALE = 65536.0   # Q16 fixed point: raw = round(value * 65536)
 
 # AES challenge-response authentication window (firmware: TRES_AES_ENABLE).
-#   Placed above the NVRAM parameter window (0x40..0xCF for 36 slots).
-#   0xD0..0xDF  CHALLENGE (W) 16 bytes big-endian
-#   0xE0..0xEF  RESPONSE (R)  AES-128-ECB(device_key, challenge)
-TRES_REG_CHAL_BASE = 0xD0
-TRES_REG_RESP_BASE = 0xE0
+#   Placed above the NVRAM parameter window (0x44..0xD3 for 36 slots).
+#   0xD4..0xE3  CHALLENGE (W) 16 bytes big-endian
+#   0xE4..0xF3  RESPONSE (R)  AES-128-ECB(device_key, challenge)
+TRES_REG_CHAL_BASE = 0xD4
+TRES_REG_RESP_BASE = 0xE4
 TRES_AUTH_LEN = 16
 # Must match AES_DEVICE_KEY_BYTES in Core/INC/aes.h (same per-product key).
 AES_DEVICE_KEY = bytes.fromhex(
@@ -296,7 +298,7 @@ write modes below mutate device state:
   [2] status:   read the machine-state block 0x30..0x35
                 (SDM845 boot state, TEC alarms, AHT20 status, fan/TEC duty)
   [3] --commands only: CMD_REPORT_FAIL x2 (changes RETRIES)
-  [4] params:   dump the NVRAM parameter window 0x40..0xCF (36 slots x 4B)
+  [4] params:   dump the NVRAM parameter window 0x44..0xD3 (36 slots x 4B)
   [5] action:   one of --reset / --dfu / --params / --set, or skipped
 
 Protocol (write): first byte selects the register pointer, following bytes
@@ -334,8 +336,8 @@ Commands (register 0x00 <- [0xA5][cmdId][param]):
   4 SAVE_PARAMS    persist the NVRAM RAM cache to FLASH
   5 DEFAULT_PARAMS reload firmware defaults into the NVRAM RAM cache
 
-NVRAM parameter window (0x40..0xCF, 4-byte big-endian per slot):
-  slot n lives at 0x40 + 4*n; the 4th byte written commits the value into
+NVRAM parameter window (0x44..0xD3, 4-byte big-endian per slot):
+  slot n lives at 0x44 + 4*n; the 4th byte written commits the value into
   the RAM cache. Persist with SAVE_PARAMS. --set accepts any of these names
   (case-insensitive); Q16 gain slots display as raw/65536:
 
@@ -366,15 +368,15 @@ NVRAM parameter window (0x40..0xCF, 4-byte big-endian per slot):
   non-negative by construction.
 
 Examples:
-  python3 tres_i2c_probe.py --bus 3                      # safe read-only probe
-  python3 tres_i2c_probe.py --bus 1 --set TARGET_BASE 35000   # RAM only
-  python3 tres_i2c_probe.py --bus 3 --set COLD_SOURCE 1 --save  # SDM845, FLASH
-  python3 tres_i2c_probe.py --bus 3 --set PID_KP 2.0 --save       # KP=2.0 (auto Q16)
-  python3 tres_i2c_probe.py --bus 3 --set PID_KI 0.1 --save       # KI=0.1 (auto Q16)
-  python3 tres_i2c_probe.py --bus 3 --reset              # reset SDM845 (gated)
-  python3 tres_i2c_probe.py --bus 3 --dfu                # boot DFU (gated)
-  python3 tres_i2c_probe.py --bus 3 --params             # NVRAM SAVE round-trip
-  python3 tres_i2c_probe.py --bus 3 --auth               # AES anti-clone check
+  python3 tres_i2c_probe.py                              # safe read-only probe (bus 1)
+  python3 tres_i2c_probe.py --set TARGET_BASE 35000       # RAM only
+  python3 tres_i2c_probe.py --set COLD_SOURCE 1 --save    # SDM845, FLASH
+  python3 tres_i2c_probe.py --set PID_KP 2.0 --save       # KP=2.0 (auto Q16)
+  python3 tres_i2c_probe.py --set PID_KI 0.1 --save       # KI=0.1 (auto Q16)
+  python3 tres_i2c_probe.py --reset              # reset SDM845 (gated)
+  python3 tres_i2c_probe.py --dfu                # boot DFU (gated)
+  python3 tres_i2c_probe.py --params             # NVRAM SAVE round-trip
+  python3 tres_i2c_probe.py --auth               # AES anti-clone check
 
 Exit status:
   0  all exercised steps passed
@@ -389,8 +391,8 @@ Prerequisites:
         description=description,
         epilog=epilog,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--bus", type=int, default=3, metavar="N",
-                    help="Linux I2C bus number (default: 3)")
+    ap.add_argument("--bus", type=int, default=1, metavar="N",
+                    help="Linux I2C bus number (default: 1)")
     ap.add_argument("--addr", default="0x50", metavar="ADDR",
                     help="7-bit slave address, decimal or hex (default: 0x50)")
     mode = ap.add_mutually_exclusive_group()
@@ -461,14 +463,16 @@ Prerequisites:
     print("    TEC alarms: {}(0x{:02X})  AHT20 status: {}".format(
         flags, tecflags, ahtstat))
 
-    print("[2b] live sensors: read 0x36..0x3F (auto-increment)")
-    fanrpm_hi, fanrpm_lo, c0, c1, c2, c3, h0, h1, h2, h3 = \
-        t.read_reg(TRES_REG_FANRPM, 10)
+    print("[2b] live sensors: read 0x36..0x43 (auto-increment)")
+    fanrpm_hi, fanrpm_lo, c0, c1, c2, c3, h0, h1, h2, h3, \
+        d0, d1, d2, d3 = t.read_reg(TRES_REG_FANRPM, 14)
     fanrpm = (fanrpm_hi << 8) | fanrpm_lo
-    cold = struct.unpack("i", bytes([c0, c1, c2, c3]))[0]
-    hot = struct.unpack("i", bytes([h0, h1, h2, h3]))[0]
-    print("    FANRPM={} RPM  COLD={:+.1f} C  HOT={:+.1f} C".format(
-        fanrpm, cold / 1000.0, hot / 1000.0))
+    cold = struct.unpack(">i", bytes([c0, c1, c2, c3]))[0]
+    hot = struct.unpack(">i", bytes([h0, h1, h2, h3]))[0]
+    dew = struct.unpack(">i", bytes([d0, d1, d2, d3]))[0]
+    dew_text = "N/A" if dew == -2147483648 else "{:+.1f} C".format(dew / 1000.0)
+    print("    FANRPM={} RPM  COLD={:+.1f} C  HOT={:+.1f} C  DEW={}".format(
+        fanrpm, cold / 1000.0, hot / 1000.0, dew_text))
 
     if args.commands:
         print("[3] command path: CMD_REPORT_FAIL x2, RETRIES must go up by 2")
@@ -484,7 +488,7 @@ Prerequisites:
     else:
         print("[3] command writes skipped (enable with --commands)")
 
-    print("[4] NVRAM parameter window: read 0x40..0x{:02X}".format(
+    print("[4] NVRAM parameter window: read 0x44..0x{:02X}".format(
         TRES_REG_NV_BASE + TRES_REG_NV_LEN * len(NV_PARAMS) - 1))
     raw = t.read_reg(TRES_REG_NV_BASE, TRES_REG_NV_LEN * len(NV_PARAMS))
     for i, (name, unit, scale) in enumerate(NV_PARAMS):

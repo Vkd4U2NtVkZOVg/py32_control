@@ -96,11 +96,12 @@ static uint8_t Reg_Read(uint8_t addr)
         default: break;
     }
 
-    /* Live sensor block (0x36..0x3F): fan speed (u16), cold/hot temperature
-     * (i32, milli-degC), big-endian each. Composed live so a burst read of
-     * 0x36..0x3F yields a consistent snapshot of the last TEC cycle. */
-    if ( ( addr >= TRES_REG_FANRPM ) && ( addr <= TRES_REG_HOTTEMP + 3u ) ) {
-        uint32_t off = (uint32_t)( addr - TRES_REG_FANRPM );   /* 0..9 */
+    /* Live sensor block (0x36..0x43): fan speed (u16), cold/hot temperature
+     * and dew point (i32, milli-degC), big-endian each. Composed live so a
+     * burst read of 0x36..0x43 yields a consistent snapshot of the last TEC
+     * cycle plus the latest AHT20 dew point. */
+    if ( ( addr >= TRES_REG_FANRPM ) && ( addr <= TRES_REG_DEWPOINT + 3u ) ) {
+        uint32_t off = (uint32_t)( addr - TRES_REG_FANRPM );   /* 0..13 */
 
         if ( off < 2u ) {
             /* 0x36-0x37: FANRPM, uint16 BE, cap at 0xFFFF. */
@@ -116,10 +117,17 @@ static uint8_t Reg_Read(uint8_t addr)
             return (uint8_t)( v >> ( 24u - 8u * rel ) );
         }
 
-        /* 0x3C-0x3F: HOTTEMP, int32 BE milli-degC. */
-        {
+        if ( off < 10u ) {
+            /* 0x3C-0x3F: HOTTEMP, int32 BE milli-degC. */
             uint32_t v = (uint32_t)TecControl_GetHotMilliCelsius();
             uint32_t rel = off - 6u;
+            return (uint8_t)( v >> ( 24u - 8u * rel ) );
+        }
+
+        /* 0x40-0x43: DEWPOINT, int32 BE milli-degC from the AHT20 task. */
+        {
+            uint32_t v = (uint32_t)AHT20_Get_LastDewPointMilliCelsius();
+            uint32_t rel = off - 10u;
             return (uint8_t)( v >> ( 24u - 8u * rel ) );
         }
     }
@@ -136,7 +144,8 @@ static uint8_t Reg_Read(uint8_t addr)
         default: break;
     }
 
-    /* NVRAM parameter window: slot n at 0x40 + 4*n, big-endian byte selection. */
+    /* NVRAM parameter window: slot n at TRES_REG_NV_BASE + 4*n, big-endian
+     * byte selection. */
     if ( ( addr >= TRES_REG_NV_BASE ) && ( addr < TRES_REG_NV_END ) ) {
         uint32_t off = (uint32_t)( addr - TRES_REG_NV_BASE );
         uint8_t  slot  = (uint8_t)( off / TRES_REG_NV_LEN );

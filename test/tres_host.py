@@ -73,7 +73,7 @@ def load_backup(path):
 
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--bus', type=int, default=3)
+    p.add_argument('--bus', type=int, default=1)
     p.add_argument('--addr', type=lambda s: int(s, 0), default=0x50)
     sub = p.add_subparsers(dest='action')
     sub.add_parser('status', help='read current state and diagnostics')
@@ -121,16 +121,19 @@ def main(argv=None):
         if args.action in (None, 'status'):
             status, retries, pins, error, version, completed, gaps = device.read_reg(0x10, 7)
             boot, boot_retries, alarms, aht, fan, tec = device.read_reg(0x30, 6)
-            fanrpm_hi, fanrpm_lo, c0, c1, c2, c3, h0, h1, h2, h3 = device.read_reg(0x36, 10)
+            fanrpm_hi, fanrpm_lo, c0, c1, c2, c3, h0, h1, h2, h3, \
+                d0, d1, d2, d3 = device.read_reg(0x36, 14)
             fan_rpm = (fanrpm_hi << 8) | fanrpm_lo
             cold_mc = struct.unpack(">i", bytes([c0, c1, c2, c3]))[0]
             hot_mc = struct.unpack(">i", bytes([h0, h1, h2, h3]))[0]
+            dew_mc = struct.unpack(">i", bytes([d0, d1, d2, d3]))[0]
             print(json.dumps(dict(state=fmt_status(status), status=status, retries=retries,
                 pins=pins, pins_names=fmt_pins(pins), error=TRES_ERR_NAMES.get(error,"?"), error_raw=error,
                 boot_state_name=SDM845_STATE_NAMES.get(boot,"?"), boot_state=boot, boot_retries=boot_retries,
                 aht_status=aht if aht < 128 else aht - 256, fan_percent=fan,
                 tec_alarms=fmt_tec_alarms(alarms), tec_alarms_raw=alarms,
-                tec_percent=tec, fan_rpm=fan_rpm, cold_mC=cold_mc, hot_mC=hot_mc), indent=2))
+                tec_percent=tec, fan_rpm=fan_rpm, cold_mC=cold_mc,
+                hot_mC=hot_mc, dew_mC=dew_mc), indent=2))
         elif args.action == 'params':
             for i, raw in enumerate(read_params(device)):
                 name, unit, scale = NV_PARAMS[i]
