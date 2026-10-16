@@ -103,13 +103,16 @@
  * shaping layers are applied to the fan COMMAND only; the protection paths
  * keep working on the raw hot_mc so a real overtemp is never delayed:
  *   - TEC_FAN_HOT_EMA_DIV: first-order EMA divisor on the hot-side input to
- *     the fan ramp. alpha = 1/DIV; at Ts = 500 ms, DIV 8 gives a ~3.5 s
- *     time constant - smooths ADC noise without lagging real heat load.
+ *     the fan ramp. alpha = 1/DIV; at Ts = 500 ms, DIV 16 gives a ~8 s
+ *     time constant - long enough to break the thermal positive feedback
+ *     while still letting a real sustained heat load ramp the fan up.
  *   - TEC_FAN_DUTY_HYSTERESIS_PCT: deadband on the commanded duty: the PWM
  *     only moves once the demand has moved more than +/- this many percent
- *     from what is actually on the pin. Kills the +/-1-2 % breathing. */
-#define TEC_FAN_HOT_EMA_DIV           ( 8u )
-#define TEC_FAN_DUTY_HYSTERESIS_PCT   ( 2u )
+ *     from what is actually on the pin. 5 % is ~1.4 C of hot-side movement:
+ *     small swings no longer move the fan, a real change still steps it
+ *     (the host regression pins this boundary). */
+#define TEC_FAN_HOT_EMA_DIV           ( 16u )
+#define TEC_FAN_DUTY_HYSTERESIS_PCT   ( 5u )
 
 /*============================================================================*/
 /* Configuration: snapshotted once from NVRAM at TecControl_Init().            */
