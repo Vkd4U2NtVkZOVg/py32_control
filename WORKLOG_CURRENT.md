@@ -1,5 +1,31 @@
 # Mix3_TRES_2 Firmware 当前工作日志（精简版）
 
+## 2026-10-16：EN 死区去滞回；露点保护去掉最小输出钳位（duty < EN_OFF_PCT 直接关 TEC_VEN）
+
+### 背景
+
+- 台架观察到 duty 卡在 12（旧 `dew_min_duty = EN_OFF_PCT+4`），去掉滞回后卡在 8（`dew_min_duty = EN_OFF_PCT`）。用户目标：**duty 低于 8 时直接拉低 TEC_VEN**，不需要用最小输出把 duty 顶在死区之上。
+
+### 改动（未提交）
+
+- `tec_control.c`：删除 `TEC_EN_HYST_PCT` 宏及其注释。EN 死区两侧统一用 `NV_TEC_EN_OFF_PCT` 单一阈值：EN 开 + duty < off → 撤 EN；EN 关 + duty < off → 保持关；EN 关 + duty ≥ off → 首次使能路径。参数校验上限由 `100-4` 放开到 `100`。
+- `tec_control.c`：删除 `dew_min_duty`、`dew_was_hold` 及全部使用点。PID 主循环去掉露点保持分支（不再 `TecPid_TrackOutput` 强制输出 / 释放 re-anchor）；首次使能不再覆盖 `start_duty`；斜坡不再钳 `duty ≥ dew_min_duty`。露点保护降级为：抬升目标（露点 + 2°C）+ 锁存 `s_dew_hold` + 报警，**不再限制输出**——需求低于 EN_OFF_PCT 时由 EN 死区直接关断 TEC（零电流）。
+- `nv_params.h` / `nv_params.c`：`EN_OFF_PCT` 注释去掉滞回与 dew-floor 描述。
+- `test/tec_fault_harness.c`：露点断言按新行为重写（保持期间不再钉 8；demand=0 时 EN 关断 dac=0；释放走首次使能锚点 10+ramp5=15；EN_OFF 热加载 8→20 后 15 仍关、25 重新使能）。
+
+### 行为变化
+
+- 露点保护不再有"最小输出保持"：`s_dew_hold` 只负责抬目标 + 锁存 + 报警，duty 可自由降到 0 → EN 死区（默认 8%）在 duty < 8 时拉低 TEC_VEN。
+- 代价：露点边界可能形成慢速 bang-bang（关断 → 回暖 → 重新制冷 → 再关），因目标被抬到露点+2°C，实际开关频率不高。
+- `EN_OFF_PCT` 设 0 会禁用整个 EN 关断（`duty < 0` 永不成立），TEC 不会被该参数关断且低 duty 时转换器进入 UVP 打嗝区——不要用 0 实现"关断"。
+
+### 验证
+
+- `run_tec_fault_tests.py --syntax-only`（ARM 交叉编译器）三种构建模式（默认 / 0 / 1）通过。
+- 新断言期望值用独立 Python 模拟逐场景核对（进入保持、demand=0 关断、阈值波动、释放恢复、露点缺失 + FF 禁用、EN_OFF 热加载）全部通过。
+- 未做完整固件链接与实机验证，需台架复测露点触发-关断-恢复。
+
+
 ## 2026-10-12：露点保护改为最小输出保持
 
 - 基于 `bd6498d`，按用户要求将原先被注释的露点停机逻辑替换为已启用的限功率模式。冷端达到露点 + DEWPOINT_MARGIN（默认 2°C）时进入保持，回升到该阈值以上 1°C 时退出；控制目标也不得低于露点加裕量。保留原调试基础目标 5000 m°C。

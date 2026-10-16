@@ -80,7 +80,7 @@ extern "C" {
  * disable FAN_FAULT detection, the stall cut and the spool-up grace timer;
  * the fan PWM itself (hot-side ramp) is unaffected. Default 1 = enabled. */
 #ifndef TEC_FAN_FAULT_ENABLE
-#define TEC_FAN_FAULT_ENABLE        (1u)
+#define TEC_FAN_FAULT_ENABLE        (0u)
 #endif
 #if (TEC_FAN_FAULT_ENABLE != 0) && (TEC_FAN_FAULT_ENABLE != 1)
 #error "TEC_FAN_FAULT_ENABLE must be 0 or 1"

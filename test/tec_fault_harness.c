@@ -130,37 +130,37 @@ int main(int argc, char **argv)
      * expected value follows s_p.target_base_millic (= 45000), not a fixed
      * constant: base + hot_fb_max = 45000 + 200000 = 245000. */
     assert(target_mc == 245000);
-    /* Entering the hold from high power preserves EN and ramps down. */
+    /* Entering the hold from high power keeps driving (no min-duty clamp). */
     reset_fixture(); demand = 80;
     for (int i = 0; i < 30; ++i) TecControl_Cb(NULL);
     assert(s_dac_percent == 80);
     edges = enable_edges; cold = 12000;
     TecControl_Cb(NULL);
-    assert(s_dew_hold && s_tec_enabled && s_dac_percent == 75);
+    assert(s_dew_hold && s_tec_enabled && s_dac_percent == 80);
     for (int i = 0; i < 30; ++i) TecControl_Cb(NULL);
-    assert(s_dac_percent == 12 && s_tec_enabled && enable_edges == edges);
-    /* Hold above the electrical deadband even if PID asks for zero. */
+    assert(s_dac_percent == 80 && s_tec_enabled && enable_edges == edges);
+    /* Dew hold with zero demand: EN deadband cuts TEC_VEN (no duty floor). */
     reset_fixture(); cold = 12000; demand = 0;
     for (int i = 0; i < 20; ++i) TecControl_Cb(NULL);
-    assert(s_dew_hold && s_tec_enabled && s_dac_percent == 12);
+    assert(s_dew_hold && !s_tec_enabled && s_dac_percent == 0);
     assert(s_alarm & TEC_ALARM_DEWPOINT);
     edges = enable_edges;
     for (int i = 0; i < 100; ++i) {
         cold = (i % 2) ? 11900 : 12500;
         TecControl_Cb(NULL);
-        assert(s_dew_hold && s_tec_enabled && s_dac_percent == 12);
+        assert(s_dew_hold && !s_tec_enabled && s_dac_percent == 0);
     }
     assert(enable_edges == edges); /* no enable chatter at the floor */
     cold = 13000; demand = 80; TecControl_Cb(NULL);
-    assert(!s_dew_hold && s_tec_enabled && tracked_output == 12);
-    assert(s_dac_percent == 17); /* normal ramp bounds recovery */
+    assert(!s_dew_hold && s_tec_enabled);
+    assert(s_dac_percent == 15); /* first-enable anchor 10 + ramp 5 */
     assert(target_mc >= 12000);
-    /* Missing dew sample and additive feedforward cannot bypass derating. */
+    /* Missing dew sample latches the hold; FF stays disabled during it. */
     dew = INT32_MIN; s_p.ff_enable = 1; s_p.ff_gain = 100;
     for (int i = 0; i < 30; ++i) TecControl_Cb(NULL);
-    assert(s_dew_hold && s_tec_enabled && s_dac_percent == 12);
+    assert(s_dew_hold && s_tec_enabled && s_dac_percent == 80);
     assert(s_alarm & TEC_ALARM_SENSOR);
-    /* Other faults still win over the minimum-output request. */
+    /* Other faults still win over the dew hold. */
     hot = 95000; TecControl_Cb(NULL);
     assert(!s_tec_enabled && (s_alarm & TEC_ALARM_OVERTEMP));
     hot = 35000; adc_code = 4000; TecControl_Cb(NULL);
@@ -216,24 +216,25 @@ int main(int argc, char **argv)
     params[NV_TEC_CONTROL_PERIOD_MS] = 500;
     nv_cache_gen++;
 
-    /* Every value derived from a parameter must be computed AFTER the reload.
-     * dew_min_duty follows EN_OFF_PCT: if it were still derived from the
-     * previous snapshot (as it was when declared in the block above the
-     * reload), a host writing EN_OFF_PCT would get one cycle whose dew-point
-     * hold still used the OLD minimum - a hold weaker than the new deadband,
-     * which the EN deadband would then cut instead of holding.
-     *
-     * ramp_step_percent is raised in the same write so the ramp cannot mask
-     * the result: with ramp 5 a 12 -> 24 change would be clamped to 17 either
-     * way, and the test would pass without the fix. */
-    reset_fixture(); demand = 80; cold = 12000;   /* at the floor: dew hold */
-    for (int i = 0; i < 30; ++i) TecControl_Cb(NULL);
-    assert(s_dew_hold && s_dac_percent == 12);    /* 8 + TEC_EN_HYST_PCT */
+    /* Every value derived from a parameter must be computed AFTER the reload:
+     * a host write to EN_OFF_PCT must move the EN-deadband cut within one
+     * cycle. demand=50 sits below the new threshold 60, so the live write
+     * drops TEC_VEN immediately (covered above); here the same write moves
+     * the dew-hold release band: cold below dew+margin keeps the hold, and
+     * the raised target still applies after the reload. */
+    reset_fixture(); demand = 0; cold = 12000;   /* at the floor: dew hold */
+    for (int i = 0; i < 20; ++i) TecControl_Cb(NULL);
+    assert(s_dew_hold && !s_tec_enabled && s_dac_percent == 0); /* demand 0 < 8 */
     params[NV_TEC_EN_OFF_PCT] = 20;
-    params[NV_TEC_RAMP_STEP_PERCENT] = 100;
     nv_cache_gen++;
     TecControl_Cb(NULL);                          /* first cycle after the write */
-    assert(s_dew_hold && s_tec_enabled && s_dac_percent == 24);  /* 20 + 4 */
+    assert(s_dew_hold && !s_tec_enabled && s_dac_percent == 0); /* still cut */
+    demand = 15;                                   /* now below EN_OFF 20 */
+    TecControl_Cb(NULL);
+    assert(!s_tec_enabled);
+    demand = 25;                                   /* above EN_OFF 20 -> re-enable */
+    TecControl_Cb(NULL);
+    assert(s_tec_enabled);
 
     puts("TEC fault callback tests passed");
     return 0;

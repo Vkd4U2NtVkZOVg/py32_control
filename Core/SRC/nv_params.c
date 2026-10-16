@@ -205,10 +205,10 @@ static const uint32_t s_defaults[ NVM_PARAM_COUNT ] = {
                                                   TPS565201 UVP-hiccup region and
                                                   the inductor whines; a disabled
                                                   converter has zero TEC current and
-                                                  the cold side warms back up.
-                                                  Re-enable at off+4 (hysteresis).
-                                                  8 % ~= 0.5 V on the 6 V TEC;
-                                                  bench-calibrate the boundary.     */
+                                                  the cold side warms back up. The
+                                                  same value is also the re-enable
+                                                  threshold (no hysteresis); bench-
+                                                  calibrate the boundary.     */
 };
 
 /*============================================================================*/

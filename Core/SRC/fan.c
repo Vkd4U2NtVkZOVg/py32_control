@@ -57,9 +57,9 @@ void Fan_SetSource(Fan_Source_t source)
 {
     s_source = ( source == FAN_SOURCE_PY32 ) ? 1u : 0u;
     if ( s_source != 0u ) {
-        LL_GPIO_SetOutputPin( FAN_CH_SW_Port, FAN_CH_SW_Pin );  /* PY32 drives PWM */
+        LL_GPIO_ResetOutputPin( FAN_CH_SW_Port, FAN_CH_SW_Pin );  /* PY32 drives PWM */
     } else {
-        LL_GPIO_ResetOutputPin( FAN_CH_SW_Port, FAN_CH_SW_Pin ); /* SoC drives PWM */
+        LL_GPIO_SetOutputPin( FAN_CH_SW_Port, FAN_CH_SW_Pin ); /* SoC drives PWM */
     }
 }
 

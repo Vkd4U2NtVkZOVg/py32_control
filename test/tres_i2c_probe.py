@@ -360,7 +360,7 @@ NVRAM parameter window (0x40..0xCF, 4-byte big-endian per slot):
 
 Examples:
   python3 tres_i2c_probe.py --bus 3                      # safe read-only probe
-  python3 tres_i2c_probe.py --bus 3 --set TARGET_BASE 45000   # RAM only
+  python3 tres_i2c_probe.py --bus 1 --set TARGET_BASE 35000   # RAM only
   python3 tres_i2c_probe.py --bus 3 --set COLD_SOURCE 1 --save  # SDM845, FLASH
   python3 tres_i2c_probe.py --bus 3 --set PID_KP 2.0 --save       # KP=2.0 (auto Q16)
   python3 tres_i2c_probe.py --bus 3 --set PID_KI 0.1 --save       # KI=0.1 (auto Q16)

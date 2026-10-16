@@ -16,10 +16,10 @@
  *                          flag, and fan ramping; never feeds the PID error
  *   - ambient (env_mc)   : target compensation and common-mode feedforward,
  *                          not the PID measure
- * Dew-point protection raises the target floor and holds minimum cooling
- * with temperature hysteresis. It does not guarantee condensation avoidance
- * if the minimum stable converter output still overcools the cold side.
- *
+ * Dew-point protection raises the target floor (dew + margin) and latches
+ * it until the cold side warms 1 C above it; with no minimum-output clamp
+ * the EN deadband (NV_TEC_EN_OFF_PCT) cuts TEC_VEN when demand drops below
+ * the anti-hiccup threshold. It does not guarantee condensation avoidance.
  * Every tunable parameter lives in NVRAM (nv_params.h); TecControl_Init()
  * snapshots the whole table into a local struct, so the control loop never
  * re-reads FLASH-backed storage per cycle.
@@ -38,12 +38,6 @@
 #include "mcp4725.h"
 #include "nv_params.h"
 
-/*============================================================================*/
-/* Fixed hysteresis between the EN cut-off threshold and the re-enable        */
-/* threshold (percent of duty). Keeps the EN boundary from chattering while   */
-/* the demand hovers around the anti-hiccup deadband.                          */
-/*============================================================================*/
-#define TEC_EN_HYST_PCT     ( 4 )
 #define TEC_DEW_RELEASE_MILLIC ( 1000 )
 
 /* Absolute envelope for every milli-degree parameter: the NTC sensors span
@@ -253,7 +247,7 @@ static void tec_params_load( Tec_Params_t *p )
         p->ramp_step_percent = (int32_t)NvParams_GetDefault( NV_TEC_RAMP_STEP_PERCENT );
     }
     if ( ( p->en_off_pct < 0 ) ||
-         ( p->en_off_pct > ( 100 - (int32_t)TEC_EN_HYST_PCT ) ) ) {
+         ( p->en_off_pct > 100 ) ) {
         p->en_off_pct = (int32_t)NvParams_GetDefault( NV_TEC_EN_OFF_PCT );
     }
     if ( ( p->fan_duty_base < 0 ) || ( p->fan_duty_base > 100 ) ) {
@@ -529,8 +523,6 @@ static void TecControl_Cb( qEvent_t e )
 #endif
     uint32_t cur_read;
     uint8_t  cur_ok;
-    uint8_t dew_was_hold;
-    int32_t dew_min_duty;           /* derived from s_p: set AFTER the reload */
     uint8_t drive;                  /* 0 = hold the converter off this cycle */
 
     (void)e;
@@ -544,14 +536,10 @@ static void TecControl_Cb( qEvent_t e )
     /* Host-tunable values take effect from the NEXT cycle; nothing below reads
      * a parameter from any other source, so this cycle stays self-consistent.
      * Everything derived from s_p must therefore be computed AFTER this call -
-     * a value hoisted into the declarations above (as dew_min_duty once was)
-     * would silently mix the previous cycle's EN_OFF_PCT with this cycle's
-     * deadband, target and fan thresholds. */
+     * values hoisted into the declarations above would silently mix the
+     * previous cycle's EN_OFF_PCT with this cycle's deadband, target and
+     * fan thresholds. */
     tec_params_reload_if_needed();
-
-    /* Minimum cooling held during a dew-point event: just above the EN
-     * deadband exit, so the hold is never mistaken for the anti-hiccup cut. */
-    dew_min_duty = s_p.en_off_pct + TEC_EN_HYST_PCT;
 
     /*--- 1. read all sources ------------------------------------------------*/
     hot_mc = Studio_ADC1_ReadHotMilliCelsius();
@@ -658,13 +646,15 @@ static void TecControl_Cb( qEvent_t e )
         s_alarm |= TEC_ALARM_HOT_WARNING;
     }
 
-    /* Dew protection derates rather than toggling EN. Keep the requested
-     * target above dew + margin, and latch minimum cooling until the cold
-     * side has warmed 1 C above that floor. An unavailable humidity sample
-     * must not silently restore unrestricted cooling. */
-    dew_was_hold = s_dew_hold;
+    /* Dew protection keeps the target above dew + margin and latches the
+     * raised target until the cold side warms 1 C above the floor. There is
+     * NO minimum-output clamp: once the demand falls below NV_TEC_EN_OFF_PCT
+     * the EN deadband cuts TEC_VEN (converter off = zero current = no
+     * overcooling). An unavailable humidity sample must not silently
+     * restore unrestricted cooling. */
     {
         int32_t dew_mc = AHT20_Get_LastDewPointMilliCelsius();
+
         if ((dew_mc < TEC_TEMP_ENVELOPE_MIN_MILLIC) ||
             (dew_mc > TEC_TEMP_ENVELOPE_MAX_MILLIC)) {
             s_dew_hold = 1u;
@@ -726,20 +716,9 @@ static void TecControl_Cb( qEvent_t e )
      * Fan is a cooling actuator (output increases when temperature is above
      * setpoint), so we invert both setpoint and measure to flip the effective
      * error to (x - SP). */
-    if (s_dew_hold) {
-        /* Freeze accumulation while the actuator is externally constrained. */
-        TecPid_TrackOutput(&s_pid, -(float)sdm_mc, (float)dew_min_duty);
-        pid_out = dew_min_duty;
-    } else {
-        if (dew_was_hold) {
-            float actual = (s_tec_enabled && s_dac_percent <= 100u) ?
-                           (float)s_dac_percent : 0.0f;
-            TecPid_TrackOutput(&s_pid, -(float)sdm_mc, actual);
-        }
-        TecPid_SetSetpoint( &s_pid, -(float)target_mc );
-        TecPid_Update( &s_pid, -(float)sdm_mc );
-        pid_out = (int32_t)TecPid_GetOutput( &s_pid );
-    }
+    TecPid_SetSetpoint( &s_pid, -(float)target_mc );
+    TecPid_Update( &s_pid, -(float)sdm_mc );
+    pid_out = (int32_t)TecPid_GetOutput( &s_pid );
 
     /*--- 5b. COMMON-MODE feedforward (master switch NV_TEC_FF_ENABLE,
      * default OFF) ----------------------------------------------------------*/
@@ -806,12 +785,12 @@ static void TecControl_Cb( qEvent_t e )
      * the inductor audibly whines. Deep-light-load demand is therefore served
      * by DROPPING TEC_VEN (the converter EN) instead: zero TEC current, no
      * hiccup, and the cold side warms back up - which also keeps it from
-     * hanging below the target. Hysteresis (TEC_EN_HYST_PCT) keeps the
-     * boundary from chattering:
-     *   EN on  + duty < off             -> EN off, DAC parked, wait
-     *   EN off + duty < off + hysteresis -> hold off (no re-enable chatter)
-     *   EN off + duty >= off + hysteresis -> normal first-enable path below
-     *   EN on  + duty in the band        -> keep driving (hysteresis band) */
+     * hanging below the target. NV_TEC_EN_OFF_PCT is the single threshold on
+     * both sides of the boundary (no separate hysteresis):
+     *   EN on  + duty < off  -> EN off, DAC parked, wait
+     *   EN off + duty < off  -> hold off
+     *   EN off + duty >= off -> normal first-enable path below
+     *   EN on  + duty >= off -> keep driving */
     drive = 1u;
     if ( s_tec_enabled != 0u ) {
         if ( duty < s_p.en_off_pct ) {
@@ -820,7 +799,7 @@ static void TecControl_Cb( qEvent_t e )
             drive = 0u;
         }
     } else {
-        if ( duty < ( s_p.en_off_pct + (int32_t)TEC_EN_HYST_PCT ) ) {
+        if ( duty < s_p.en_off_pct ) {
             drive = 0u;   /* hold off; the DAC is already parked */
         }
     }
@@ -837,7 +816,7 @@ static void TecControl_Cb( qEvent_t e )
          * window bottom at the no-injection point (760 mV) mv can never drop
          * below FB=VREF, so this path can no longer land in the UVP (<494 mV)
          * or overdrive (>6 V) regions. Reached only when the duty demand has
-         * cleared the EN deadband (off + hysteresis), so the converter never
+         * cleared the EN deadband (duty >= off), so the converter never
          * switches on into the hiccup region. */
         {
             uint16_t start_duty;
@@ -850,7 +829,6 @@ static void TecControl_Cb( qEvent_t e )
             } else {
                 start_duty = (uint16_t)s_p.dac_startup_pct;
             }
-            if (s_dew_hold) start_duty = (uint16_t)dew_min_duty;
             /* Forced write: the cache may not reflect the physical DAC here
              * (an earlier failed park, or an MCP4725 brown-out back to its
              * EEPROM power-up value), and with DAC_STARTUP_PCT == 0 a cached
@@ -906,7 +884,6 @@ static void TecControl_Cb( qEvent_t e )
         if ( duty < 0 ) {
             duty = 0;
         }
-        if (s_dew_hold && duty < dew_min_duty) duty = dew_min_duty;
     }
 
     /*--- 8. fan stall detection (sustained stall cuts the TEC) --------------*/
