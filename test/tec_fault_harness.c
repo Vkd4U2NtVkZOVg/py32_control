@@ -236,6 +236,20 @@ int main(int argc, char **argv)
     TecControl_Cb(NULL);
     assert(s_tec_enabled);
 
+    /* Fan noise shaping (EMA + hysteresis). With hot fixed at 42 C the pure
+     * ramp gives 30 + (2/20)*70 = 37 %. A small hot-side nudge that moves
+     * the demand by ~1 % must NOT move the fan (inside the 2 % deadband); a
+     * real +2 C step must cross the band and move the duty up. */
+    reset_fixture(); hot = 42000;
+    for (int i = 0; i < 8; ++i) TecControl_Cb(NULL);
+    assert(fan_duty_seen == 37);
+    hot = 42300;                                  /* +0.3 C -> ~+1 % demand */
+    for (int i = 0; i < 8; ++i) TecControl_Cb(NULL);
+    assert(fan_duty_seen == 37);                  /* inside the hysteresis band */
+    hot = 44000;                                  /* +2 C from the settled EMA */
+    for (int i = 0; i < 30; ++i) TecControl_Cb(NULL);
+    assert(fan_duty_seen > 37);                   /* crossed the band */
+
     puts("TEC fault callback tests passed");
     return 0;
 }

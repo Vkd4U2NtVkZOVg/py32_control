@@ -96,6 +96,21 @@
 #define TEC_FAN_GRACE_S           ( 6u )
 #define TEC_FAN_STALL_S           ( 5u )
 
+/* Fan-noise shaping. The hot-side ADC sample is a single 12-bit conversion
+ * with no averaging, and the default fan ramp (30 % below 40 C, linear to
+ * 100 % at 60 C) is 3.5 %/C - so sample noise alone can make the fan duty
+ * flutter every 500 ms control cycle and the fan audibly breathe. Two
+ * shaping layers are applied to the fan COMMAND only; the protection paths
+ * keep working on the raw hot_mc so a real overtemp is never delayed:
+ *   - TEC_FAN_HOT_EMA_DIV: first-order EMA divisor on the hot-side input to
+ *     the fan ramp. alpha = 1/DIV; at Ts = 500 ms, DIV 8 gives a ~3.5 s
+ *     time constant - smooths ADC noise without lagging real heat load.
+ *   - TEC_FAN_DUTY_HYSTERESIS_PCT: deadband on the commanded duty: the PWM
+ *     only moves once the demand has moved more than +/- this many percent
+ *     from what is actually on the pin. Kills the +/-1-2 % breathing. */
+#define TEC_FAN_HOT_EMA_DIV           ( 8u )
+#define TEC_FAN_DUTY_HYSTERESIS_PCT   ( 2u )
+
 /*============================================================================*/
 /* Configuration: snapshotted once from NVRAM at TecControl_Init().            */
 /*============================================================================*/
@@ -310,6 +325,9 @@ static uint8_t     s_fan_started;   /* do not renew grace on each TEC enable */
 #endif /* TEC_FAN_FAULT_ENABLE */
 static uint8_t     s_dew_hold; /* latched low-output mode, 1 C release band */
 static uint8_t     s_cold_fault;    /* reset PID from real feedback on recovery */
+static int32_t     s_fan_hot_ema;       /* EMA-smoothed hot side for the fan ramp   */
+static uint8_t     s_fan_hot_ema_valid; /* first-sample seed flag for the EMA       */
+static uint8_t     s_fan_last_duty;     /* last fan duty actually commanded (hyst.) */
 static volatile int32_t hot_mc;
 static volatile int32_t env_mc;
 static volatile int32_t sdm_mc;
@@ -507,6 +525,25 @@ static uint8_t tec_fan_duty_from_hot( int32_t hot_mc )
     return (uint8_t)duty;
 }
 
+/* Normal-path fan command shaping: +/-TEC_FAN_DUTY_HYSTERESIS_PCT deadband
+ * around the duty that is actually on the pin. Once tec_fan_duty_from_hot()
+ * has been smoothed by the EMA, this band absorbs the residual 1-2 % steps
+ * so the fan no longer breathes every control cycle; the duty only moves
+ * when the demand really exceeds the band. The protection paths do NOT pass
+ * through here: they overwrite fan_duty later in the cycle and drive the
+ * fan directly. Also exposed for the host-side regression harness, which
+ * asserts that an isothermal case keeps the exact pure-ramp value. */
+static uint8_t tec_fan_duty_hysteresis( uint8_t demand )
+{
+    int32_t diff = (int32_t)demand - (int32_t)s_fan_last_duty;
+
+    if ( ( diff >  (int32_t)TEC_FAN_DUTY_HYSTERESIS_PCT ) ||
+         ( diff < -(int32_t)TEC_FAN_DUTY_HYSTERESIS_PCT ) ) {
+        s_fan_last_duty = demand;
+    }
+    return s_fan_last_duty;
+}
+
 /*============================================================================*/
 /* Periodic control callback                                                   */
 /*============================================================================*/
@@ -579,6 +616,17 @@ static void TecControl_Cb( qEvent_t e )
         Fan_SetDutyPercent( 100u );
         s_alarm |= TEC_ALARM_SENSOR;
         return;
+    }
+
+    /* Fan ramp input: first-order EMA on the hot side so a single noisy
+     * 12-bit ADC sample cannot make the fan duty flutter. Only VALID samples
+     * update the filter; the protection paths above/below keep using the raw
+     * hot_mc, so a real overtemp is never delayed by the filter. */
+    if ( s_fan_hot_ema_valid == 0u ) {
+        s_fan_hot_ema       = hot_mc;
+        s_fan_hot_ema_valid = 1u;
+    } else {
+        s_fan_hot_ema += ( hot_mc - s_fan_hot_ema ) / (int32_t)TEC_FAN_HOT_EMA_DIV;
     }
 
     /*--- 1c. current-sense failure is FAIL-SAFE, not fall-back -------------*/
@@ -900,7 +948,8 @@ static void TecControl_Cb( qEvent_t e )
      *     must not kill the cooling;
      *   - recovery is automatic: a healthy RPM sample clears the timer and
      *     the TEC re-enables through the normal deadband/first-enable path. */
-    fan_duty = tec_fan_duty_from_hot( hot_mc );
+    fan_duty = tec_fan_duty_from_hot( s_fan_hot_ema );
+    fan_duty = tec_fan_duty_hysteresis( fan_duty );
 
 #if ( TEC_FAN_FAULT_ENABLE == 1 )
     /* Tachometer-based stall detection (see rules above): the hot-side ramp
@@ -1006,6 +1055,9 @@ void TecControl_Init( void )
 #endif
     s_dew_hold     = 0u;
     s_cold_fault   = 0u;
+    s_fan_hot_ema       = 0;
+    s_fan_hot_ema_valid = 0u;
+    s_fan_last_duty     = 0xFFu;   /* "no previous duty" so the first ramp applies */
     tec_set_enabled( 0u );   /* held off until the SDM845 thermal precheck passes */
 
     /* Park the DAC on the zero-current end of the FB-injection window. In
