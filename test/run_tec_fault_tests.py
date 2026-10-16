@@ -52,6 +52,7 @@ static uint32_t rpm = 1000;
 static int fail_dac, demand = 50;
 static int32_t hot = 35000, dew = 10000;
 static float tracked_output;
+static float pid_measure;    /* cold sample fed to TecPid_Update (EMA-smoothed) */
 static uint8_t adc_ok = 1, fan_duty_seen, fan_enabled;
 static uint16_t adc_code = 0;
 static uint32_t params[NVM_PARAM_COUNT];
@@ -76,7 +77,7 @@ static int TecPid_Init(TecPid_t *p, float a, float b, float c, float d,
 static void TecPid_Reset(TecPid_t *p, float m) { reset_measure = m; }
 static void TecPid_TrackOutput(TecPid_t *p, float m, float out) { reset_measure = m; tracked_output = out; }
 static void TecPid_SetSetpoint(TecPid_t *p, float s) {}
-static void TecPid_Update(TecPid_t *p, float m) {}
+static void TecPid_Update(TecPid_t *p, float m) { pid_measure = m; }
 static float TecPid_GetOutput(TecPid_t *p) { return (float)demand; }
 static int qOS_Add_Task(qTask_t *t, void (*cb)(qEvent_t), int pr,
  qTime_t period, int mode, int enabled, void *data) { return 0; }

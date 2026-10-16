@@ -236,6 +236,19 @@ int main(int argc, char **argv)
     TecControl_Cb(NULL);
     assert(s_tec_enabled);
 
+    /* Cold-side EMA: the PID feedback follows the smoothed cold temperature,
+     * not a single noisy ADC sample (same 1/16 EMA as the fan hot input).
+     * A one-cycle 1 C spike must move the PID input by only ~1/16 of it. */
+    reset_fixture(); cold = 45000;
+    for (int i = 0; i < 8; ++i) TecControl_Cb(NULL);
+    assert(pid_measure == -45000.0f);              /* EMA settled at seed */
+    cold = 46000;                                   /* one-cycle spike */
+    TecControl_Cb(NULL);
+    assert(pid_measure > -45070.0f && pid_measure < -45055.0f);
+    cold = 45000;
+    for (int i = 0; i < 40; ++i) TecControl_Cb(NULL);
+    assert(pid_measure > -45020.0f && pid_measure <= -45000.0f);
+
     /* Fan noise shaping (EMA + hysteresis). With hot fixed at 42 C the pure
      * ramp gives 30 + (2/20)*70 = 37 %. A small hot-side nudge that moves
      * the demand by ~1 % must NOT move the fan (inside the 2 % deadband); a

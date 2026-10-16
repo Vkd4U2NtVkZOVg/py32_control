@@ -11,7 +11,10 @@
  *
  * Control structure (deliberate separation of roles):
  *   - cold side (sdm_mc) : the controlled variable - PID feedback + dew-point
- *                          protection + SoC-tighten target input
+ *                          protection + SoC-tighten target input. The PID
+ *                          feedback uses an EMA-smoothed cold sample (same
+ *                          1/16 filter as the fan hot input); the protection
+ *                          and target inputs keep the raw sample.
  *   - hot side (hot_mc)  : protection input only - danger shutdown, warning
  *                          flag, and fan ramping; never feeds the PID error
  *   - ambient (env_mc)   : target compensation and common-mode feedforward,
@@ -113,6 +116,17 @@
  *     (the host regression pins this boundary). */
 #define TEC_FAN_HOT_EMA_DIV           ( 16u )
 #define TEC_FAN_DUTY_HYSTERESIS_PCT   ( 5u )
+
+/* Cold-side control input: the same first-order EMA as the fan hot input,
+ * but on the cold side, so a single noisy 12-bit ADC sample cannot shake
+ * the PID (and thereby the TEC duty and the heatsink). alpha = 1/DIV; at
+ * Ts = 500 ms, DIV 16 gives a ~8 s time constant. Only VALID samples update
+ * the filter; the protection paths (sensor validity, dew-point floor,
+ * SoC-tighten) and every PID-reset path keep using the raw sdm_mc so they
+ * are never delayed or reseeded from a stale value. Kept as its own macro
+ * because the PID closed loop is more sensitive to added lag than the
+ * open-loop fan ramp - tune independently if needed. */
+#define TEC_COLD_EMA_DIV              ( 16u )
 
 /*============================================================================*/
 /* Configuration: snapshotted once from NVRAM at TecControl_Init().            */
@@ -328,6 +342,8 @@ static uint8_t     s_fan_started;   /* do not renew grace on each TEC enable */
 #endif /* TEC_FAN_FAULT_ENABLE */
 static uint8_t     s_dew_hold; /* latched low-output mode, 1 C release band */
 static uint8_t     s_cold_fault;    /* reset PID from real feedback on recovery */
+static int32_t     s_cold_ema;          /* EMA-smoothed cold side for the PID       */
+static uint8_t     s_cold_ema_valid;    /* first-sample seed flag for the EMA       */
 static int32_t     s_fan_hot_ema;       /* EMA-smoothed hot side for the fan ramp   */
 static uint8_t     s_fan_hot_ema_valid; /* first-sample seed flag for the EMA       */
 static uint8_t     s_fan_last_duty;     /* last fan duty actually commanded (hyst.) */
@@ -605,6 +621,19 @@ static void TecControl_Cb( qEvent_t e )
         s_cold_fault = 0u;
     }
 
+    /* Cold-side control input: first-order EMA on the cold side so a single
+     * noisy 12-bit ADC sample cannot shake the PID (and thereby the TEC duty
+     * and the heatsink). Only VALID samples update the filter; the protection
+     * paths below - sensor validity, dew-point floor, SoC-tighten - and every
+     * PID-reset path keep using the raw sdm_mc, so they are never delayed
+     * and recovery always reseeds from the real temperature. */
+    if ( s_cold_ema_valid == 0u ) {
+        s_cold_ema       = sdm_mc;
+        s_cold_ema_valid = 1u;
+    } else {
+        s_cold_ema += ( sdm_mc - s_cold_ema ) / (int32_t)TEC_COLD_EMA_DIV;
+    }
+
     /*--- 1b. hot-side sensor failure is FAIL-SAFE, not fall-back -----------*/
     /* Only ambient falls back to the target on an invalid
      * reading; the hot side CANNOT - it feeds the overtemp shutdown, the
@@ -761,14 +790,16 @@ static void TecControl_Cb( qEvent_t e )
 #endif /* TEC_FAN_FAULT_ENABLE */
 
     /*--- 5. PID main loop --------------------------------------------------*/
-    /* The controlled variable is the COLD side (sdm_mc); the hot side and
-     * ambient never enter the PID error. EPID is "heating semantics"
-     * (error = SP - x, output increases when temperature is below setpoint).
-     * Fan is a cooling actuator (output increases when temperature is above
-     * setpoint), so we invert both setpoint and measure to flip the effective
-     * error to (x - SP). */
+    /* The controlled variable is the COLD side (via the EMA-smoothed
+     * s_cold_ema); the hot side and ambient never enter the PID error. EPID
+     * is "heating semantics" (error = SP - x, output increases when
+     * temperature is below setpoint). Fan is a cooling actuator (output
+     * increases when temperature is above setpoint), so we invert both
+     * setpoint and measure to flip the effective error to (x - SP). The
+     * reset paths above/below deliberately reseed from the RAW sdm_mc so a
+     * recovered controller starts from the real temperature, not the filter. */
     TecPid_SetSetpoint( &s_pid, -(float)target_mc );
-    TecPid_Update( &s_pid, -(float)sdm_mc );
+    TecPid_Update( &s_pid, -(float)s_cold_ema );
     pid_out = (int32_t)TecPid_GetOutput( &s_pid );
 
     /*--- 5b. COMMON-MODE feedforward (master switch NV_TEC_FF_ENABLE,
@@ -1058,6 +1089,8 @@ void TecControl_Init( void )
 #endif
     s_dew_hold     = 0u;
     s_cold_fault   = 0u;
+    s_cold_ema       = 0;
+    s_cold_ema_valid = 0u;
     s_fan_hot_ema       = 0;
     s_fan_hot_ema_valid = 0u;
     s_fan_last_duty     = 0xFFu;   /* "no previous duty" so the first ramp applies */
