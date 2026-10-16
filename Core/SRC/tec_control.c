@@ -849,11 +849,9 @@ static void TecControl_Cb( qEvent_t e )
         }
         tec_set_enabled( 1u );   /* demand cleared the deadband: TEC on */
 
-        /* Take ownership of the fan PWM channel. Fan_Init() defaults the
-         * FAN_CH_SW source switch to the SDM845 (the SoC drives the PWM), so
-         * writing TIM3 CH2 duty alone is a no-op until we flip ownership to
-         * the PY32. Without this the TEC loop's fan ramps (full speed on
-         * overtemp, hot-side following) never reach the fan. */
+        /* Enable the fan PWM output. The PY32 owns the fan channel
+         * exclusively (FAN_CH_SW removed), so the TEC loop's hot-side
+         * fan ramp below always reaches the fan. */
         Fan_SetEnabled( 1u );
 #if ( TEC_FAN_FAULT_ENABLE == 1 )
         /* Fresh fan start: arm the spool-up grace and clear the stall timer

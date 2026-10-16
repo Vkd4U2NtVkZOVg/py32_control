@@ -49,8 +49,6 @@ extern "C" {
 
 #define TRES_RST_Pin LL_GPIO_PIN_8
 #define TRES_RST_Port GPIOA
-#define FAN_CH_SW_Pin LL_GPIO_PIN_11
-#define FAN_CH_SW_Port GPIOA
 #define TEC_VEN_Pin LL_GPIO_PIN_12
 #define TEC_VEN_Port GPIOA
 #define TRES_VDD33USB_CTRL_Pin LL_GPIO_PIN_15

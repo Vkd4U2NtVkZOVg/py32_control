@@ -192,12 +192,9 @@ static qSM_Status_t st_ThermalPrecheck_Cb( qSM_Handler_t h )
             Pin_PwrKey( 0u );
             Pin_RstKey( 0u );
             /* The precheck needs the fan at full speed to cool the enclosure
-             * BEFORE the SoC/TEC start, but Fan_Init() hands the PWM channel
-             * to the SDM845 by default - so take ownership here, or the
-             * Fan_SetDutyPercent(100) in the TIMEOUT branch would write a
-             * channel the SoC still owns (a no-op). The TEC loop's own
-             * Fan_SetEnabled(1) on first enable is then a redundant but
-             * harmless backstop. */
+             * BEFORE the SoC/TEC start. The PY32 owns the PWM exclusively,
+             * so enable it before the timeout branch writes the fan duty.
+             * The TEC loop enables it again on first TEC drive as a backstop. */
             Fan_SetEnabled( 1u );
             break;
         case SDM845_TIMEOUT:
@@ -549,14 +546,7 @@ static qSM_Status_t st_StrapFail_Cb( qSM_Handler_t h )
             Pin_RstKey( 0u );             /* release */
             USART2_SetTxSource( USART2_TXSRC_CH343 );  /* end the TX window */
             /* Terminal state: nothing else will ever drive the fan again.
-             * The precheck only commands full speed while it is actively
-             * cooling (precheckCooling != 0), so if it failed-open or the
-             * ambient sensor was invalid, the last command was
-             * Fan_SetDutyPercent(0) and the heatsink would sit with no
-             * airflow until power-off while the enclosure keeps heating.
-             * Claim the channel and hold full airflow for the halt state.
-             * Fan_SetEnabled() is what moves FAN_CH_SW to the PY32 - writing
-             * the duty alone would be a no-op if the SoC still owned it. */
+             * Hold full airflow through the halt state. */
             Fan_SetEnabled( 1u );
             Fan_SetDutyPercent( 100u );
             break;

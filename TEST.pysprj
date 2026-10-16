@@ -406,15 +406,6 @@
         "order": 29,
         "value": "Asynchronous"
       },
-      "PA11;GPIO_Output": {
-        "type": "pins-af",
-        "order": 30
-      },
-      "GPIO.GPIO.body.PA11.user_label.value": {
-        "type": "global-value",
-        "order": 31,
-        "value": "FAN_CH_SW"
-      },
       "PA12;GPIO_Output": {
         "type": "pins-af",
         "order": 32
