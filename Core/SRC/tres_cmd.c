@@ -68,6 +68,18 @@ static uint8_t Policy_Apply(uint8_t cmd, uint8_t param)
         return 1u;
     }
 
+    /* RESET_MCU: reset the whole PY32. Legal in EVERY state (it is the
+     * final stop: the host can always bring the board back from a hard
+     * reset). Runs NVIC_SystemReset() from the parser task; there is no
+     * acknowledgement because the MCU is gone - the host must simply retry
+     * or re-probe after the reset.                                             */
+    if ( cmd == TRES_CMD_RESET_MCU ) {
+        (void)TRES_Seq_GetState();
+        NVIC_SystemReset();
+        return 1u;   /* unreachable: MCU reset before this line */
+    }
+
+
     if ( cmd == TRES_CMD_RESET ) {
         /* reset/reboot allowed only from RUNNING or DFU_ACTIVE              */
         if ( ( st == (uint8_t)TRES_RUNNING ) ||

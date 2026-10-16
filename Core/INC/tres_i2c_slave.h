@@ -39,6 +39,12 @@
  *   0x33 AHTSTAT   R  last AHT20 driver result code (0 OK, negative = error)
  *   0x34 FANDUTY   R  last fan duty commanded by any writer, percent
  *   0x35 TECDUTY   R  last TEC current command to the DAC, percent
+ *   0x36-0x37 FANRPM R  live fan speed, uint16 big-endian (RPM), from
+ *                        Fan_Get_LastRPM() (0 = off / not measured yet).
+ *   0x38-0x3B COLDTEMP R live cold-side temperature, int32 big-endian
+ *                        milli-degC, last TEC control-cycle measure.
+ *   0x3C-0x3F HOTTEMP  R live hot-side temperature, int32 big-endian
+ *                        milli-degC, last TEC control-cycle measure.
  *   0x40..0xCF    RW  NVRAM parameter window: one 4-byte big-endian value per
  *                     slot. Slot n of NvParamTecId_t (nv_params.h) lives at
  *                     0x40 + 4*n. Values are 32-bit big-endian; a slot
@@ -86,6 +92,17 @@ extern "C" {
 #define TRES_REG_AHTSTAT    0x33u   /**< last AHT20 driver status (int8)      */
 #define TRES_REG_FANDUTY    0x34u   /**< last commanded fan duty, percent     */
 #define TRES_REG_TECDUTY    0x35u   /**< TEC current cmd to DAC, percent      */
+#define TRES_REG_FANRPM    0x36u   /**< live fan speed, uint16 BE (RPM)      */
+#define TRES_REG_COLDTEMP  0x38u   /**< cold-side temperature, int32 m°C BE  */
+#define TRES_REG_HOTTEMP   0x3Cu   /**< hot-side temperature, int32 m°C BE   */
+
+/* Live sensor/temperature block (0x36..0x3F, read-only):
+ *   0x36-0x37 FANRPM   u16 BE   fan speed from Fan_Get_LastRPM()
+ *   0x38-0x3B COLDTEMP s32 BE   cold-side temperature (milli-degC)
+ *   0x3C-0x3F HOTTEMP  s32 BE   hot-side temperature (milli-degC)
+ * Automatically derived from live firmware state each read; nothing to
+ * write. DUTY returns the last commanded duty; temperature windows return
+ * the most recent TEC control cycle measurement (0 before first cycle). */
 
 /* NVRAM parameter window: slot n (NvParamTecId_t) at 0x40 + 4*n, 4 bytes
  * big-endian. Reading any byte of a slot returns that byte; a slot commits

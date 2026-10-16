@@ -1037,3 +1037,13 @@ uint8_t TecControl_GetDacPercent( void )
 {
     return s_dac_percent;
 }
+
+int32_t TecControl_GetHotMilliCelsius( void )
+{
+    return hot_mc;
+}
+
+int32_t TecControl_GetColdMilliCelsius( void )
+{
+    return sdm_mc;
+}

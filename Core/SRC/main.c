@@ -137,6 +137,9 @@ int main(void)
   USART2_DMA_Start();       /* USART2 (PA0/PA1) DMA RX via DMA1_Channel1 */
   Studio_TIM3_Init();
   Fan_Init();
+  Fan_SetEnabled(1);
+  Fan_SetDutyPercent(100);  /* full speed until the TEC control task takes over */
+  LL_mDelay(1000);
   Studio_USART1_Init();
   /* USER CODE BEGIN 2 */
   /* Enable the 1 kHz SysTick tick + critical sections (QPort_Setup); the

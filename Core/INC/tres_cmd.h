@@ -41,8 +41,9 @@ typedef enum {
     TRES_CMD_ENTER_DFU   = 2u,  /**< reset pulse, boot DFU (BOOT0=1, USB on) */
     TRES_CMD_REPORT_FAIL = 3u,  /**< count-only failure report (no reaction) */
     TRES_CMD_SAVE_PARAMS = 4u,  /**< persist the NVRAM RAM cache to FLASH    */
-    TRES_CMD_RELOAD_PARAMS = 6u, /**< reload CRC-validated FLASH into RAM */
-    TRES_CMD_DEFAULT_PARAMS = 5u /**< reload NVRAM firmware defaults (RAM)    */
+    TRES_CMD_DEFAULT_PARAMS = 5u, /**< reload NVRAM firmware defaults (RAM)    */
+    TRES_CMD_RELOAD_PARAMS = 6u, /**< reload CRC-validated FLASH into RAM    */
+    TRES_CMD_RESET_MCU  = 7u,  /**< reset the PY32 itself (NVIC_SystemReset) */
 } TRES_CmdId_t;
 
 #define TRES_CMD_MAGIC          0xA5u   /**< first byte of a command write  */
@@ -55,7 +56,7 @@ typedef enum {
 #define TRES_ERR_FLASH          3u
 #define TRES_ERR_BUSY           4u
 
-#define TRES_IF_VERSION         0x03u   /**< register-file interface version */
+#define TRES_IF_VERSION         0x04u   /**< register-file interface version */
 
 /* Exported functions --------------------------------------------------------*/
 void TRES_Cmd_Init(void);                 /**< create the parser task         */

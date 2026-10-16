@@ -43,10 +43,16 @@ class Device(probe.Tres):
 
     def read_reg(self, reg, n=1):
         values = {0x10: 2 | (0x20 if self.busy else 0) | (0x80 if self.error else 0),
-                  0x11: self.retries, 0x13: self.error, 0x14: 3, 0x15: self.done}
+                  0x11: self.retries, 0x13: self.error, 0x14: 4, 0x15: self.done}
         for i, val in enumerate(self.ram):
             for j, byte in enumerate(val.to_bytes(4, 'big')):
                 values[0x40 + i * 4 + j] = byte
+        values[0x36] = (3000 >> 8) & 0xFF
+        values[0x37] = 3000 & 0xFF
+        for off, b in enumerate((30000).to_bytes(4, "big", signed=True)):
+            values[0x38 + off] = b
+        for off, b in enumerate((50000).to_bytes(4, "big", signed=True)):
+            values[0x3C + off] = b
         return [values.get(reg + i, 0) for i in range(n)]
 
 

@@ -20,6 +20,7 @@
 #include "tec_control.h"
 #include "aht20_task.h"
 #include "fan.h"
+#include "fan_task.h"
 #include "nv_params.h"
 #if ( TRES_AES_ENABLE == 1 )
 #include "aes.h"
@@ -94,6 +95,35 @@ static uint8_t Reg_Read(uint8_t addr)
         case TRES_REG_TECDUTY:   return TecControl_GetDacPercent();
         default: break;
     }
+
+    /* Live sensor block (0x36..0x3F): fan speed (u16), cold/hot temperature
+     * (i32, milli-degC), big-endian each. Composed live so a burst read of
+     * 0x36..0x3F yields a consistent snapshot of the last TEC cycle. */
+    if ( ( addr >= TRES_REG_FANRPM ) && ( addr <= TRES_REG_HOTTEMP + 3u ) ) {
+        uint32_t off = (uint32_t)( addr - TRES_REG_FANRPM );   /* 0..9 */
+
+        if ( off < 2u ) {
+            /* 0x36-0x37: FANRPM, uint16 BE, cap at 0xFFFF. */
+            uint32_t rpm = Fan_Get_LastRPM();
+            if ( rpm > 0xFFFFu ) { rpm = 0xFFFFu; }
+            return (uint8_t)( rpm >> ( 8u * ( 1u - off ) ) );
+        }
+
+        if ( off < 6u ) {
+            /* 0x38-0x3B: COLDTEMP, int32 BE milli-degC. */
+            uint32_t v = (uint32_t)TecControl_GetColdMilliCelsius();
+            uint32_t rel = off - 2u;
+            return (uint8_t)( v >> ( 24u - 8u * rel ) );
+        }
+
+        /* 0x3C-0x3F: HOTTEMP, int32 BE milli-degC. */
+        {
+            uint32_t v = (uint32_t)TecControl_GetHotMilliCelsius();
+            uint32_t rel = off - 6u;
+            return (uint8_t)( v >> ( 24u - 8u * rel ) );
+        }
+    }
+
 
     switch ( addr ) {
         case TRES_REG_STATUS:  return TRES_Cmd_StatusByte();

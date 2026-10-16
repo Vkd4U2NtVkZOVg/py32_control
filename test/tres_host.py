@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Linux host CLI for TRES protocol v3. Default operation is read-only status."""
+"""Linux host CLI for TRES protocol v4. Default operation is read-only status."""
 import argparse
 import json
 from pathlib import Path
@@ -8,13 +8,20 @@ import sys
 import time
 
 from tres_i2c_probe import (Tres, NV_PARAMS, NV_SIGNED_SLOTS, nv_raw_to_signed,
-                            nv_slot_index, nv_value_to_raw, fmt_status)
+                            nv_slot_index, nv_value_to_raw, fmt_status, fmt_pins,
+                            TEC_FLAG_NAMES, TRES_ERR_NAMES, SDM845_STATE_NAMES)
 
+
+
+def fmt_tec_alarms(alarms):
+    if alarms == 0:
+        return "NONE"
+    return "|".join(n for m, n in TEC_FLAG_NAMES if alarms & m)
 
 def check_version(device):
     version = device.read_reg(0x14)[0]
-    if version != 3:
-        raise RuntimeError('requires firmware interface 0x03; got 0x%02x' % version)
+    if version != 4:
+        raise RuntimeError('requires firmware interface 0x04; got 0x%02x' % version)
 
 
 def read_params(device):
@@ -54,7 +61,7 @@ def publish_temperature(device, source, interval, once=False):
 
 def load_backup(path):
     data = json.loads(Path(path).read_text(encoding='utf-8'))
-    if not isinstance(data, dict) or data.get('format') != 'tres-params-v1' or data.get('interface') != 3:
+    if not isinstance(data, dict) or data.get('format') != 'tres-params-v1' or data.get('interface') != 4:
         raise ValueError('unsupported backup format/interface')
     values = data.get('raw')
     if not isinstance(values, list) or len(values) != len(NV_PARAMS):
@@ -85,6 +92,7 @@ def parser():
     sub.add_parser('defaults', help='replace RAM table with firmware defaults (no save)')
     sub.add_parser('reset', help='request policy-gated TRES reset')
     sub.add_parser('dfu', help='request policy-gated TRES DFU')
+    sub.add_parser('reset-mcu', help='hard-reset the PY32 itself (no acknowledgement)')
     temp = sub.add_parser('temp', help='write a single temperature sample')
     temp.add_argument('millic', type=int)
     publisher = sub.add_parser('publish-temp', help='publish a real Linux thermal sensor')
@@ -113,11 +121,16 @@ def main(argv=None):
         if args.action in (None, 'status'):
             status, retries, pins, error, version, completed, gaps = device.read_reg(0x10, 7)
             boot, boot_retries, alarms, aht, fan, tec = device.read_reg(0x30, 6)
+            fanrpm_hi, fanrpm_lo, c0, c1, c2, c3, h0, h1, h2, h3 = device.read_reg(0x36, 10)
+            fan_rpm = (fanrpm_hi << 8) | fanrpm_lo
+            cold_mc = struct.unpack(">i", bytes([c0, c1, c2, c3]))[0]
+            hot_mc = struct.unpack(">i", bytes([h0, h1, h2, h3]))[0]
             print(json.dumps(dict(state=fmt_status(status), status=status, retries=retries,
-                pins=pins, error=error, interface=version, completed=completed, uart_gaps=gaps,
-                boot_state=boot, boot_retries=boot_retries, tec_alarms=alarms,
+                pins=pins, pins_names=fmt_pins(pins), error=TRES_ERR_NAMES.get(error,"?"), error_raw=error,
+                boot_state_name=SDM845_STATE_NAMES.get(boot,"?"), boot_state=boot, boot_retries=boot_retries,
                 aht_status=aht if aht < 128 else aht - 256, fan_percent=fan,
-                tec_percent=tec), indent=2))
+                tec_alarms=fmt_tec_alarms(alarms), tec_alarms_raw=alarms,
+                tec_percent=tec, fan_rpm=fan_rpm, cold_mC=cold_mc, hot_mC=hot_mc), indent=2))
         elif args.action == 'params':
             for i, raw in enumerate(read_params(device)):
                 name, unit, scale = NV_PARAMS[i]
@@ -126,7 +139,7 @@ def main(argv=None):
                 value = nv_raw_to_signed(raw) if name in NV_SIGNED_SLOTS else raw
                 print('%2d %-20s raw=%10d value=%s %s' % (i, name, raw, value * scale, unit))
         elif args.action == 'backup':
-            data = dict(format='tres-params-v1', interface=3, raw=read_params(device))
+            data = dict(format='tres-params-v1', interface=4, raw=read_params(device))
             # Do not silently replace an earlier calibration backup.
             with Path(args.file).open('x', encoding='utf-8') as f:
                 json.dump(data, f, indent=2)
@@ -151,7 +164,7 @@ def main(argv=None):
             save_verified(device)
             print('whole parameter table saved and reloaded from FLASH')
         elif args.action in ('reload', 'defaults', 'reset', 'dfu'):
-            device.write_cmd(0xa5, dict(reload=6, defaults=5, reset=1, dfu=2)[args.action])
+            device.write_cmd(0xa5, dict(reload=6, defaults=5, reset=1, dfu=2, reset_mcu=7)[args.action.replace("-", "_")])
             print('command executed: ' + args.action)
         elif args.action == 'temp':
             write_temperature(device, args.millic)

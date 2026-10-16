@@ -119,6 +119,18 @@ void TecControl_ClearAlarm(void);
  */
 uint8_t TecControl_GetDacPercent(void);
 
+/**
+ * @brief Last hot-side (heatsink) temperature measured by the TEC task.
+ * @return Temperature in milli-degC; 0 before the first control cycle.
+ */
+int32_t TecControl_GetHotMilliCelsius(void);
+
+/**
+ * @brief Last cold-side (controlled device) temperature measured by the TEC task.
+ * @return Temperature in milli-degC; 0 before the first control cycle.
+ */
+int32_t TecControl_GetColdMilliCelsius(void);
+
 #ifdef __cplusplus
 }
 #endif

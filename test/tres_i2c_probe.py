@@ -24,15 +24,17 @@ Registers:
   0x11 RETRIES  CMD_REPORT_FAIL counter
   0x12 PINS     control-pin snapshot
   0x13 LASTERR  0 none / 1 illegal / 2 bad magic / 3 FLASH / 4 BUSY
-  0x14 VERSION  0x03
+  0x14 VERSION  0x04
   0x15 COMPLETED  executed commands modulo 256
   0x16 RX_OVERRUN detected UART gaps modulo 256
   0x30-0x35 machine-state block: BOOTSTATE / BOOTRETRY / TECFLAGS /
-                                 AHTSTAT / FANDUTY / TECDUTY
+                                    AHTSTAT / FANDUTY / TECDUTY
+  0x36-0x3F live sensors: FANRPM(u16BE) / COLDTEMP(s32BE) / HOTTEMP(s32BE)
   0x40-0xCF NVRAM parameter window: 36 slots x 4-byte big-endian values
 
 Commands (0x00 <- [0xA5][cmdId][param]):
-  1 RESET, 2 ENTER_DFU, 3 REPORT_FAIL, 4 SAVE_PARAMS, 5 DEFAULT_PARAMS, 6 RELOAD_PARAMS
+  1 RESET, 2 ENTER_DFU, 3 REPORT_FAIL, 4 SAVE_PARAMS, 5 DEFAULT_PARAMS, 6 RELOAD_PARAMS,
+  7 RESET_MCU
 
 States (STATUS bit[3:0], TRES_State_t):
   0 PWR_UP, 1 BOOT_WAIT_NORMAL, 2 RUNNING, 3 PULSE_RESET_NORMAL,
@@ -60,6 +62,9 @@ TRES_REG_TECFLAGS = 0x32
 TRES_REG_AHTSTAT = 0x33
 TRES_REG_FANDUTY = 0x34
 TRES_REG_TECDUTY = 0x35
+TRES_REG_FANRPM = 0x36
+TRES_REG_COLDTEMP = 0x38
+TRES_REG_HOTTEMP = 0x3C
 
 TRES_CMD_MAGIC = 0xA5
 TRES_CMD_RESET = 1
@@ -67,6 +72,8 @@ TRES_CMD_ENTER_DFU = 2
 TRES_CMD_REPORT_FAIL = 3
 TRES_CMD_SAVE_PARAMS = 4
 TRES_CMD_DEFAULT_PARAMS = 5
+TRES_CMD_RELOAD_PARAMS = 6
+TRES_CMD_RESET_MCU = 7
 
 # NVRAM parameter window: slot index -> (name, unit, scale-for-display)
 TRES_REG_NV_BASE = 0x40
@@ -376,7 +383,7 @@ Exit status:
 
 Prerequisites:
   smbus2 (pip3 install smbus2) and /dev/i2c-<bus> readable by the user.
-  The slave must be powered and the VERSION register must read 0x03.
+  The slave must be powered and the VERSION register must read 0x04.
 """
     ap = argparse.ArgumentParser(
         description=description,
@@ -389,6 +396,8 @@ Prerequisites:
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--reset", action="store_true",
                       help="issue CMD_RESET (pulses SDM845 reset; policy-gated)")
+    mode.add_argument("--reset-mcu", action="store_true",
+                      help="issue CMD_RESET_MCU: hard-reset the PY32 itself")
     mode.add_argument("--dfu", action="store_true",
                       help="issue CMD_ENTER_DFU (boots DFU/USB; policy-gated)")
     mode.add_argument("--params", action="store_true",
@@ -437,7 +446,7 @@ Prerequisites:
     print("    GPIO: PINS=0x{:02X} [{}]".format(pins, fmt_pins(pins)))
     print("    RETRIES={}  LASTERR={}  VERSION=0x{:02X}".format(
         retries, TRES_ERR_NAMES.get(lasterr, "?"), version))
-    if version != 0x03:
+    if version != 0x04:
         sys.exit("    VERSION mismatch - slave not responding as expected")
 
     print("    UART receive gaps: {}".format(t.read_reg(0x16)[0]))
@@ -451,6 +460,15 @@ Prerequisites:
                      if tecflags & mask) or "NONE"
     print("    TEC alarms: {}(0x{:02X})  AHT20 status: {}".format(
         flags, tecflags, ahtstat))
+
+    print("[2b] live sensors: read 0x36..0x3F (auto-increment)")
+    fanrpm_hi, fanrpm_lo, c0, c1, c2, c3, h0, h1, h2, h3 = \
+        t.read_reg(TRES_REG_FANRPM, 10)
+    fanrpm = (fanrpm_hi << 8) | fanrpm_lo
+    cold = struct.unpack("i", bytes([c0, c1, c2, c3]))[0]
+    hot = struct.unpack("i", bytes([h0, h1, h2, h3]))[0]
+    print("    FANRPM={} RPM  COLD={:+.1f} C  HOT={:+.1f} C".format(
+        fanrpm, cold / 1000.0, hot / 1000.0))
 
     if args.commands:
         print("[3] command path: CMD_REPORT_FAIL x2, RETRIES must go up by 2")
@@ -609,6 +627,20 @@ Prerequisites:
                      "challenge) - wrong key, or firmware without "
                      "TRES_AES_ENABLE")
         print("    OK: device authenticated (AES-128-ECB matches)")
+    elif args.reset_mcu:
+        print("[5] issue CMD_RESET_MCU: the PY32 hard-resets itself.")
+        print("There is no acknowledgement - re-probe after a short delay.")
+        t.write_cmd(TRES_CMD_MAGIC, TRES_CMD_RESET_MCU)
+        time.sleep(1.0)
+        try:
+            version = t.read_reg(TRES_REG_VERSION)[0]
+            print("    after reset: VERSION=0x{:02X}".format(version))
+            if version != 0x04:
+                sys.exit("    FAIL: VERSION mismatch after reset")
+            print("    OK: MCU has reset and is responding again")
+        except Exception as e:
+            sys.exit("    FAIL: MCU not reachable after reset: {}".format(e))
+
     elif args.reset or args.dfu:
         cmd = TRES_CMD_RESET if args.reset else TRES_CMD_ENTER_DFU
         state = status & 0x0F
