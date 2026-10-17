@@ -6,7 +6,7 @@
  *
  *     [*] --> THERMAL_PRECHECK --ambient ok--> POWER_ON_WAIT --t_pwup(100ms)--> PWR_PRESS
  *     PWR_PRESS --t_hold(3s)--> BOOT_CHECK
- *     BOOT_CHECK --stage1 "Loader Build Info"--> STAGE2_WAIT
+ *     BOOT_CHECK --stage1 "Boot Config @"--> STAGE2_WAIT
  *     BOOT_CHECK --15s 无响应 & retry<MAX--> BOOT_RESET
  *     BOOT_CHECK --15s 无响应 & retry>=MAX--> STRAP_FAIL (terminal)
  *     STAGE2_WAIT --stage2 "login" + idle--> STAGE3_WAIT
@@ -35,7 +35,7 @@
  * CH343 (USART2_SetTxSource(CH343)) — the PY32-TX window is exactly stage3..5.
  *
  * GPIO: PWRKEY = MIX3_BOOTKEY (PB7), RST_KEY = MIX3_RST (PB8), low = pressed.
- * Stage 1 ("Loader Build Info") proves the bootloader is alive; stage 2
+ * Stage 1 ("Boot Config @") proves the bootloader is alive; stage 2
  * ("login") proves Linux user space came up; stages 3-5 prove the PY32 can
  * actually drive the SoC shell. A loader without a login points at a
  * kernel/init hang -> targeted retry.

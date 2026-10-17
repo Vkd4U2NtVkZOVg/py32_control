@@ -23,7 +23,7 @@
  * (USART2_SetTxSource(USART2_TXSRC_CH343)).
  *
  * GPIO mapping (gpio.h): PWRKEY = MIX3_BOOTKEY (PB7), RST_KEY = MIX3_RST (PB8).
- * Boot success is decided by sdm845_detect (banner "Loader Build Info" matched
+ * Boot success is decided by sdm845_detect (banner "Boot Config @" matched
  * AND line idle for the required window).
  */
 #ifndef __SDM845_BOOT_H__
@@ -40,7 +40,7 @@ typedef enum {
     SDM845_THERMAL_PRECHECK = 0,  /**< first: AHT20 temp check, fan cooldown if hot */
     SDM845_POWER_ON_WAIT = 1,
     SDM845_PWR_PRESS = 2,
-    SDM845_BOOT_CHECK = 3,      /**< stage 1: wait for "Loader Build Info"         */
+    SDM845_BOOT_CHECK = 3,      /**< stage 1: wait for "Boot Config @"         */
     SDM845_STAGE2_WAIT = 4,     /**< stage 2: wait for "login" (Linux user space)  */
     SDM845_STAGE3_WAIT = 5,     /**< stage 3: send account, wait "Password:" prompt */
     SDM845_STAGE4_WAIT = 6,     /**< stage 4: send password, wait "Welcome to AGNOS" */

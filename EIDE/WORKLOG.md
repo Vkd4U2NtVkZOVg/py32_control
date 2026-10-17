@@ -5,7 +5,7 @@
 
 ### 现象
 
-上一轮修复烧录后：每次尝试都完整走 0(TP)→1(PON)→2(PP)→3(BC)，但 **BC 15s 等不到 `Loader Build Info`**，两轮强杀后 11(STRAP_FAIL)。重试路径不再秒过（上轮 ResetAll 生效），但换成了"第一关就过不去"。
+上一轮修复烧录后：每次尝试都完整走 0(TP)→1(PON)→2(PP)→3(BC)，但 **BC 15s 等不到 `Boot Config @`**，两轮强杀后 11(STRAP_FAIL)。重试路径不再秒过（上轮 ResetAll 生效），但换成了"第一关就过不去"。
 
 ### 根因：SoC 供电轨常开，banner 在 PP entry 之前就到
 

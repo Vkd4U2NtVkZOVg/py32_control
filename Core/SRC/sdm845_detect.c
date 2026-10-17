@@ -3,7 +3,7 @@
  * @brief Five-stage SDM845 boot detection from the Linux shell over USART2 DMA.
  *
  * Five independent streaming KMP matchers run side by side over the same byte
- * stream (stage 1 "Loader Build Info", stage 2 "login", stage 3 "comma",
+ * stream (stage 1 "Boot Config @", stage 2 "login", stage 3 "comma",
  * stage 4 "Welcome to AGNOS", stage 5 "Front Left: Playback"). Each matcher
  * keeps its own fail table and automaton state, so matching survives across
  * poll calls and no target can shadow another. Boot latches only when stage 2
@@ -25,7 +25,7 @@ typedef struct {
     uint8_t     seen;                       /* latched: matched at least once  */
 } Sdm845_Matcher_t;
 
-static Sdm845_Matcher_t s_stage1;           /* "Loader Build Info"             */
+static Sdm845_Matcher_t s_stage1;           /* "Boot Config @"             */
 static Sdm845_Matcher_t s_stage2;           /* "login"                         */
 static Sdm845_Matcher_t s_stage3;           /* "Password:" (account accepted)  */
 static Sdm845_Matcher_t s_stage4;           /* "Welcome to AGNOS"              */

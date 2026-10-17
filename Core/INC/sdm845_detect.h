@@ -5,7 +5,7 @@
  * This layer reads the USART2 DMA ring buffer (usart2_dma.c) and tracks the
  * SoC boot progress through FIVE independent streaming KMP matchers:
  *
- *   stage 1: "Loader Build Info"    - the bootloader banner (SoC is alive)
+ *   stage 1: "Boot Config @"    - the bootloader banner (SoC is alive)
  *   stage 2: "login"                - a getty prompt (Linux user space is up)
  *   stage 3: "Password:"            - account accepted, password read armed
  *   stage 4: "Welcome to AGNOS"     - post-login banner (authentication passed)
@@ -36,7 +36,7 @@ extern "C" {
 #endif
 
 /** Stage 1 target: bootloader banner (SoC bootloader is alive). */
-#define SDM845_BOOT_BANNER      "Loader Build Info"
+#define SDM845_BOOT_BANNER      "Boot Config @"
 
 /** Stage 2 target: getty login prompt (Linux user space is up). */
 #define SDM845_LOGIN_BANNER     "login"
@@ -85,7 +85,7 @@ enum {
 void Sdm845_Detect_Init(void);
 
 /**
- * @brief Stage 1 latch: "Loader Build Info" has been seen in the RX stream.
+ * @brief Stage 1 latch: "Boot Config @" has been seen in the RX stream.
  */
 uint8_t Sdm845_Detect_IsStage1Seen(void);
 
