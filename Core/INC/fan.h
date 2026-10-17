@@ -19,6 +19,13 @@
  * period, so the >= 1 s "writer gap" fast path of the soft ramp never
  * applies to them and the protection demand would crawl up at 30 %/s
  * (30 -> 100 % takes ~2.5 s) exactly when full airflow is the point.
+ *
+ * Fan power rail: the high-speed fan's driver IC requires >50 % PWM on its
+ * first application, otherwise it stays latched-off with no response.
+ * Fan_Init() therefore powers the rail (FAN_PWR_EN, active-high) AND writes
+ * 100 % duty, then blocks for FAN_STARTUP_KICK_MS so the fan spins up and
+ * the driver unlatches BEFORE the TEC task first commands a (possibly low)
+ * duty. QuarkTS has not started yet, so the blocking delay is safe here.
  */
 #ifndef __FAN_H__
 #define __FAN_H__
@@ -48,8 +55,21 @@ extern "C" {
 #ifndef FAN_RAMP_MAX_PCT_PER_S
 #define FAN_RAMP_MAX_PCT_PER_S    (30u)
 #endif
+/* Startup kick: how long Fan_Init() holds the fan at 100 % duty after
+ * powering the rail, to unlatch the high-speed fan driver. Tune on the bench:
+ * too short = the driver stays latched off (no response); longer than needed
+ * just means a louder spin-up. */
+#ifndef FAN_STARTUP_KICK_MS
+#define FAN_STARTUP_KICK_MS       (1000u)
+#endif
+/* Fan power-enable polarity. The current board drives a high-side switch:
+ * FAN_PWR_EN high = rail on. On an inverting board set this to 0. */
+#ifndef FAN_PWR_ACTIVE_HIGH
+#define FAN_PWR_ACTIVE_HIGH       (1u)
+#endif
 
 void Fan_Init(void);
+void fan_pwr_enable(uint8_t on);
 void Fan_SetEnabled(uint8_t enabled);
 void Fan_SetDutyPercent(uint8_t duty_percent);
 void Fan_SetDutyPercentImmediate(uint8_t duty_percent);

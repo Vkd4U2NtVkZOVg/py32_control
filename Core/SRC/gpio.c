@@ -120,6 +120,16 @@ void Studio_GPIO_Init(void)
   GPIO_InitStruct.Pull = LL_GPIO_PULL_DOWN;
   LL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
+  /* Fan power rail enable (FAN_PWR_EN, PA11): push-pull output, default OFF
+   * so the fan is unpowered until Fan_Init() runs its startup kick. */
+  LL_GPIO_ResetOutputPin( GPIOA, FAN_PWR_EN_Pin );
+  GPIO_InitStruct.Pin = FAN_PWR_EN_Pin;
+  GPIO_InitStruct.Mode = LL_GPIO_MODE_OUTPUT;
+  GPIO_InitStruct.Pull = LL_GPIO_PULL_DOWN;
+  GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_LOW;
+  GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
+  LL_GPIO_Init( GPIOA, &GPIO_InitStruct );
+  
   LL_GPIO_ResetOutputPin(GPIOB, TRES_BOOT0_Pin|TRES_PWR_EN_Pin);
   GPIO_InitStruct.Pin = TRES_BOOT0_Pin|TRES_PWR_EN_Pin;
   GPIO_InitStruct.Mode = LL_GPIO_MODE_OUTPUT;
@@ -179,3 +189,4 @@ void Board_FatalShutdown(void)
     pin.Speed = LL_GPIO_SPEED_FREQ_LOW;
     LL_GPIO_Init(TEC_VEN_Port, &pin);
 }
+

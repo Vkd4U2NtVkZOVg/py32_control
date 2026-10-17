@@ -14,6 +14,10 @@
 
 #define FAN_PWM_PERIOD_TICKS ((FAN_TIMER_CLOCK_HZ / FAN_PWM_FREQUENCY_HZ) - 1UL)
 
+/* Local prototype: Fan_Init() (below) calls fan_pwr_enable() before its
+ * definition, and the host test harness compiles this file without fan.h. */
+void fan_pwr_enable( uint8_t on );
+
 static volatile uint32_t s_tach_pulses;
 static uint8_t s_duty_percent;
 static uint8_t s_enabled;
@@ -32,8 +36,43 @@ void Fan_Init(void)
     LL_TIM_OC_SetCompareCH2(TIM3, 0U);
     LL_TIM_CC_EnableChannel(TIM3, LL_TIM_CHANNEL_CH2);
     LL_TIM_EnableCounter(TIM3);
+
+    /* Startup kick for the high-speed fan. Its driver IC latches off unless
+     * it sees >50 % PWM on first application: power the rail first, then
+     * present 100 % duty, then block long enough for the fan to spin up and
+     * the driver to unlatch. LL_mDelay() is safe here because Studio_RCC_Init
+     * already started the 1 ms SysTick (LL_Init1msTick) and QuarkTS has not
+     * been started yet, so there is no task to starve. The TEC task later
+     * commands its real (possibly low) duty from the 100 % the pin is on now;
+     * the existing soft ramp/1 s-gap fast path turns that into a clean glide
+     * down instead of another low-duty start attempt. */
+    fan_pwr_enable( 1u );                          /* rail on */
+    LL_TIM_OC_SetCompareCH2( TIM3, FAN_PWM_PERIOD_TICKS );   /* 100 % duty */
+    LL_mDelay( FAN_STARTUP_KICK_MS );              /* spin up + unlatch */
+
+    /* The pin is physically at 100 % now; anchor the slewed state and the
+     * "enabled" flag so the next Fan_SetDutyPercent() continues from here. */
+    s_enabled     = 1U;
+    s_duty_percent = 100U;
+    s_ramp_duty    = 100U;
 }
 
+void fan_pwr_enable(uint8_t on)
+{
+#if ( FAN_PWR_ACTIVE_HIGH != 0u )
+    if ( on != 0u ) {
+        LL_GPIO_SetOutputPin( FAN_PWR_EN_Port, FAN_PWR_EN_Pin );
+    } else {
+        LL_GPIO_ResetOutputPin( FAN_PWR_EN_Port, FAN_PWR_EN_Pin );
+    }
+#else
+    if ( on != 0u ) {
+        LL_GPIO_ResetOutputPin( FAN_PWR_EN_Port, FAN_PWR_EN_Pin );
+    } else {
+        LL_GPIO_SetOutputPin( FAN_PWR_EN_Port, FAN_PWR_EN_Pin );
+    }
+#endif
+}
 void Fan_SetEnabled(uint8_t enabled)
 {
     s_enabled = (enabled != 0U) ? 1U : 0U;
