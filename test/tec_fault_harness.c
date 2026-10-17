@@ -254,6 +254,45 @@ int main(int argc, char **argv)
     for (int i = 0; i < 40; ++i) TecControl_Cb(NULL);
     assert(pid_measure > -45020.0f && pid_measure <= -45000.0f);
 
+    /* TARGET_BASE == 0 is a MODE SELECTOR ("track the dew point"): the target
+     * IS the dew-point floor (dew + margin), with no environment/SoC
+     * compensation on top, and TARGET_OFFSET still applies afterwards so a
+     * non-zero offset crosses the floor. */
+    reset_fixture(); cold = 60000; dew = 50000;      /* floor = 52000 */
+    s_p.target_base_millic = 0;
+    s_p.target_offset_millic = 0;
+    s_p.env_comp_temp_millic = 20000;                /* would add 20 C if used */
+    TecControl_Cb(NULL);
+    assert(target_mc == 52000);                      /* exactly the floor */
+    s_p.target_offset_millic = 5000;
+    TecControl_Cb(NULL);
+    assert(target_mc == 47000);                      /* offset crosses the floor */
+
+    /* Tracking mode with an unusable humidity sample must NOT collapse the
+     * setpoint: it holds the last valid floor (rare: a dead AHT20 must not
+     * become a full-cooling command). */
+    dew = INT32_MIN;                                 /* "no sample" sentinel */
+    for (int i = 0; i < 3; ++i) TecControl_Cb(NULL);
+    assert(target_mc == 52000 - 5000);
+    assert(s_alarm & TEC_ALARM_SENSOR);
+
+    /* And before the very first valid sample the seed is "no cooling", so a
+     * board that boots with no humidity reading stays off. */
+    reset_fixture();
+    params[NV_TEC_TARGET_BASE_MILLIC] = 0;
+    TecControl_Init();                               /* reloads params, seeds */
+    dew = INT32_MIN;                                 /* still no valid sample */
+    TecControl_Cb(NULL);
+    assert(target_mc == TEC_TEMP_ENVELOPE_MAX_MILLIC);
+
+    /* Non-zero base keeps the legacy path (compensations included). */
+    reset_fixture(); cold = 60000; dew = 50000;
+    s_p.target_base_millic = 60000;
+    s_p.target_offset_millic = 0;
+    s_p.env_comp_temp_millic = 20000;                /* env 25000 -> +2.5 C */
+    TecControl_Cb(NULL);
+    assert(target_mc == 62500);                      /* base + (env-knee)/2 */
+
     /* Fixed target offset (TARGET_OFFSET): an UNSIGNED 0..20000 magnitude that
      * the firmware SUBTRACTS - it buys a bounded excursion below the dew-point
      * floor rather than raising the target. Floor here is dew(50000) +

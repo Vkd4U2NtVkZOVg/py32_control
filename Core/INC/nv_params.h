@@ -85,7 +85,19 @@ typedef enum {
     NV_TEC_PID_KD_Q16,                 /**< PID D gain (Q16): %out per m°C per
                                             SECOND (scaled by loop period_s
                                             inside TecPid_Init)                  */
-    NV_TEC_TARGET_BASE_MILLIC,         /**< base TEC target, milli-degC         */
+    NV_TEC_TARGET_BASE_MILLIC,         /**< base TEC target, milli-degC.
+                                            0 is a MODE SELECTOR, not a
+                                            temperature: it selects "track the
+                                            dew point", where the target IS the
+                                            dew-point floor (dew + margin) and
+                                            the environment/SoC compensations
+                                            are not applied. Any other value is
+                                            the normal fixed target (with those
+                                            compensations). In both modes
+                                            TARGET_OFFSET is subtracted after
+                                            the floor, so a non-zero offset
+                                            takes the target below the dew
+                                            floor by design.                      */
     NV_TEC_HOT_OVERTEMP_MILLIC,        /**< hot > this: fan full speed (m°C)    */
     NV_TEC_HOT_DANGER_MILLIC,          /**< hot > this: TEC off + fan 100 (m°C) */
     NV_TEC_CURRENT_FEEDFORWARD_MA,     /**< DEPRECATED/RESERVED: the current-

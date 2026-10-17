@@ -374,6 +374,7 @@ static uint8_t     s_fan_stalled;   /* interlock: only healthy RPM clears it */
 static uint8_t     s_fan_started;   /* do not renew grace on each TEC enable */
 #endif /* TEC_FAN_FAULT_ENABLE */
 static uint8_t     s_dew_hold; /* latched low-output mode, 1 C release band */
+static int32_t     s_dew_target_mc;  /* last valid dew floor (tracking mode) */
 static uint8_t     s_cold_fault;    /* reset PID from real feedback on recovery */
 static uint8_t     s_hot_fault;     /* reseed the fan EMA on hot-sensor recovery */
 static int32_t     s_cold_ema;          /* EMA-smoothed cold side for the PID       */
@@ -762,12 +763,27 @@ static void TecControl_Cb( qEvent_t e )
     }
 
     /*--- 2. target temperature --------------------------------------------*/
-    target_mc = s_p.target_base_millic;
-    if ( env_mc > s_p.env_comp_temp_millic ) {
-        target_mc += ( env_mc - s_p.env_comp_temp_millic ) / 2;  /* +0.5°C per °C above knee */
-    }
-    if ( sdm_mc > s_p.soc_tighten_temp_millic ) {
-        target_mc -= s_p.soc_tighten_delta_millic;
+    /* Two modes, selected by the NVRAM base target:
+     *   TARGET_BASE != 0 : that value, with the environment and SoC
+     *                      compensations on top (the legacy behaviour).
+     *   TARGET_BASE == 0 : "track the dew point" - the target IS the dew-point
+     *                      FLOOR (dew + margin), with no compensations on top,
+     *                      i.e. cool as far as condensation allows. The floor
+     *                      is only known in section 4 (it needs the AHT20
+     *                      sample), so target_mc is assigned there; this
+     *                      branch deliberately leaves it untouched.
+     * The fixed NTC-to-CPU offset (4b) applies to BOTH modes. Because it is
+     * subtracted after the floor, a non-zero offset also takes the final
+     * target below the dew-point floor - i.e. configuring an offset is what
+     * crosses the dew-point protection, by design. */
+    if ( s_p.target_base_millic != 0 ) {
+        target_mc = s_p.target_base_millic;
+        if ( env_mc > s_p.env_comp_temp_millic ) {
+            target_mc += ( env_mc - s_p.env_comp_temp_millic ) / 2;  /* +0.5°C per °C above knee */
+        }
+        if ( sdm_mc > s_p.soc_tighten_temp_millic ) {
+            target_mc -= s_p.soc_tighten_delta_millic;
+        }
     }
     /*--- 2b. hot-side foldback: compute the cold-target lift ---------------*/
     /* A TEC pumps waste heat into its hot side, so the way to relieve an
@@ -801,12 +817,13 @@ static void TecControl_Cb( qEvent_t e )
 
     /*--- 4. fault protection (highest priority first) ----------------------*/
 
-    /* Dew protection keeps the target above dew + margin and latches the
-     * raised target until the cold side warms 1 C above the floor. There is
-     * NO minimum-output clamp: once the demand falls below NV_TEC_EN_OFF_PCT
-     * the EN deadband cuts TEC_VEN (converter off = zero current = no
-     * overcooling). An unavailable humidity sample must not silently
-     * restore unrestricted cooling. */
+    /* Dew block. In the normal mode it keeps the target above dew + margin
+     * and latches the raised target until the cold side warms 1 C above the
+     * floor. In tracking mode (TARGET_BASE == 0) the floor IS the target.
+     * There is NO minimum-output clamp: once the demand falls below
+     * NV_TEC_EN_OFF_PCT the EN deadband cuts TEC_VEN (converter off = zero
+     * current = no overcooling). An unavailable humidity sample must not
+     * silently restore unrestricted cooling. */
     {
         int32_t dew_mc = AHT20_Get_LastDewPointMilliCelsius();
 
@@ -814,9 +831,21 @@ static void TecControl_Cb( qEvent_t e )
             (dew_mc > TEC_TEMP_ENVELOPE_MAX_MILLIC)) {
             s_dew_hold = 1u;
             s_alarm |= TEC_ALARM_SENSOR;
+            if ( s_p.target_base_millic == 0 ) {
+                /* Tracking mode with no fresh sample: hold the last valid
+                 * floor. The seed is TEC_TEMP_ENVELOPE_MAX_MILLIC ("no
+                 * cooling") so a board that boots without a humidity reading
+                 * never turns the setpoint into 0 C. */
+                target_mc = s_dew_target_mc;
+            }
         } else {
             int32_t floor_mc = dew_mc + s_p.dewpoint_margin_millic;
-            if (target_mc < floor_mc) target_mc = floor_mc;
+            s_dew_target_mc = floor_mc;      /* last valid floor, both modes */
+            if ( s_p.target_base_millic == 0 ) {
+                target_mc = floor_mc;        /* tracking mode: the floor IS it */
+            } else if ( target_mc < floor_mc ) {
+                target_mc = floor_mc;        /* normal mode: protection clamp */
+            }
             if (sdm_mc <= floor_mc) s_dew_hold = 1u;
             else if (sdm_mc >= floor_mc + TEC_DEW_RELEASE_MILLIC) s_dew_hold = 0u;
         }
@@ -827,12 +856,13 @@ static void TecControl_Cb( qEvent_t e )
     /* The cold-side NTC sits on the cold plate, not on the die, so the die
      * runs hotter than this sensor reads; compensating for that gap means
      * aiming the MEASURED target LOWER by the gap, hence the subtraction.
-     * Being applied after the dew-point floor, this also lowers the target
-     * below that floor. That is deliberate - a limited excursion below the
-     * dew point is accepted - but it is BOUNDED: tec_params_load() rejects
-     * anything outside 0..TEC_TARGET_OFFSET_MAX_MILLIC, so the final target
-     * can never sit more than 20 C under the floor (the floor clamp above
-     * guarantees target >= floor before this line).
+     * Being applied after the dew-point floor (in BOTH target modes), this is
+     * also what lets a configured offset cross below the floor: with
+     * TARGET_OFFSET == 0 the floor is a hard limit, with it non-zero the
+     * final target sits up to TEC_TARGET_OFFSET_MAX_MILLIC under the floor.
+     * That excursion is BOUNDED by tec_params_load(), and the DEWPOINT alarm
+     * still asserts so the host can see it - only the floor itself is
+     * crossed, not the visibility.
      * The hot-side foldback is NOT reachable from here: its lift is added
      * afterwards in 4c, so the derating always survives. */
     target_mc -= s_p.target_offset_millic;
@@ -1186,6 +1216,10 @@ void TecControl_Init( void )
     s_fan_started  = 0u;
 #endif
     s_dew_hold     = 0u;
+    /* Tracking mode (TARGET_BASE == 0) has no target until the first valid
+     * humidity sample: seed "no cooling" rather than 0 C so a dead AHT20
+     * cannot command maximum cooling. */
+    s_dew_target_mc = TEC_TEMP_ENVELOPE_MAX_MILLIC;
     s_cold_fault   = 0u;
     s_hot_fault    = 0u;
     s_cold_ema       = 0;

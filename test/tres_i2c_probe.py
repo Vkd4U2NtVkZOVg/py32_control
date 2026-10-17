@@ -96,7 +96,7 @@ NV_PARAMS = [
     ("PID_KP", "x1", 1 / 65536.0),
     ("PID_KI", "x1", 1 / 65536.0),
     ("PID_KD", "x1", 1 / 65536.0),
-    ("TARGET_BASE", "mC", 1),
+    ("TARGET_BASE", "mC", 1),  # base TEC target; 0 = track the dew-point floor
     ("HOT_OVERTEMP", "mC", 1),
     ("HOT_DANGER", "mC", 1),
     ("CUR_FEEDFORWARD", "mA", 1),
@@ -363,7 +363,8 @@ NVRAM parameter window (0x44..0xD7, 4-byte big-endian per slot):
 
     PID_KP / PID_KI / PID_KD          PID gains (Q16: --set accepts float
                                        e.g. 2.0 -> raw 131072; displays raw/65536)
-    TARGET_BASE (mC)                  base TEC target
+    TARGET_BASE (mC)                  base TEC target; 0 = track the dew-point
+                                      floor (target = dew + DEWPOINT_MARGIN)
     HOT_OVERTEMP / HOT_DANGER (mC)    fan full-speed / TEC-off thresholds
     CUR_FEEDFORWARD / CUR_DANGER (mA) current feedforward knee / overcurrent alarm
     FAN_MIN_RPM (RPM)                 fan fault threshold
