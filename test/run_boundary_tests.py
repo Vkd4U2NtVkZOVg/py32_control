@@ -185,6 +185,8 @@ typedef void *qEvent_t;
 #define qPeriodic 0
 #define qDisabled 0
 static int save_result, reload_result, save_calls;
+static int reset_calls;
+static void NVIC_SystemReset(void) { ++reset_calls; }
 static int NvParams_Save(void) { ++save_calls; return save_result; }
 static int NvParams_Reload(void) { return reload_result; }
 static void NvParams_RestoreDefaults(void) {}
@@ -218,6 +220,12 @@ int main(void) {
     s_completed = 255;
     TRES_Cmd_PostFromISR(TRES_CMD_REPORT_FAIL, 0); Parser_TaskCb(NULL);
     assert(TRES_Cmd_Completed() == 0 && TRES_Cmd_Retries() == 1);
+    /* RESET_MCU: legal in every state, resets immediately and deliberately
+     * without an acknowledgement (the MCU is gone before one could be sent).
+     * The harness stubs the CMSIS reset so the path is at least exercised -
+     * without this stub the whole case fails to link. */
+    TRES_Cmd_PostFromISR(TRES_CMD_RESET_MCU, 0); Parser_TaskCb(NULL);
+    assert(reset_calls == 1 && TRES_Cmd_LastErr() == TRES_ERR_NONE);
 }
 '''
     src = read('Core/SRC/usart2_dma.c')
