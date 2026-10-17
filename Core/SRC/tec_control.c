@@ -119,16 +119,18 @@
 #define TEC_FAN_DUTY_HYSTERESIS_PCT   ( 2u )
 
 /* Cold-side control input: the same first-order EMA SHAPE as the fan hot
- * input, but tuned independently (the fan hot side is DIV 8 above), applied
- * to the cold side so a single noisy 12-bit ADC sample cannot shake the PID
- * (and thereby the TEC duty and the heatsink). alpha = 1/DIV; at Ts = 500 ms,
- * DIV 16 gives a ~8 s time constant. Only VALID samples update the filter;
- * the protection paths (sensor validity, dew-point floor, SoC-tighten) and
- * every PID-reset path keep using the raw sdm_mc so they are never delayed,
- * and the filter is reseeded from the real sample when a cold-sensor fault
- * clears (see the s_cold_fault branch in TecControl_Cb). Kept as its own
- * macro because the PID closed loop is more sensitive to added lag than the
- * open-loop fan ramp. */
+ * input, applied to the cold side so a single noisy 12-bit ADC sample cannot
+ * shake the PID (and thereby the TEC duty and the heatsink). alpha = 1/DIV, so
+ * at Ts = 500 ms the DIV 8 below is a ~4 s time constant. Kept as its own
+ * macro, independent of TEC_FAN_HOT_EMA_DIV: the PID closed loop has a
+ * different tolerance for added lag than the open-loop fan ramp, so the two
+ * are tuned separately (they happen to share the value 8 today - this comment
+ * deliberately does not restate that, retune either one freely). Only VALID
+ * samples update the filter; the protection paths (sensor validity, dew-point
+ * floor, SoC-tighten) and every PID-reset path keep using the raw sdm_mc so
+ * they are never delayed, and the filter is reseeded from the real sample
+ * when a cold-sensor fault clears (see the s_cold_fault branch in
+ * TecControl_Cb). */
 #define TEC_COLD_EMA_DIV              ( 8u )
 
 /*============================================================================*/

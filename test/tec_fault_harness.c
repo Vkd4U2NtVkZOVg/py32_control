@@ -237,15 +237,16 @@ int main(int argc, char **argv)
     assert(s_tec_enabled);
 
     /* Cold-side EMA: the PID feedback follows the smoothed cold temperature,
-     * not a single noisy ADC sample (TEC_COLD_EMA_DIV = 16; the fan hot-side
-     * filter is tuned separately). A one-cycle 1 C spike must move the PID
-     * input by only ~1/16 of it. */
+     * not a single noisy ADC sample. The expected step is derived from
+     * TEC_COLD_EMA_DIV rather than hardcoded, so retuning the filter (DIV 8,
+     * 16, 32 ...) cannot turn this regression red: a one-cycle 1 C spike must
+     * move the PID input by only 1/DIV of it. */
     reset_fixture(); cold = 45000;
     for (int i = 0; i < 8; ++i) TecControl_Cb(NULL);
     assert(pid_measure == -45000.0f);              /* EMA settled at seed */
     cold = 46000;                                   /* one-cycle spike */
     TecControl_Cb(NULL);
-    assert(pid_measure > -45070.0f && pid_measure < -45055.0f);
+    assert(pid_measure == -(45000.0f + (float)(1000 / (int32_t)TEC_COLD_EMA_DIV)));
     cold = 45000;
     for (int i = 0; i < 40; ++i) TecControl_Cb(NULL);
     assert(pid_measure > -45020.0f && pid_measure <= -45000.0f);
