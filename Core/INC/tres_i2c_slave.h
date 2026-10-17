@@ -48,14 +48,14 @@
  *   0x40-0x43 DEWPOINT R live dew-point temperature, int32 big-endian
  *                        milli-degC, from the AHT20 measurement task
  *                        (INT32_MIN until the first successful sample).
- *   0x44..0xD3    RW  NVRAM parameter window: one 4-byte big-endian value per
+ *   0x44..0xD7    RW  NVRAM parameter window: one 4-byte big-endian value per
  *                     slot. Slot n of NvParamTecId_t (nv_params.h) lives at
  *                     0x44 + 4*n. Values are 32-bit big-endian; a slot
  *                     commits when ONE transaction delivers its 4 bytes
  *                     from the slot base (multi-slot bursts are fine;
  *                     mid-slot starts never commit). Persist with the
  *                     SAVE_PARAMS command.
- *                     (36 slots: 0x44 + 4*36 = 0xD4, so window 0x44..0xD3.)
+ *                     (37 slots: 0x44 + 4*37 = 0xD8, so window 0x44..0xD7.)
  ******************************************************************************
  */
 #ifndef __TRES_I2C_SLAVE_H__
@@ -119,19 +119,19 @@ extern "C" {
 #define TRES_REG_NV_END     ( TRES_REG_NV_BASE + TRES_REG_NV_LEN * NVM_PARAM_COUNT )
 
 /* AES challenge-response authentication window (only when TRES_AES_ENABLE).
- *   0xD4..0xE3  CHALLENGE (W) 16 bytes big-endian; the response is computed
+ *   0xD8..0xE7  CHALLENGE (W) 16 bytes big-endian; the response is computed
  *                              live from the buffer on every read, so there
  *                              is no commit step (a partial write only makes
  *                              the response mismatch - auth fails safe).
- *   0xE4..0xF3  RESPONSE (R)  16 bytes big-endian: AES-128-ECB(device_key,
+ *   0xE8..0xF7  RESPONSE (R)  16 bytes big-endian: AES-128-ECB(device_key,
  *                              challenge), recomputed live on every read.
- * Placed above the NVRAM parameter window (0x44..0xD3 with 36 slots) so the
+ * Placed above the NVRAM parameter window (0x44..0xD7 with 37 slots) so the
  * two never overlap. The windows are only present in the register file when
  * the feature is compiled in; with TRES_AES_ENABLE=0 these addresses read
  * back 0 and writes are ignored, exactly like any other reserved address. */
-#define TRES_REG_CHAL_BASE   0xD4u
+#define TRES_REG_CHAL_BASE   0xD8u
 #define TRES_REG_CHAL_LEN    16u
-#define TRES_REG_RESP_BASE   0xE4u
+#define TRES_REG_RESP_BASE   0xE8u
 #define TRES_REG_RESP_LEN    16u
 
 /* The register windows above are addressed byte-by-byte with no runtime

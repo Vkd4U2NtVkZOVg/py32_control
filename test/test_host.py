@@ -64,7 +64,8 @@ class HostTests(unittest.TestCase):
     def test_malformed_backup_rejected_before_bus_open(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as tmp:
             path = Path(tmp) / 'bad.json'
-            for data in ([], {'format': 'tres-params-v1', 'interface': 3, 'raw': [True] * 36}):
+            for data in ([], {'format': 'tres-params-v1', 'interface': 3,
+                               'raw': [True] * len(host.NV_PARAMS)}):
                 path.write_text(json.dumps(data), encoding='utf-8')
                 with patch.object(host, 'Tres') as constructor, self.assertRaises(ValueError):
                     host.main(['restore', str(path)])

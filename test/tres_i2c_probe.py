@@ -31,7 +31,7 @@ Registers:
                                     AHTSTAT / FANDUTY / TECDUTY
   0x36-0x43 live sensors: FANRPM(u16BE) / COLDTEMP(s32BE) / HOTTEMP(s32BE) /
                          DEWPOINT(s32BE)
-  0x44-0xD3 NVRAM parameter window: 36 slots x 4-byte big-endian values
+  0x44-0xD7 NVRAM parameter window: 37 slots x 4-byte big-endian values
 
 Commands (0x00 <- [0xA5][cmdId][param]):
   1 RESET, 2 ENTER_DFU, 3 REPORT_FAIL, 4 SAVE_PARAMS, 5 DEFAULT_PARAMS, 6 RELOAD_PARAMS,
@@ -83,11 +83,11 @@ TRES_REG_NV_LEN = 4
 NVM_Q16_SCALE = 65536.0   # Q16 fixed point: raw = round(value * 65536)
 
 # AES challenge-response authentication window (firmware: TRES_AES_ENABLE).
-#   Placed above the NVRAM parameter window (0x44..0xD3 for 36 slots).
-#   0xD4..0xE3  CHALLENGE (W) 16 bytes big-endian
-#   0xE4..0xF3  RESPONSE (R)  AES-128-ECB(device_key, challenge)
-TRES_REG_CHAL_BASE = 0xD4
-TRES_REG_RESP_BASE = 0xE4
+#   Placed above the NVRAM parameter window (0x44..0xD7 for 37 slots).
+#   0xD8..0xE7  CHALLENGE (W) 16 bytes big-endian
+#   0xE8..0xF7  RESPONSE (R)  AES-128-ECB(device_key, challenge)
+TRES_REG_CHAL_BASE = 0xD8
+TRES_REG_RESP_BASE = 0xE8
 TRES_AUTH_LEN = 16
 # Must match AES_DEVICE_KEY_BYTES in Core/INC/aes.h (same per-product key).
 AES_DEVICE_KEY = bytes.fromhex(
@@ -129,6 +129,7 @@ NV_PARAMS = [
     ("HOT_FB_MAX", "mC", 1),   # hot foldback: max cold-target lift
     ("FF_ENABLE", "-", 1),     # feedforward master switch: 0 = PID only
     ("EN_OFF_PCT", "%", 1),    # anti-hiccup deadband: duty below this drops TEC_VEN
+    ("TARGET_OFFSET", "mC", 1), # NTC-to-CPU fixed target offset (signed), default 0
 ]
 
 # Slot name -> index, case-insensitive (e.g. "target_base", "TARGET_BASE").
@@ -145,6 +146,7 @@ NV_SIGNED_SLOTS = frozenset((
     "TARGET_BASE",
     "TEMP_VALID_MIN",
     "TEMP_VALID_MAX",
+    "TARGET_OFFSET",
 ))
 
 
@@ -298,7 +300,7 @@ write modes below mutate device state:
   [2] status:   read the machine-state block 0x30..0x35
                 (SDM845 boot state, TEC alarms, AHT20 status, fan/TEC duty)
   [3] --commands only: CMD_REPORT_FAIL x2 (changes RETRIES)
-  [4] params:   dump the NVRAM parameter window 0x44..0xD3 (36 slots x 4B)
+  [4] params:   dump the NVRAM parameter window 0x44..0xD7 (37 slots x 4B)
   [5] action:   one of --reset / --dfu / --params / --set, or skipped
 
 Protocol (write): first byte selects the register pointer, following bytes
@@ -336,7 +338,7 @@ Commands (register 0x00 <- [0xA5][cmdId][param]):
   4 SAVE_PARAMS    persist the NVRAM RAM cache to FLASH
   5 DEFAULT_PARAMS reload firmware defaults into the NVRAM RAM cache
 
-NVRAM parameter window (0x44..0xD3, 4-byte big-endian per slot):
+NVRAM parameter window (0x44..0xD7, 4-byte big-endian per slot):
   slot n lives at 0x44 + 4*n; the 4th byte written commits the value into
   the RAM cache. Persist with SAVE_PARAMS. --set accepts any of these names
   (case-insensitive); Q16 gain slots display as raw/65536:

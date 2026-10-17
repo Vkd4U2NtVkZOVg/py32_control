@@ -29,7 +29,7 @@
 /*============================================================================*/
 #define NVM_BASE        (0x0800F000UL)  /**< last flash sector, page-aligned  */
 #define NVM_MAGIC       (0x4E564433u)   /**< 'NVD3'                            */
-#define NVM_VERSION     (5u)            /**< v5: CRC protects sequence and parameters */
+#define NVM_VERSION     (6u)            /**< v6: added NV_TEC_TARGET_OFFSET_MILLIC  */
 #define NVM_PAGE_BYTES  (128u)          /**< PY32F030 flash page size          */
 #define NVM_SLOTS       (2u)            /**< A/B slots; Save flips between them*/
 
@@ -209,6 +209,9 @@ static const uint32_t s_defaults[ NVM_PARAM_COUNT ] = {
                                                   same value is also the re-enable
                                                   threshold (no hysteresis); bench-
                                                   calibrate the boundary.     */
+    [NV_TEC_TARGET_OFFSET_MILLIC]      = 0u,   /* NTC-to-CPU fixed target offset,
+                                                  milli-degC (signed in firmware);
+                                                  default 0 = no compensation      */
 };
 
 /*============================================================================*/

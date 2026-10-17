@@ -251,6 +251,22 @@ int main(int argc, char **argv)
     for (int i = 0; i < 40; ++i) TecControl_Cb(NULL);
     assert(pid_measure > -45020.0f && pid_measure <= -45000.0f);
 
+    /* Fixed target offset (TARGET_OFFSET): applied to the FINAL target AFTER
+     * the dew-point floor, so the dew hold can never absorb it. The floor
+     * here is dew(50000) + margin(2000) = 52000, above the 45000 base target,
+     * so the dew hold rewrites the target to 52000; the offset must survive
+     * on top, including a negative offset. */
+    reset_fixture(); cold = 12000; dew = 50000;
+    s_p.target_offset_millic = 0;
+    for (int i = 0; i < 3; ++i) TecControl_Cb(NULL);
+    assert(s_dew_hold && target_mc == 52000);
+    s_p.target_offset_millic = 1000;
+    for (int i = 0; i < 3; ++i) TecControl_Cb(NULL);
+    assert(s_dew_hold && target_mc == 53000);
+    s_p.target_offset_millic = -500;
+    for (int i = 0; i < 3; ++i) TecControl_Cb(NULL);
+    assert(target_mc == 51500);
+
     /* Cold-sensor fault recovery must reseed the EMA, not just the PID: the
      * filter is frozen for the whole fault, so without the reseed the first
      * post-recovery cycle would reset the PID to the real temperature and

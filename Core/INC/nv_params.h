@@ -71,8 +71,9 @@ extern "C" {
  * casts the uint32 back to int32). A host must reinterpret those slots as
  * signed: reading TEMP_VALID_MIN's default 0xFFFFB1E0 as 4294947296 instead
  * of -20000 is the classic mistake. The affected slots are TARGET_BASE,
- * TEMP_VALID_MIN and TEMP_VALID_MAX - the latter two hold negative
- * temperatures by definition; TARGET_BASE is signed for symmetry.
+ * TEMP_VALID_MIN, TEMP_VALID_MAX and TARGET_OFFSET - the latter two hold
+ * negative temperatures by definition, TARGET_BASE is signed for symmetry
+ * and TARGET_OFFSET is a signed correction (may be negative or positive).
  * test/tres_i2c_probe.py keeps the matching NV_SIGNED_SLOTS list.
  */
 typedef enum {
@@ -164,6 +165,18 @@ typedef enum {
                                             threshold (no fixed hysteresis).
                                             Default 8 % ~= 0.5 V on the 6 V TEC;
                                             bench-calibrate the boundary.        */
+    NV_TEC_TARGET_OFFSET_MILLIC,       /**< fixed cold-target offset, milli-degC.
+                                            Signed; default 0. The NTC is not in
+                                            direct contact with the CPU, so its
+                                            reading differs from the real die
+                                            temperature by a roughly constant
+                                            amount; this slot adjusts for that.
+                                            Applied to the FINAL target AFTER the
+                                            dew-point floor, so the dew hold can
+                                            never absorb it (see tec_control.c
+                                            section 2/4). Bounded to +/-100 C in
+                                            tec_params_load(); corrupt values
+                                            fall back to the 0 default.          */
     NV_PARAM_COUNT_MARKER,             /**< sentinel: MUST stay last. NVM_PARAM_COUNT
                                             is derived from it, so adding a slot
                                             is just adding a line above.         */

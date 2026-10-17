@@ -141,6 +141,7 @@ typedef struct {
     float   pid_ki;
     float   pid_kd;
     int32_t target_base_millic;     /* base TEC target temp                     */
+    int32_t target_offset_millic;   /* fixed target offset (NTC-to-CPU), m°C    */
     int32_t hot_overtemp_millic;    /* fan full speed threshold                 */
     int32_t hot_danger_millic;      /* TEC off + fan 100 % threshold            */
     int32_t cur_danger_ma;          /* overcurrent cutoff threshold             */
@@ -186,6 +187,7 @@ static void tec_params_load( Tec_Params_t *p )
     p->pid_ki                = (float)NvParams_Get( NV_TEC_PID_KI_Q16 ) / NVM_Q16_SCALE;
     p->pid_kd                = (float)NvParams_Get( NV_TEC_PID_KD_Q16 ) / NVM_Q16_SCALE;
     p->target_base_millic    = (int32_t)NvParams_Get( NV_TEC_TARGET_BASE_MILLIC );
+    p->target_offset_millic  = (int32_t)NvParams_Get( NV_TEC_TARGET_OFFSET_MILLIC );
     p->hot_overtemp_millic   = (int32_t)NvParams_Get( NV_TEC_HOT_OVERTEMP_MILLIC );
     p->hot_danger_millic     = (int32_t)NvParams_Get( NV_TEC_HOT_DANGER_MILLIC );
     p->cur_danger_ma         = (int32_t)NvParams_Get( NV_TEC_CURRENT_DANGER_MA );
@@ -217,6 +219,13 @@ static void tec_params_load( Tec_Params_t *p )
      * compare bounded values - e.g. FAN_TEMP_BASE = 0x80000000 passes a
      * naive base<full relation but overflows the fan-ramp subtraction. */
     p->target_base_millic     = temp_param_or_default( p->target_base_millic, NV_TEC_TARGET_BASE_MILLIC );
+    /* Fixed target offset: a signed correction, so a separate symmetric
+     * envelope (+/-100 C) instead of the temperature window. Corrupt values
+     * fall back to the 0 default (no compensation). */
+    if ( ( p->target_offset_millic < -100000 ) ||
+         ( p->target_offset_millic >  100000 ) ) {
+        p->target_offset_millic = (int32_t)NvParams_GetDefault( NV_TEC_TARGET_OFFSET_MILLIC );
+    }
     p->hot_overtemp_millic    = temp_param_or_default( p->hot_overtemp_millic, NV_TEC_HOT_OVERTEMP_MILLIC );
     p->hot_danger_millic      = temp_param_or_default( p->hot_danger_millic, NV_TEC_HOT_DANGER_MILLIC );
     p->fan_temp_base_millic   = temp_param_or_default( p->fan_temp_base_millic, NV_TEC_FAN_TEMP_BASE_MILLIC );
@@ -795,6 +804,15 @@ static void TecControl_Cb( qEvent_t e )
         }
         if (s_dew_hold) s_alarm |= TEC_ALARM_DEWPOINT;
     }
+
+    /* Fixed NTC-to-CPU offset: added to the FINAL target, deliberately AFTER
+     * the dew-point floor above. The dew hold rewrites target_mc to the floor
+     * when the demand sits below it, so adding the offset inside the target
+     * computation (or before the dew block) would let the dew hold absorb it.
+     * Here it always survives, positive or negative; a negative offset can
+     * push the final target below the dew floor, which is the operator's
+     * explicit choice (default 0 keeps the legacy behaviour). */
+    target_mc += s_p.target_offset_millic;
 
     if ( hot_mc > s_p.hot_danger_millic ) {
         /* danger: cut TEC, hold the DAC at the zero-current end (window top),
