@@ -88,13 +88,34 @@ int main(void)
     Fan_SetDutyPercent(60u);
     assert(s_compare == expected_compare(60u));
 
-    /* Disabled fan: compare forced to 0, and next enable starts from there. */
+    /* Disabled fan: the compare is forced to 0 AND the slew state is
+     * re-anchored to 0, so the pin really is at 0 % while disabled. A later
+     * enable must therefore land its first request instead of stepping the
+     * pin to the stale slewed value held before the disable. */
+    s_tick += 100000u;                    /* long gap: park at 100 % */
+    Fan_SetDutyPercent(100u);
+    assert(s_compare == expected_compare(100u));
     Fan_SetEnabled(0);
     assert(s_compare == 0u);
     Fan_SetEnabled(1);
     s_tick += 500u;
-    Fan_SetDutyPercent(50u);
-    assert(s_compare == expected_compare(50u));
+    Fan_SetDutyPercent(30u);              /* lands at 85 % without the re-anchor */
+    assert(s_compare == expected_compare(30u));
+
+    /* From the re-anchored state the ordinary slew applies again. */
+    s_tick += 500u;
+    Fan_SetDutyPercent(0u);
+    assert(s_compare == expected_compare(15u));   /* 30 - 15 % in one cycle */
+
+    /* Protection writer: lands in the same call and re-anchors the slew
+     * state, so the next normal write ramps from the forced duty (100) and
+     * not from the value the ramp held before (15). */
+    s_tick += 500u;
+    Fan_SetDutyPercentImmediate(100u);
+    assert(s_compare == expected_compare(100u));
+    s_tick += 500u;
+    Fan_SetDutyPercent(40u);
+    assert(s_compare == expected_compare(85u));   /* 100 - 15 % */
 
     /* Clamp >100 input to 100; a long gap (>= 1 s with no writer) jumps
      * straight to the (clamped) target so a stalled writer cannot stall the
@@ -103,6 +124,6 @@ int main(void)
     Fan_SetDutyPercent(250u);
     assert(s_compare == expected_compare(100u));
 
-    printf("fan ramp tests passed\\n");
+    printf("fan ramp tests passed\n");
     return 0;
 }

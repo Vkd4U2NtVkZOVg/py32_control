@@ -5,9 +5,9 @@
  * The compare value written to TIM3 CH2 is rate-limited so the fan never
  * receives an instantaneous duty step: Fan_SetDutyPercent() records the
  * requested target and slews the actual PWM compare toward it at
- * FAN_RAMP_MAX_PCT_PER_S %/s (time base: QOS_Tick_Get(), 1 kHz). All
- * writers go through this one function, so boot full-speed, protection
- * full-speed and the normal hot-side ramp all share the same soft ramp.
+ * FAN_RAMP_MAX_PCT_PER_S %/s (time base: QOS_Tick_Get(), 1 kHz).
+ * Fan_SetDutyPercentImmediate() writes the compare in the same call instead,
+ * for the TEC protection paths (see fan.h).
  */
 #include "fan.h"
 #include "qport_py32.h"
@@ -39,6 +39,13 @@ void Fan_SetEnabled(uint8_t enabled)
     s_enabled = (enabled != 0U) ? 1U : 0U;
     if ( s_enabled == 0U ) {
         LL_TIM_OC_SetCompareCH2(TIM3, 0U);
+        /* The pin is now 0 %, so the slew state must say 0 too: otherwise the
+         * next enable would resume from a duty the fan is no longer at and
+         * step the pin straight to that stale value. Re-opening the writer
+         * gap makes an enable after a long off period land immediately, which
+         * is what a spin-up from standstill needs. */
+        s_ramp_duty = 0U;
+        s_ramp_tick = 0U;
     }
 }
 
@@ -102,6 +109,22 @@ void Fan_SetDutyPercent(uint8_t duty_percent)
     }
     s_ramp_tick = now;
     fan_apply_pwm( s_ramp_duty );
+}
+
+/* Immediate variant: lands the requested duty on the pin in this call and
+ * re-anchors the slew state (s_ramp_duty/s_ramp_tick) to it, so a later
+ * Fan_SetDutyPercent() slews from what is actually on the pin rather than
+ * from the value the ramp had before. Used by the TEC protection paths; see
+ * fan.h for why they must not wait out the slew. */
+void Fan_SetDutyPercentImmediate(uint8_t duty_percent)
+{
+    if (duty_percent > 100U) {
+        duty_percent = 100U;
+    }
+    s_duty_percent = duty_percent;
+    s_ramp_duty   = duty_percent;
+    s_ramp_tick   = QOS_Tick_Get();
+    fan_apply_pwm( duty_percent );
 }
 
 uint8_t Fan_GetDutyPercent(void)

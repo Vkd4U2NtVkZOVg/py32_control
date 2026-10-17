@@ -10,9 +10,15 @@
  * Fan_SetDutyPercent() applies a rate-limited soft ramp on top of the raw
  * compare write: a requested duty is slewed toward the target at no more
  * than FAN_RAMP_MAX_PCT_PER_S per second, using the 1 kHz QOS_Tick_Get()
- * time base. Every writer (TEC hot-side ramp, protection paths, boot code)
- * therefore reaches the fan through the same smooth ramp instead of an
- * audible step, while still reaching full speed quickly when needed.
+ * time base. Ordinary writers (the TEC hot-side ramp, boot code) therefore
+ * reach the fan through the same smooth ramp instead of an audible step.
+ *
+ * Fan_SetDutyPercentImmediate() bypasses the slew and lands the requested
+ * duty in this call. It is reserved for the TEC protection paths (overtemp,
+ * invalid sensor, overcurrent, stalled fan): they re-command every control
+ * period, so the >= 1 s "writer gap" fast path of the soft ramp never
+ * applies to them and the protection demand would crawl up at 30 %/s
+ * (30 -> 100 % takes ~2.5 s) exactly when full airflow is the point.
  */
 #ifndef __FAN_H__
 #define __FAN_H__
@@ -37,8 +43,8 @@ extern "C" {
 #endif
 /* Soft-ramp rate limit: the fan duty slews toward the requested value at no
  * more than this many percent per second. 30 %/s moves 30..100 % in ~2.3 s,
- * fast enough for protection paths to reach full airflow promptly while
- * still eliminating audible step changes in the normal hot-side ramp. */
+ * which is smooth enough to remove audible steps in the normal hot-side ramp.
+ * The protection paths do NOT rely on it - they use the immediate writer. */
 #ifndef FAN_RAMP_MAX_PCT_PER_S
 #define FAN_RAMP_MAX_PCT_PER_S    (30u)
 #endif
@@ -46,6 +52,7 @@ extern "C" {
 void Fan_Init(void);
 void Fan_SetEnabled(uint8_t enabled);
 void Fan_SetDutyPercent(uint8_t duty_percent);
+void Fan_SetDutyPercentImmediate(uint8_t duty_percent);
 uint8_t Fan_GetDutyPercent(void);
 
 uint32_t Fan_GetTachPulses(void);
