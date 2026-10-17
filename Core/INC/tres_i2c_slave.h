@@ -134,6 +134,20 @@ extern "C" {
 #define TRES_REG_RESP_BASE   0xE4u
 #define TRES_REG_RESP_LEN    16u
 
+/* The register windows above are addressed byte-by-byte with no runtime
+ * arbitration, so an overlap would silently alias two regions. NVM_PARAM_COUNT
+ * grows by one per added NvParamTecId_t slot (no other edit needed), which
+ * makes this easy to break by accident: fail the build instead. */
+_Static_assert( TRES_REG_SDM845_TEMP + TRES_REG_SDM845_TEMP_LEN <= TRES_REG_BOOTSTATE,
+                "SDM845_TEMP window collides with the machine-state block" );
+_Static_assert( TRES_REG_DEWPOINT + 4u <= TRES_REG_NV_BASE,
+                "live sensor block collides with the NVRAM window" );
+_Static_assert( TRES_REG_NV_END <= TRES_REG_CHAL_BASE,
+                "NVRAM parameter window collides with the AES challenge window ("
+                "raise TRES_REG_CHAL_BASE/TRES_REG_RESP_BASE or drop a parameter)" );
+_Static_assert( TRES_REG_CHAL_BASE + TRES_REG_CHAL_LEN <= TRES_REG_RESP_BASE,
+                "AES challenge window collides with the response window" );
+
 /* Exported functions --------------------------------------------------------*/
 /** Enable I2C1 slave interrupts (call after TRES_Cmd_Init). */
 void TRES_I2C_Slave_Init(void);
