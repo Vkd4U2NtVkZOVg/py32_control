@@ -293,13 +293,24 @@ int main(int argc, char **argv)
     TecControl_Cb(NULL);
     assert(target_mc == 62500);                      /* base + (env-knee)/2 */
 
-    /* Fixed target offset (TARGET_OFFSET): an UNSIGNED 0..20000 magnitude that
-     * the firmware SUBTRACTS - it buys a bounded excursion below the dew-point
-     * floor rather than raising the target. Floor here is dew(50000) +
+    /* Plain arithmetic, the way the operator reads it: target + offset.
+     * Base 25000 (above the 12000 dew floor), offset +5000 -> 30000. */
+    reset_fixture(); cold = 30000; dew = 10000;      /* floor = 12000 */
+    s_p.target_base_millic = 25000;
+    s_p.target_offset_millic = 5000;
+    TecControl_Cb(NULL);
+    assert(target_mc == 30000);
+    s_p.target_offset_millic = -5000;
+    TecControl_Cb(NULL);
+    assert(target_mc == 20000);
+
+    /* Fixed target offset (TARGET_OFFSET): a SIGNED +/-20 C correction added to
+     * the target (real target = target + offset), so POSITIVE raises it and
+     * NEGATIVE lowers it - and only a negative value can buy the bounded
+     * excursion below the dew-point floor. Floor here is dew(50000) +
      * margin(2000) = 52000, above the 45000 base target, so the floor clamp
-     * sets 52000 first; the offset is then ADDED, POSITIVE raising the target
-     * and NEGATIVE lowering it (a negative value is what crosses below the
-     * floor). 0 keeps the legacy behaviour. */
+     * sets 52000 first and the offset is added on top.
+     * 0 keeps the legacy behaviour. */
     reset_fixture(); cold = 12000; dew = 50000;
     s_p.target_offset_millic = 0;
     for (int i = 0; i < 3; ++i) TecControl_Cb(NULL);

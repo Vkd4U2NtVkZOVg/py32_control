@@ -182,18 +182,15 @@ typedef enum {
                                             SIGNED, default 0, valid
                                             -20000..+20000
                                             (TEC_TARGET_OFFSET_MAX_MILLIC).
-                                            POSITIVE RAISES the cold-side target
-                                            by that much; NEGATIVE LOWERS it.
-                                            The NTC sits on the cold plate, not
-                                            on the die, so the die runs hotter
-                                            than this sensor reads - making the
-                                            plate hold a lower temperature is
-                                            what brings the DIE to its setpoint,
-                                            so the usual correction is NEGATIVE
-                                            (e.g. -5000 aims the measured target
-                                            5 C lower). Only a negative value can
-                                            cross below the dew-point floor; the
-                                            20 C cap bounds that excursion.
+                                            Plain arithmetic on the setpoint:
+                                                real target = target + offset
+                                            so +5000 on a 25000 target controls
+                                            at 30000, and -5000 at 20000.
+                                            POSITIVE RAISES the cold-side target,
+                                            NEGATIVE LOWERS it. Only a negative
+                                            value can cross below the dew-point
+                                            floor; the 20 C cap bounds that
+                                            excursion.
                                             Applied AFTER the dew-point floor in
                                             both target modes; the hot-side
                                             foldback lift is added after it, so

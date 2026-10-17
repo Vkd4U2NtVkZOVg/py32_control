@@ -129,8 +129,8 @@ NV_PARAMS = [
     ("HOT_FB_MAX", "mC", 1),   # hot foldback: max cold-target lift
     ("FF_ENABLE", "-", 1),     # feedforward master switch: 0 = PID only
     ("EN_OFF_PCT", "%", 1),    # anti-hiccup deadband: duty below this drops TEC_VEN
-    ("TARGET_OFFSET", "mC", 1), # SIGNED +/-20000: POSITIVE lowers the cold target
-                                # (below the dew floor), NEGATIVE raises it
+    ("TARGET_OFFSET", "mC", 1), # SIGNED +/-20000: real target = target + offset
+                                # (POSITIVE raises, NEGATIVE lowers)
 ]
 
 # Slot name -> index, case-insensitive (e.g. "target_base", "TARGET_BASE").
@@ -160,7 +160,7 @@ NV_SIGNED_SLOTS = frozenset((
 # Keep TARGET_OFFSET in step with TEC_TARGET_OFFSET_MAX_MILLIC in
 # Core/SRC/tec_control.c.
 NV_RANGES = {
-    # +/-20 C: how far the cold target may be moved below (positive) or above
+    # +/-20 C: how far the cold target may be moved above (positive) or below
     # (negative) its floor/base value
     "TARGET_OFFSET": (-20000, 20000),
 }
@@ -384,14 +384,13 @@ NVRAM parameter window (0x44..0xD7, 4-byte big-endian per slot):
     SOC_TIGHTEN_TEMP / SOC_TIGHTEN_DELTA (mC)  SoC compensation
     COLD_SOURCE (-)                   cold-side source: 0=TEC_COLD ADC, 1=SDM845
     TARGET_OFFSET (mC)                SIGNED, -20000..+20000, range-checked here
-                                      before the write: POSITIVE raises the cold
-                                      target, NEGATIVE lowers it (the usual
-                                      NTC-to-CPU correction, and the only
-                                      direction that may cross below the dew
-                                      floor). 0 = no compensation; the firmware
-                                      rejects anything outside +/-20000 and falls
-                                      back to 0, so this probe refuses such a
-                                      value instead of sending it
+                                      before the write: real target = target +
+                                      offset, so POSITIVE raises it and NEGATIVE
+                                      lowers it (only negative can cross below
+                                      the dew floor). 0 = no compensation; the
+                                      firmware rejects anything outside +/-20000
+                                      and falls back to 0, so this probe refuses
+                                      such a value instead of sending it
 
   Signed slots: the window is 4-byte unsigned, but TARGET_BASE,
   TEMP_VALID_MIN and TEMP_VALID_MAX are SIGNED int32 milli-degC (two's

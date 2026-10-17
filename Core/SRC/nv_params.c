@@ -213,12 +213,13 @@ static const uint32_t s_defaults[ NVM_PARAM_COUNT ] = {
                                                   threshold (no hysteresis); bench-
                                                   calibrate the boundary.     */
     [NV_TEC_TARGET_OFFSET_MILLIC]      = 0u,   /* NTC-to-CPU gap: SIGNED
-                                                  -20000..+20000. POSITIVE
+                                                  -20000..+20000. Plain
+                                                  arithmetic on the setpoint
+                                                  (target + offset): POSITIVE
                                                   raises the cold target,
-                                                  NEGATIVE lowers it (the
-                                                  usual correction, and the
-                                                  only direction that may sit
-                                                  below the dew floor).
+                                                  NEGATIVE lowers it, and only
+                                                  negative may sit below the
+                                                  dew floor.
                                                   Default 0 = no compensation     */
 };
 

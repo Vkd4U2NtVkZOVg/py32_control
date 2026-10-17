@@ -44,11 +44,11 @@
 #define TEC_DEW_RELEASE_MILLIC ( 1000 )
 
 /* Magnitude cap on NV_TEC_TARGET_OFFSET_MILLIC: the signed correction may be
- * anywhere in [-20 C, +20 C], POSITIVE raises the cold-side target and
- * NEGATIVE lowers it. A negative offset is what buys a deliberate excursion
- * below the dew-point floor (to compensate an NTC that reads colder than the
- * die), so 20 C is the most undercut the operator may ask for; a positive
- * offset moves away from the floor and carries no condensation risk.
+ * anywhere in [-20 C, +20 C]. It is plain arithmetic on the setpoint
+ * (target + offset), so POSITIVE raises the cold-side target and NEGATIVE
+ * lowers it. A negative offset is what buys a deliberate excursion below the
+ * dew-point floor, so 20 C is the most undercut the operator may ask for; a
+ * positive offset moves away from the floor and carries no condensation risk.
  * Enforced in tec_params_load(), so a corrupt or mis-scaled slot (a host
  * writing Celsius instead of milli-C, a FLASH bit flip) cannot move the
  * target arbitrarily far.
@@ -858,10 +858,8 @@ static void TecControl_Cb( qEvent_t e )
     }
 
     /*--- 4b. fixed NTC-to-CPU target offset (SIGNED, +/-20 C) --------------*/
-    /* POSITIVE raises the cold-side target, NEGATIVE lowers it. The cold-side
-     * NTC sits on the cold plate, not on the die, so the die runs hotter than
-     * this sensor reads; to make the DIE hold its setpoint the plate has to be
-     * aimed lower, i.e. the usual NTC-to-CPU correction is NEGATIVE.
+    /* Plain arithmetic on the setpoint: real target = target + offset, so
+     * POSITIVE raises the cold-side target and NEGATIVE lowers it.
      * Being applied after the dew-point floor (in BOTH target modes), a
      * negative offset is also what lets the operator cross below the floor:
      * with TARGET_OFFSET >= 0 the floor is a hard limit, with it negative the
