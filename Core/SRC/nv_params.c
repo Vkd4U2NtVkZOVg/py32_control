@@ -29,7 +29,10 @@
 /*============================================================================*/
 #define NVM_BASE        (0x0800F000UL)  /**< last flash sector, page-aligned  */
 #define NVM_MAGIC       (0x4E564433u)   /**< 'NVD3'                            */
-#define NVM_VERSION     (6u)            /**< v6: added NV_TEC_TARGET_OFFSET_MILLIC  */
+#define NVM_VERSION     (7u)            /**< v7: TARGET_OFFSET meaning changed:
+                                             unsigned 0..20000 magnitude that
+                                             LOWERS the target (v6 stored a
+                                             signed +/-100 C correction)        */
 #define NVM_PAGE_BYTES  (128u)          /**< PY32F030 flash page size          */
 #define NVM_SLOTS       (2u)            /**< A/B slots; Save flips between them*/
 
@@ -209,9 +212,11 @@ static const uint32_t s_defaults[ NVM_PARAM_COUNT ] = {
                                                   same value is also the re-enable
                                                   threshold (no hysteresis); bench-
                                                   calibrate the boundary.     */
-    [NV_TEC_TARGET_OFFSET_MILLIC]      = 0u,   /* NTC-to-CPU fixed target offset,
-                                                  milli-degC (signed in firmware);
-                                                  default 0 = no compensation      */
+    [NV_TEC_TARGET_OFFSET_MILLIC]      = 0u,   /* NTC-to-CPU gap: UNSIGNED magnitude
+                                                  0..20000; the firmware LOWERS the
+                                                  cold target by this much, so it
+                                                  may sit below the dew floor.
+                                                  Default 0 = no compensation       */
 };
 
 /*============================================================================*/

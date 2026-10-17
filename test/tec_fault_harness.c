@@ -251,21 +251,53 @@ int main(int argc, char **argv)
     for (int i = 0; i < 40; ++i) TecControl_Cb(NULL);
     assert(pid_measure > -45020.0f && pid_measure <= -45000.0f);
 
-    /* Fixed target offset (TARGET_OFFSET): applied to the FINAL target AFTER
-     * the dew-point floor, so the dew hold can never absorb it. The floor
-     * here is dew(50000) + margin(2000) = 52000, above the 45000 base target,
-     * so the dew hold rewrites the target to 52000; the offset must survive
-     * on top, including a negative offset. */
+    /* Fixed target offset (TARGET_OFFSET): an UNSIGNED 0..20000 magnitude that
+     * the firmware SUBTRACTS - it buys a bounded excursion below the dew-point
+     * floor rather than raising the target. Floor here is dew(50000) +
+     * margin(2000) = 52000, above the 45000 base target, so the floor clamp
+     * sets 52000 first; the offset then subtracts from that.
+     * 0 keeps the legacy behaviour. */
     reset_fixture(); cold = 12000; dew = 50000;
     s_p.target_offset_millic = 0;
     for (int i = 0; i < 3; ++i) TecControl_Cb(NULL);
-    assert(s_dew_hold && target_mc == 52000);
-    s_p.target_offset_millic = 1000;
+    assert(s_dew_hold && target_mc == 52000);        /* legacy: target == floor */
+    s_p.target_offset_millic = 5000;
     for (int i = 0; i < 3; ++i) TecControl_Cb(NULL);
-    assert(s_dew_hold && target_mc == 53000);
-    s_p.target_offset_millic = -500;
+    assert(s_dew_hold && target_mc == 47000);        /* 5 C BELOW the floor */
+    s_p.target_offset_millic = TEC_TARGET_OFFSET_MAX_MILLIC;
     for (int i = 0; i < 3; ++i) TecControl_Cb(NULL);
-    assert(target_mc == 51500);
+    assert(target_mc == 52000 - TEC_TARGET_OFFSET_MAX_MILLIC);   /* cap = 20 C */
+
+    /* The hot-side foldback lift is applied AFTER the offset, so no target
+     * offset can cancel the heatsink derating. hot 85000 is 5 C above the
+     * 80000 knee; gain 2.0 -> lift 10000, which must survive in full. */
+    reset_fixture(); cold = 30000; dew = 10000; hot = 85000;
+    s_p.target_offset_millic = 0;
+    for (int i = 0; i < 3; ++i) TecControl_Cb(NULL);
+    assert((s_alarm & TEC_ALARM_HOT_WARNING) && target_mc == 55000);
+    s_p.target_offset_millic = TEC_TARGET_OFFSET_MAX_MILLIC;
+    for (int i = 0; i < 3; ++i) TecControl_Cb(NULL);
+    assert((s_alarm & TEC_ALARM_HOT_WARNING) && target_mc == 35000);
+    /* Undo the offset again: the lift is still exactly the full 10000, i.e.
+     * nothing was absorbed while the offset was active. */
+    s_p.target_offset_millic = 0;
+    for (int i = 0; i < 3; ++i) TecControl_Cb(NULL);
+    assert(target_mc == 55000);
+
+    /* Range gate: below 0 or above the cap falls back to the 0 default, so a
+     * corrupt/misscaled slot cannot sink the target arbitrarily. */
+    params[NV_TEC_TARGET_OFFSET_MILLIC] = 0u;
+    tec_params_load(&s_p);
+    assert(s_p.target_offset_millic == 0);
+    params[NV_TEC_TARGET_OFFSET_MILLIC] = TEC_TARGET_OFFSET_MAX_MILLIC;
+    tec_params_load(&s_p);
+    assert(s_p.target_offset_millic == TEC_TARGET_OFFSET_MAX_MILLIC);
+    params[NV_TEC_TARGET_OFFSET_MILLIC] = (uint32_t)(int32_t)-1;   /* -1 */
+    tec_params_load(&s_p);
+    assert(s_p.target_offset_millic == 0);
+    params[NV_TEC_TARGET_OFFSET_MILLIC] = TEC_TARGET_OFFSET_MAX_MILLIC + 1u;
+    tec_params_load(&s_p);
+    assert(s_p.target_offset_millic == 0);
 
     /* Cold-sensor fault recovery must reseed the EMA, not just the PID: the
      * filter is frozen for the whole fault, so without the reseed the first

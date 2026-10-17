@@ -129,7 +129,9 @@ NV_PARAMS = [
     ("HOT_FB_MAX", "mC", 1),   # hot foldback: max cold-target lift
     ("FF_ENABLE", "-", 1),     # feedforward master switch: 0 = PID only
     ("EN_OFF_PCT", "%", 1),    # anti-hiccup deadband: duty below this drops TEC_VEN
-    ("TARGET_OFFSET", "mC", 1), # NTC-to-CPU fixed target offset (signed), default 0
+    ("TARGET_OFFSET", "mC", 1), # NTC-to-CPU gap: UNSIGNED 0..20000, LOWERS the
+                                # target by this much (firmware applies the
+                                # direction); may take it below the dew floor
 ]
 
 # Slot name -> index, case-insensitive (e.g. "target_base", "TARGET_BASE").
@@ -146,7 +148,6 @@ NV_SIGNED_SLOTS = frozenset((
     "TARGET_BASE",
     "TEMP_VALID_MIN",
     "TEMP_VALID_MAX",
-    "TARGET_OFFSET",
 ))
 
 
@@ -362,6 +363,9 @@ NVRAM parameter window (0x44..0xD7, 4-byte big-endian per slot):
     ENV_COMP_TEMP (mC)                ambient above this raises the target
     SOC_TIGHTEN_TEMP / SOC_TIGHTEN_DELTA (mC)  SoC compensation
     COLD_SOURCE (-)                   cold-side source: 0=TEC_COLD ADC, 1=SDM845
+    TARGET_OFFSET (mC)                0..20000 UNSIGNED; the firmware LOWERS the
+                                      cold target by this much (NTC-to-CPU gap),
+                                      which may take it below the dew floor
 
   Signed slots: the window is 4-byte unsigned, but TARGET_BASE,
   TEMP_VALID_MIN and TEMP_VALID_MAX are SIGNED int32 milli-degC (two's

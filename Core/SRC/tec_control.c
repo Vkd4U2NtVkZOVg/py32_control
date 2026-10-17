@@ -43,6 +43,16 @@
 
 #define TEC_DEW_RELEASE_MILLIC ( 1000 )
 
+/* Hard cap on NV_TEC_TARGET_OFFSET_MILLIC. The offset lowers the cold-side
+ * target after the dew-point floor, i.e. it buys a deliberate excursion
+ * below the dew point to compensate the NTC-to-CPU gap; 20 C is the most
+ * undercut the operator may ask for. Enforced in tec_params_load(), so a
+ * corrupt or mis-scaled slot (a host writing Celsius instead of milli-C, a
+ * FLASH bit flip) cannot sink the target arbitrarily far below the floor.
+ * The floor clamp runs before the subtraction, so this cap is also the exact
+ * bound on how far the FINAL target can sit under the dew floor. */
+#define TEC_TARGET_OFFSET_MAX_MILLIC   ( 20000 )
+
 /* Absolute envelope for every milli-degree parameter: the NTC sensors span
  * -40..125 C, so anything outside [-40, 200] C is corrupt (host miswrite,
  * FLASH bit flip). Falling back per parameter also makes every downstream
@@ -219,11 +229,13 @@ static void tec_params_load( Tec_Params_t *p )
      * compare bounded values - e.g. FAN_TEMP_BASE = 0x80000000 passes a
      * naive base<full relation but overflows the fan-ramp subtraction. */
     p->target_base_millic     = temp_param_or_default( p->target_base_millic, NV_TEC_TARGET_BASE_MILLIC );
-    /* Fixed target offset: a signed correction, so a separate symmetric
-     * envelope (+/-100 C) instead of the temperature window. Corrupt values
-     * fall back to the 0 default (no compensation). */
-    if ( ( p->target_offset_millic < -100000 ) ||
-         ( p->target_offset_millic >  100000 ) ) {
+    /* Fixed target offset: a NON-NEGATIVE magnitude (how far to aim the
+     * cold-side target below the dew-point floor), so it gets its own
+     * 0..TEC_TARGET_OFFSET_MAX_MILLIC window instead of the signed
+     * temperature envelope. A negative or oversized value falls back to the
+     * 0 default (no compensation), exactly like a corrupt temperature slot. */
+    if ( ( p->target_offset_millic < 0 ) ||
+         ( p->target_offset_millic > TEC_TARGET_OFFSET_MAX_MILLIC ) ) {
         p->target_offset_millic = (int32_t)NvParams_GetDefault( NV_TEC_TARGET_OFFSET_MILLIC );
     }
     p->hot_overtemp_millic    = temp_param_or_default( p->hot_overtemp_millic, NV_TEC_HOT_OVERTEMP_MILLIC );
@@ -750,14 +762,21 @@ static void TecControl_Cb( qEvent_t e )
     if ( sdm_mc > s_p.soc_tighten_temp_millic ) {
         target_mc -= s_p.soc_tighten_delta_millic;
     }
-    /*--- 2b. hot-side foldback: lift the cold target to shed TEC load ------*/
+    /*--- 2b. hot-side foldback: compute the cold-target lift ---------------*/
     /* A TEC pumps waste heat into its hot side, so the way to relieve an
      * overheating heatsink is to cool LESS, not harder. Instead of dropping
      * the duty to 0 (bang-bang: cold-side rebounds, then the re-enabled TEC
      * slams back and the cycle repeats), lift the cold-side target above
      * its base by a gain proportional to the hot excess and let the PID
      * glide the duty down smoothly. Recovery is automatic: once the hot
-     * side cools below the knee the lift decays back to zero. */
+     * side cools below the knee the lift decays back to zero.
+     *
+     * The lift is COMPUTED here but APPLIED in 4c, after the dew-point floor
+     * and the fixed NTC-to-CPU offset: both of those move the target DOWN,
+     * so an additive lift applied before them was simply subtracted back out
+     * (a large target offset cancelled the derating completely). Applied
+     * last it is always worth its full value, so a calibration slot can
+     * never silence the heatsink protection. */
     hot_lift = 0;
     if ( hot_mc > s_p.hot_overtemp_millic ) {
         int32_t excess = hot_mc - s_p.hot_overtemp_millic;
@@ -770,18 +789,10 @@ static void TecControl_Cb( qEvent_t e )
         if ( lift < 0 ) {
             lift = 0;
         }
-        target_mc += (int32_t)lift;
         hot_lift = (int32_t)lift;
     }
 
     /*--- 4. fault protection (highest priority first) ----------------------*/
-
-    if ( hot_lift > 0 ) {
-        /* Foldback active: the elevated cold target is doing the load
-         * shedding - keep the PID running (no duty clamp, no integrator
-         * reset), just report the derating to the host. */
-        s_alarm |= TEC_ALARM_HOT_WARNING;
-    }
 
     /* Dew protection keeps the target above dew + margin and latches the
      * raised target until the cold side warms 1 C above the floor. There is
@@ -805,14 +816,28 @@ static void TecControl_Cb( qEvent_t e )
         if (s_dew_hold) s_alarm |= TEC_ALARM_DEWPOINT;
     }
 
-    /* Fixed NTC-to-CPU offset: added to the FINAL target, deliberately AFTER
-     * the dew-point floor above. The dew hold rewrites target_mc to the floor
-     * when the demand sits below it, so adding the offset inside the target
-     * computation (or before the dew block) would let the dew hold absorb it.
-     * Here it always survives, positive or negative; a negative offset can
-     * push the final target below the dew floor, which is the operator's
-     * explicit choice (default 0 keeps the legacy behaviour). */
-    target_mc += s_p.target_offset_millic;
+    /*--- 4b. fixed NTC-to-CPU target offset (bounded below-dew allowance) --*/
+    /* The cold-side NTC sits on the cold plate, not on the die, so the die
+     * runs hotter than this sensor reads; compensating for that gap means
+     * aiming the MEASURED target LOWER by the gap, hence the subtraction.
+     * Being applied after the dew-point floor, this also lowers the target
+     * below that floor. That is deliberate - a limited excursion below the
+     * dew point is accepted - but it is BOUNDED: tec_params_load() rejects
+     * anything outside 0..TEC_TARGET_OFFSET_MAX_MILLIC, so the final target
+     * can never sit more than 20 C under the floor (the floor clamp above
+     * guarantees target >= floor before this line).
+     * The hot-side foldback is NOT reachable from here: its lift is added
+     * afterwards in 4c, so the derating always survives. */
+    target_mc -= s_p.target_offset_millic;
+
+    /*--- 4c. apply the foldback lift (never cancellable) -------------------*/
+    if ( hot_lift > 0 ) {
+        target_mc += hot_lift;
+        /* Foldback active: the elevated cold target is doing the load
+         * shedding - keep the PID running (no duty clamp, no integrator
+         * reset), just report the derating to the host. */
+        s_alarm |= TEC_ALARM_HOT_WARNING;
+    }
 
     if ( hot_mc > s_p.hot_danger_millic ) {
         /* danger: cut TEC, hold the DAC at the zero-current end (window top),
