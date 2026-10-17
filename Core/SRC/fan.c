@@ -14,10 +14,9 @@
 
 #define FAN_PWM_PERIOD_TICKS ((FAN_TIMER_CLOCK_HZ / FAN_PWM_FREQUENCY_HZ) - 1UL)
 
-/* Local prototypes: Fan_Init() uses both before their definitions, and the
- * host test harness compiles this file without fan.h. The rail helper is
- * static - the rail is switched on once by the startup kick, never released. */
-static void fan_pwr_enable( uint8_t on );
+/* Local prototype: Fan_Init() calls it before its definition, and the host
+ * test harness compiles this file without fan.h. */
+void fan_pwr_enable( uint8_t on );
 static void fan_apply_pwm( uint8_t duty );
 
 static volatile uint32_t s_tach_pulses;
@@ -26,7 +25,6 @@ static uint8_t s_enabled;
 static uint8_t  s_ramp_duty;       /* current slewed duty actually on the pin */
 static uint32_t s_ramp_tick;       /* QOS_Tick_Get() of the last slew update */
 static uint8_t  s_min_duty;        /* floor for every duty write (NVRAM base) */
-static uint8_t  s_kick_armed;      /* pin is at 100 % from the Fan_Init kick  */
 
 void Fan_Init(void)
 {
@@ -36,37 +34,25 @@ void Fan_Init(void)
     s_ramp_duty   = 0U;
     s_ramp_tick   = 0u;
     s_min_duty    = 0U;
-    s_kick_armed  = 0u;
 
     LL_TIM_SetAutoReload(TIM3, FAN_PWM_PERIOD_TICKS);
     LL_TIM_OC_SetCompareCH2(TIM3, 0U);
     LL_TIM_CC_EnableChannel(TIM3, LL_TIM_CHANNEL_CH2);
     LL_TIM_EnableCounter(TIM3);
 
-    /* Startup kick. The high-speed fan's driver IC needs >50 % PWM only at
-     * RAIL POWER-UP - once unlatched the duty may go down to 1 % - so power
-     * the rail and present 100 % before any task can command a low duty, then
-     * block long enough for the driver to unlatch and the fan to spin up.
-     * LL_mDelay() is safe here: Studio_RCC_Init already started the 1 ms
-     * SysTick (LL_Init1msTick enables the timer, and LL_mDelay only polls its
-     * COUNTFLAG - no interrupt required) and QuarkTS has not started yet, so
-     * there is no task to starve. */
-    fan_pwr_enable( 1u );                          /* rail on  */
-    fan_apply_pwm( 100U );                         /* 100 % duty */
-    LL_mDelay( FAN_STARTUP_KICK_MS );              /* spin up + unlatch */
-
-    /* The pin is physically at 100 % now. Anchor the slew state on it and arm
-     * the first writer so it GLIDES down instead of taking the "first call"
-     * fast path (which would jump straight to a low duty): the TEC loop's
-     * first command arrives with QOS_Tick_Get() still small, so without this
-     * flag the anchor below would not even survive the 0-tick check. */
-    s_enabled      = 1U;
-    s_duty_percent = 100U;
-    s_ramp_duty    = 100U;
-    s_kick_armed   = 1U;
+    /* Power the fan rail - that is all the board needs. The fan's driver takes
+     * any duty (down to 1 %) as soon as the rail is up, so there is no start-up
+     * kick and no blocking delay here: the boot sequence is not delayed and
+     * the pin simply stays at 0 % until something commands a duty.
+     * The duty floor (Fan_SetMinDutyPercent, published from
+     * NV_TEC_FAN_DUTY_BASE by TecControl_Init) is what lifts the pin off 0 %
+     * for the first time, and keeps every later writer from going below the
+     * base airflow. */
+    fan_pwr_enable( 1u );                          /* rail on */
+    s_enabled = 1U;                                /* rail up: duty API live */
 }
 
-static void fan_pwr_enable(uint8_t on)
+void fan_pwr_enable(uint8_t on)
 {
 #if ( FAN_PWR_ACTIVE_HIGH != 0u )
     if ( on != 0u ) {
@@ -89,11 +75,9 @@ void Fan_SetEnabled(uint8_t enabled)
         LL_TIM_OC_SetCompareCH2(TIM3, 0U);
         /* Deliberate hard stop: the ONLY way to reach 0 % (nothing in the
          * firmware calls it). Re-anchor the slew state to 0 so a later enable
-         * resumes from where the fan physically is, and drop the kick arm -
-         * a stopped fan must spin up immediately, not glide. */
+         * resumes from where the fan physically is. */
         s_ramp_duty  = 0U;
         s_ramp_tick  = 0U;
-        s_kick_armed = 0U;
     }
 }
 
@@ -138,15 +122,12 @@ static void fan_apply_pwm(uint8_t duty)
  * the time elapsed since the last call. The first call (tick delta >= ramp
  * period) reaches the target immediately so the fan never starts slower than
  * requested; a persistent writer that calls every 500 ms moves in bounded
- * steps and a one-off writer still completes its ramp on its own. The one
- * exception is the first write after the Fan_Init() kick: the pin is known to
- * be at 100 %, so that call glides down instead of jumping. */
+ * steps and a one-off writer still completes its ramp on its own. */
 void Fan_SetDutyPercent(uint8_t duty_percent)
 {
     uint32_t now;
     uint32_t delta;
     uint32_t max_step;
-    uint8_t  glide;
 
     if (duty_percent > 100U) {
         duty_percent = 100U;
@@ -159,19 +140,7 @@ void Fan_SetDutyPercent(uint8_t duty_percent)
     now   = QOS_Tick_Get();
     delta = (uint32_t)( now - s_ramp_tick );
 
-    /* First writer after the startup kick: the pin really is at 100 %, so
-     * anchor the slew on that and pretend one nominal control period has
-     * elapsed. Without this the "first call" fast path below would jump
-     * straight from the 100 % kick to the (low) requested duty. */
-    glide = s_kick_armed;
-    if ( glide != 0u ) {
-        s_kick_armed = 0U;
-        s_ramp_duty  = 100U;
-        s_ramp_tick  = now;
-        delta        = FAN_RAMP_STEP_MS;
-    }
-
-    if ( ( glide == 0u ) && ( ( s_ramp_tick == 0u ) || ( delta >= 1000u ) ) ) {
+    if ( ( s_ramp_tick == 0u ) || ( delta >= 1000u ) ) {
         /* First call or long gap: jump straight to the target. A long gap
          * means no writer has been active (e.g. boot before the scheduler
          * tick is running, or a task stall), so ramping from a stale duty
@@ -217,7 +186,6 @@ void Fan_SetDutyPercentImmediate(uint8_t duty_percent)
     s_duty_percent = duty_percent;
     s_ramp_duty   = duty_percent;
     s_ramp_tick   = QOS_Tick_Get();
-    s_kick_armed  = 0U;              /* an explicit command supersedes the kick */
     fan_apply_pwm( duty_percent );
 }
 

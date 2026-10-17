@@ -225,14 +225,13 @@ static qSM_Status_t st_ThermalPrecheck_Cb( qSM_Handler_t h )
             if ( proceed != 0u ) {
                 s_boot.thermalReady = 1u;
                 /* Hand the fan to the TEC loop WITHOUT touching the duty.
-                 * This used to write 0 %, which on a cool boot landed as an
-                 * instant step straight after the Fan_Init() startup kick and
-                 * left the high-speed fan stopped; the TEC loop then only asks
-                 * for its base airflow. Leaving the pin alone lets the TEC
-                 * loop's first command (one control period away) glide down
-                 * from the kick through the soft ramp. Fan.c additionally
-                 * clamps every duty to NV_TEC_FAN_DUTY_BASE, so nothing on
-                 * this path can stop the fan anyway. */
+                 * This used to write 0 %, which on a cool boot left the fan
+                 * stopped; the TEC loop then only asks for its base airflow.
+                 * Fan_Init() has powered the rail and the pin already sits at
+                 * the NV_TEC_FAN_DUTY_BASE floor published by
+                 * TecControl_Init(), so the TEC loop simply takes over on its
+                 * next cycle. Fan.c also clamps every duty to that floor, so
+                 * nothing on this path can stop the fan anyway. */
                 h->NextState = &stPowerOnWait;
                 return qSM_STATUS_SIGNAL_HANDLED;
             }

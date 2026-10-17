@@ -11,8 +11,6 @@
 #define FAN_PWM_FREQUENCY_HZ      (25000UL)
 #define FAN_TIMER_CLOCK_HZ        (32000000UL)
 #define FAN_RAMP_MAX_PCT_PER_S    (30u)
-#define FAN_RAMP_STEP_MS          (500u)
-#define FAN_STARTUP_KICK_MS       (1000u)
 #define FAN_PWR_ACTIVE_HIGH       (1u)
 #define FAN_PWM_PERIOD_TICKS      ((FAN_TIMER_CLOCK_HZ / FAN_PWM_FREQUENCY_HZ) - 1UL)
 
@@ -55,22 +53,34 @@ static uint32_t expected_compare(uint32_t duty)
 
 int main(void)
 {
-    /* Fan_Init() performs the whole startup kick on its own: power the rail,
-     * land 100 % duty, then block for FAN_STARTUP_KICK_MS so the high-speed
-     * fan's driver IC unlatches (it needs >50 % on first application). */
+    /* Fan_Init() only powers the rail: no start-up kick, no blocking delay.
+     * The pin stays at 0 % until something commands a duty. */
     Fan_Init();
     assert(s_autoreload == FAN_PWM_PERIOD_TICKS);
     assert(s_pwr_en == 1);                        /* rail powered            */
-    assert(s_compare == expected_compare(100u));  /* 100 % on the pin        */
-    assert(s_delay_ms == FAN_STARTUP_KICK_MS);    /* blocking spin-up wait   */
+    assert(s_compare == 0u);                      /* no kick: pin at 0 %     */
+    assert(s_delay_ms == 0u);                     /* boot not delayed        */
 
-    /* Arm the ramp from the 100 % the kick left on the pin: the FIRST writer
-     * after Fan_Init() must glide down, not jump (this is the real boot
-     * order - the TEC loop's first command arrives with a tick delta that
-     * would otherwise take the "first call" fast path). */
-    s_tick = 500u;
+    /* TecControl_Init() publishes the NVRAM base airflow as the duty floor,
+     * which lifts the pin off 0 % for the first time. */
+    Fan_SetMinDutyPercent(30u);
+    assert(Fan_GetMinDutyPercent() == 30u);
+    assert(s_compare == expected_compare(30u));
+
+    /* The TEC loop's first command then lands (first-call fast path); park the
+     * floor at 0 for the ordinary slew cases below. */
+    s_tick = 600u;
     Fan_SetDutyPercent(30u);
-    assert(s_compare == expected_compare(85u));   /* one nominal step: 100-15 */
+    assert(s_compare == expected_compare(30u));
+    Fan_SetMinDutyPercent(0u);
+
+    /* A long writer gap jumps to 100 %, then the classic descent at 30 %/s
+     * over 500 ms steps: 15 % per call. */
+    s_tick += 100000u;
+    Fan_SetDutyPercent(100u);
+    assert(s_compare == expected_compare(100u));
+    s_tick += 500u; Fan_SetDutyPercent(30u);
+    assert(s_compare == expected_compare(85u));
     s_tick += 500u; Fan_SetDutyPercent(30u);
     assert(s_compare == expected_compare(70u));
     s_tick += 500u; Fan_SetDutyPercent(30u);
