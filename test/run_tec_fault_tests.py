@@ -64,6 +64,7 @@ static void LL_GPIO_ResetOutputPin(int a, int b) { (void)a; (void)b; }
 static int MCP4725_SetVoltage_mV(uint16_t mv) { (void)mv; return fail_dac; }
 static void Fan_SetEnabled(uint8_t on) { fan_enabled = on; }
 static void Fan_SetDutyPercent(uint8_t duty) { fan_duty_seen = duty; }
+static void Fan_SetDutyPercentImmediate(uint8_t duty) { fan_duty_seen = duty; }
 static uint32_t Fan_Get_LastRPM(void) { ++tach_reads; return rpm; }
 static int32_t Studio_ADC1_ReadHotMilliCelsius(void) { return hot; }
 static int32_t Studio_ADC1_ReadColdMilliCelsius(void) { return cold; }

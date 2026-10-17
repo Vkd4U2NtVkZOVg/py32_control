@@ -104,29 +104,32 @@
  * 100 % at 60 C) is 3.5 %/C - so sample noise alone can make the fan duty
  * flutter every 500 ms control cycle and the fan audibly breathe. Two
  * shaping layers are applied to the fan COMMAND only; the protection paths
- * keep working on the raw hot_mc so a real overtemp is never delayed:
+ * keep working on the raw hot_mc so a real overtemp is never delayed, and
+ * they reach the pin through tec_fan_force() rather than the shaped path:
  *   - TEC_FAN_HOT_EMA_DIV: first-order EMA divisor on the hot-side input to
- *     the fan ramp. alpha = 1/DIV; at Ts = 500 ms, DIV 16 gives a ~8 s
+ *     the fan ramp. alpha = 1/DIV; at Ts = 500 ms, DIV 8 gives a ~4 s
  *     time constant - long enough to break the thermal positive feedback
  *     while still letting a real sustained heat load ramp the fan up.
  *   - TEC_FAN_DUTY_HYSTERESIS_PCT: deadband on the commanded duty: the PWM
  *     only moves once the demand has moved more than +/- this many percent
- *     from what is actually on the pin. 5 % is ~1.4 C of hot-side movement:
+ *     from what is actually on the pin. 2 % is ~0.6 C of hot-side movement:
  *     small swings no longer move the fan, a real change still steps it
  *     (the host regression pins this boundary). */
-#define TEC_FAN_HOT_EMA_DIV           ( 16u )
-#define TEC_FAN_DUTY_HYSTERESIS_PCT   ( 5u )
+#define TEC_FAN_HOT_EMA_DIV           ( 8u )
+#define TEC_FAN_DUTY_HYSTERESIS_PCT   ( 2u )
 
-/* Cold-side control input: the same first-order EMA as the fan hot input,
- * but on the cold side, so a single noisy 12-bit ADC sample cannot shake
- * the PID (and thereby the TEC duty and the heatsink). alpha = 1/DIV; at
- * Ts = 500 ms, DIV 16 gives a ~8 s time constant. Only VALID samples update
- * the filter; the protection paths (sensor validity, dew-point floor,
- * SoC-tighten) and every PID-reset path keep using the raw sdm_mc so they
- * are never delayed or reseeded from a stale value. Kept as its own macro
- * because the PID closed loop is more sensitive to added lag than the
- * open-loop fan ramp - tune independently if needed. */
-#define TEC_COLD_EMA_DIV              ( 16u )
+/* Cold-side control input: the same first-order EMA SHAPE as the fan hot
+ * input, but tuned independently (the fan hot side is DIV 8 above), applied
+ * to the cold side so a single noisy 12-bit ADC sample cannot shake the PID
+ * (and thereby the TEC duty and the heatsink). alpha = 1/DIV; at Ts = 500 ms,
+ * DIV 16 gives a ~8 s time constant. Only VALID samples update the filter;
+ * the protection paths (sensor validity, dew-point floor, SoC-tighten) and
+ * every PID-reset path keep using the raw sdm_mc so they are never delayed,
+ * and the filter is reseeded from the real sample when a cold-sensor fault
+ * clears (see the s_cold_fault branch in TecControl_Cb). Kept as its own
+ * macro because the PID closed loop is more sensitive to added lag than the
+ * open-loop fan ramp. */
+#define TEC_COLD_EMA_DIV              ( 8u )
 
 /*============================================================================*/
 /* Configuration: snapshotted once from NVRAM at TecControl_Init().            */
@@ -342,6 +345,7 @@ static uint8_t     s_fan_started;   /* do not renew grace on each TEC enable */
 #endif /* TEC_FAN_FAULT_ENABLE */
 static uint8_t     s_dew_hold; /* latched low-output mode, 1 C release band */
 static uint8_t     s_cold_fault;    /* reset PID from real feedback on recovery */
+static uint8_t     s_hot_fault;     /* reseed the fan EMA on hot-sensor recovery */
 static int32_t     s_cold_ema;          /* EMA-smoothed cold side for the PID       */
 static uint8_t     s_cold_ema_valid;    /* first-sample seed flag for the EMA       */
 static int32_t     s_fan_hot_ema;       /* EMA-smoothed hot side for the fan ramp   */
@@ -549,9 +553,11 @@ static uint8_t tec_fan_duty_from_hot( int32_t hot_mc )
  * has been smoothed by the EMA, this band absorbs the residual 1-2 % steps
  * so the fan no longer breathes every control cycle; the duty only moves
  * when the demand really exceeds the band. The protection paths do NOT pass
- * through here: they overwrite fan_duty later in the cycle and drive the
- * fan directly. Also exposed for the host-side regression harness, which
- * asserts that an isothermal case keeps the exact pure-ramp value. */
+ * through here: they call tec_fan_force(), which drives the pin at once AND
+ * re-anchors s_fan_last_duty to the value it just wrote, so the band below
+ * always compares against the real pin state. Also exposed for the host-side
+ * regression harness, which asserts that an isothermal case keeps the exact
+ * pure-ramp value. */
 static uint8_t tec_fan_duty_hysteresis( uint8_t demand )
 {
     int32_t diff = (int32_t)demand - (int32_t)s_fan_last_duty;
@@ -561,6 +567,23 @@ static uint8_t tec_fan_duty_hysteresis( uint8_t demand )
         s_fan_last_duty = demand;
     }
     return s_fan_last_duty;
+}
+
+/* Protection-path fan write: reach the pin in THIS cycle and re-anchor the
+ * hysteresis baseline to what was just written.
+ *
+ * Two reasons this bypasses the normal path:
+ *   - Fan_SetDutyPercent() slews at FAN_RAMP_MAX_PCT_PER_S, and the control
+ *     task re-commands every control period (< 1 s), so the "writer gap"
+ *     fast path in fan.c never applies: a protection demand would crawl up
+ *     at 30 %/s (30 -> 100 % takes ~2.5 s) exactly when full airflow is the
+ *     point. Fan_SetDutyPercentImmediate() lands it now.
+ *   - s_fan_last_duty must describe the pin, otherwise the deadband above
+ *     compares against a stale value after every protection excursion. */
+static void tec_fan_force( uint8_t duty_percent )
+{
+    s_fan_last_duty = duty_percent;
+    Fan_SetDutyPercentImmediate( duty_percent );
 }
 
 /*============================================================================*/
@@ -611,22 +634,33 @@ static void TecControl_Cb( qEvent_t e )
         tec_set_enabled( 0u );
         (void)tec_dac_set( 0u );
         Fan_SetEnabled( 1u );
-        Fan_SetDutyPercent( 100u );
+        tec_fan_force( 100u );
         s_cold_fault = 1u;
         s_alarm |= TEC_ALARM_SENSOR;
         return;
     }
     if ( s_cold_fault != 0u ) {
         TecPid_Reset( &s_pid, -(float)sdm_mc );
+        /* Reseed the control filter as well: it is frozen for the whole
+         * fault (the filter is only updated from VALID samples below), so
+         * without this the PID would be reset to the real temperature and
+         * then immediately fed the pre-fault value - a measured 14 C error
+         * on the first recovery cycle, still 8 C after ~4 s. */
+        s_cold_ema       = sdm_mc;
+        s_cold_ema_valid = 1u;
         s_cold_fault = 0u;
     }
 
     /* Cold-side control input: first-order EMA on the cold side so a single
      * noisy 12-bit ADC sample cannot shake the PID (and thereby the TEC duty
-     * and the heatsink). Only VALID samples update the filter; the protection
-     * paths below - sensor validity, dew-point floor, SoC-tighten - and every
-     * PID-reset path keep using the raw sdm_mc, so they are never delayed
-     * and recovery always reseeds from the real temperature. */
+     * and the heatsink). Same filter shape as the fan hot input but tuned
+     * independently (TEC_COLD_EMA_DIV), because the closed PID loop is more
+     * sensitive to added lag than the open-loop fan ramp. Only VALID samples
+     * update the filter; the protection paths below - sensor validity,
+     * dew-point floor, SoC-tighten - and every PID-reset path keep using the
+     * raw sdm_mc so they are never delayed. Recovery from a cold-sensor fault
+     * reseeds this filter from the real sample (see the s_cold_fault branch
+     * above) so the PID does not restart against a frozen pre-fault value. */
     if ( s_cold_ema_valid == 0u ) {
         s_cold_ema       = sdm_mc;
         s_cold_ema_valid = 1u;
@@ -645,7 +679,8 @@ static void TecControl_Cb( qEvent_t e )
     if ( is_temp_valid( hot_mc ) == 0 ) {
         tec_set_enabled( 0u );
         (void)tec_dac_set( 0u );
-        Fan_SetDutyPercent( 100u );
+        tec_fan_force( 100u );
+        s_hot_fault = 1u;   /* latch: reseed the ramp EMA when the sensor returns */
         s_alarm |= TEC_ALARM_SENSOR;
         return;
     }
@@ -654,6 +689,17 @@ static void TecControl_Cb( qEvent_t e )
      * 12-bit ADC sample cannot make the fan duty flutter. Only VALID samples
      * update the filter; the protection paths above/below keep using the raw
      * hot_mc, so a real overtemp is never delayed by the filter. */
+    if ( s_hot_fault != 0u ) {
+        /* The filter was frozen for the whole fault (this branch is only
+         * reached with a valid sample, and the invalid path above returns
+         * before the update). Restart it from the real temperature instead of
+         * ramping the fan up from a pre-fault value: with hot at 50 C the
+         * stale filter commanded the base 30 % instead of the ramp's 65 %. */
+        s_hot_fault         = 0u;
+        s_fan_hot_ema       = hot_mc;
+        s_fan_hot_ema_valid = 1u;
+    }
+
     if ( s_fan_hot_ema_valid == 0u ) {
         s_fan_hot_ema       = hot_mc;
         s_fan_hot_ema_valid = 1u;
@@ -678,7 +724,7 @@ static void TecControl_Cb( qEvent_t e )
         tec_set_enabled( 0u );
         (void)tec_dac_set( 0u );
         Fan_SetEnabled( 1u );
-        Fan_SetDutyPercent( 100u );
+        tec_fan_force( 100u );
         TecPid_Reset( &s_pid, -(float)sdm_mc );
         s_alarm |= TEC_ALARM_SENSOR;
         if ( hot_mc > s_p.hot_danger_millic ) s_alarm |= TEC_ALARM_OVERTEMP;
@@ -755,7 +801,7 @@ static void TecControl_Cb( qEvent_t e )
          * dac_max_ctrl_mv, so send duty=0 only after the mapping flip. */
         tec_set_enabled( 0u );
         (void)tec_dac_set( 0u );   /* 0 duty = 0 cooling = DAC at max_ctrl (VOUT 0) */
-        Fan_SetDutyPercent( 100u );
+        tec_fan_force( 100u );
         s_alarm |= ( TEC_ALARM_OVERTEMP | TEC_ALARM_HOT_WARNING );
         return;
     }
@@ -779,7 +825,7 @@ static void TecControl_Cb( qEvent_t e )
         if ( Fan_Get_LastRPM() < (uint32_t)s_p.fan_min_rpm ) {
             tec_set_enabled( 0u );
             Fan_SetEnabled( 1u );
-            Fan_SetDutyPercent( 100u );
+            tec_fan_force( 100u );
             s_alarm |= TEC_ALARM_FAN_FAULT;
             return;
         }
@@ -848,7 +894,7 @@ static void TecControl_Cb( qEvent_t e )
         TecPid_Reset( &s_pid, -(float)sdm_mc );
         duty = 0;
         (void)tec_dac_set( 0u );   /* immediate: drop TEC drive this cycle */
-        Fan_SetDutyPercent( 100u );   /* keep the heatsink at full airflow */
+        tec_fan_force( 100u );   /* keep the heatsink at full airflow */
         return;              /* wait for current to fall below limit */
     }
 
@@ -901,7 +947,7 @@ static void TecControl_Cb( qEvent_t e )
          * cleared the EN deadband (duty >= off), so the converter never
          * switches on into the hiccup region. */
         {
-            uint16_t start_duty;
+            uint8_t start_duty;
             int dac_st;
 
             if ( s_p.dac_startup_pct >= 100 ) {
@@ -909,7 +955,7 @@ static void TecControl_Cb( qEvent_t e )
             } else if ( s_p.dac_startup_pct <= 0 ) {
                 start_duty = 0u;
             } else {
-                start_duty = (uint16_t)s_p.dac_startup_pct;
+                start_duty = (uint8_t)s_p.dac_startup_pct;
             }
             /* Forced write: the cache may not reflect the physical DAC here
              * (an earlier failed park, or an MCP4725 brown-out back to its
@@ -1017,7 +1063,7 @@ static void TecControl_Cb( qEvent_t e )
                     TecPid_Reset( &s_pid, -(float)sdm_mc );
                     (void)tec_dac_set( 0u );
                 }
-                Fan_SetDutyPercent( 100u );
+                tec_fan_force( 100u );
                 s_fan_stalled = 1u; /* held until a healthy RPM sample */
                 return;
             }
@@ -1034,7 +1080,7 @@ static void TecControl_Cb( qEvent_t e )
              * the forced startup-anchor write before asserting EN again. */
             tec_set_enabled( 0u );
             TecPid_Reset( &s_pid, -(float)sdm_mc );
-            Fan_SetDutyPercent( 100u );
+            tec_fan_force( 100u );
             s_alarm |= TEC_ALARM_DAC_FAULT;
         }
     }
@@ -1089,6 +1135,7 @@ void TecControl_Init( void )
 #endif
     s_dew_hold     = 0u;
     s_cold_fault   = 0u;
+    s_hot_fault    = 0u;
     s_cold_ema       = 0;
     s_cold_ema_valid = 0u;
     s_fan_hot_ema       = 0;

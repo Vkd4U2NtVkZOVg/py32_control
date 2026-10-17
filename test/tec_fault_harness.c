@@ -237,8 +237,9 @@ int main(int argc, char **argv)
     assert(s_tec_enabled);
 
     /* Cold-side EMA: the PID feedback follows the smoothed cold temperature,
-     * not a single noisy ADC sample (same 1/16 EMA as the fan hot input).
-     * A one-cycle 1 C spike must move the PID input by only ~1/16 of it. */
+     * not a single noisy ADC sample (TEC_COLD_EMA_DIV = 16; the fan hot-side
+     * filter is tuned separately). A one-cycle 1 C spike must move the PID
+     * input by only ~1/16 of it. */
     reset_fixture(); cold = 45000;
     for (int i = 0; i < 8; ++i) TecControl_Cb(NULL);
     assert(pid_measure == -45000.0f);              /* EMA settled at seed */
@@ -248,6 +249,34 @@ int main(int argc, char **argv)
     cold = 45000;
     for (int i = 0; i < 40; ++i) TecControl_Cb(NULL);
     assert(pid_measure > -45020.0f && pid_measure <= -45000.0f);
+
+    /* Cold-sensor fault recovery must reseed the EMA, not just the PID: the
+     * filter is frozen for the whole fault, so without the reseed the first
+     * post-recovery cycle would reset the PID to the real temperature and
+     * then immediately feed it the pre-fault value. */
+    reset_fixture(); cold = 30000;
+    for (int i = 0; i < 20; ++i) TecControl_Cb(NULL);
+    assert(pid_measure == -30000.0f);
+    cold = -40000;                                  /* open sensor, 40 cycles */
+    for (int i = 0; i < 40; ++i) TecControl_Cb(NULL);
+    cold = 45000;                                   /* recovered, really 45 C */
+    TecControl_Cb(NULL);
+    assert(reset_measure == -45000.0f);             /* PID reset from raw */
+    assert(pid_measure == -45000.0f);               /* EMA reseeded to match */
+
+    /* Same contract on the fan ramp: an invalid hot reading freezes its EMA
+     * (the fault path returns before the filter update), so recovery must
+     * reseed it or the fan restarts from a pre-fault temperature. */
+    reset_fixture(); hot = 35000;
+    for (int i = 0; i < 20; ++i) TecControl_Cb(NULL);
+    assert(fan_duty_seen == 30);                    /* base airflow */
+    hot = 200000;                                   /* out of the valid window */
+    for (int i = 0; i < 40; ++i) TecControl_Cb(NULL);
+    assert(fan_duty_seen == 100);                   /* fault: full airflow */
+    hot = 50000;                                    /* recovered: ramp says 65 */
+    TecControl_Cb(NULL);
+    assert(fan_duty_seen == tec_fan_duty_from_hot(50000));
+    assert(fan_duty_seen == 65);
 
     /* Fan noise shaping (EMA + hysteresis). With hot fixed at 42 C the pure
      * ramp gives 30 + (2/20)*70 = 37 %. A small hot-side nudge that moves
