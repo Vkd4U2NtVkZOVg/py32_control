@@ -7,9 +7,10 @@ import struct
 import sys
 import time
 
-from tres_i2c_probe import (Tres, NV_PARAMS, NV_SIGNED_SLOTS, nv_raw_to_signed,
-                            nv_slot_index, nv_value_to_raw, fmt_status, fmt_pins,
-                            TEC_FLAG_NAMES, TRES_ERR_NAMES, SDM845_STATE_NAMES)
+from tres_i2c_probe import (Tres, NV_PARAMS, NV_RANGES, NV_SIGNED_SLOTS,
+                            nv_raw_to_signed, nv_slot_index, nv_value_to_raw,
+                            fmt_status, fmt_pins, TEC_FLAG_NAMES, TRES_ERR_NAMES,
+                            SDM845_STATE_NAMES)
 
 
 
@@ -112,9 +113,21 @@ def main(argv=None):
         slot = nv_slot_index(args.slot)
         if slot < 0:
             raise ValueError('unknown parameter: ' + args.slot)
+        name = NV_PARAMS[slot][0]
         value = nv_value_to_raw(args.value, NV_PARAMS[slot][2])
-        if not 0 <= value <= 0xffffffff:
+        if value is None:
             raise ValueError('invalid parameter value')
+        # Signed slots are two's complement on the wire, so a negative decimal
+        # is legal; unsigned slots are range-checked against the firmware
+        # window when one is known (otherwise the device silently reloads the
+        # default and the write looks successful but does nothing).
+        if name in NV_SIGNED_SLOTS:
+            if not -0x80000000 <= value <= 0x7FFFFFFF:
+                raise ValueError('signed slot value out of int32 range')
+        else:
+            lo, hi = NV_RANGES.get(name, (0, 0xffffffff))
+            if not lo <= value <= hi:
+                raise ValueError('{} must be in {}..{}'.format(name, lo, hi))
     device = Tres(args.bus, args.addr)
     try:
         check_version(device)
@@ -157,8 +170,10 @@ def main(argv=None):
                 save_verified(device)
             print('restored to ' + ('FLASH (verified)' if args.save else 'RAM only'))
         elif args.action == 'set':
-            device.write_slot(slot, value)
-            if device.read_slot(slot) != value:
+            # A signed slot carries its negative value as two's complement.
+            wire = value & 0xffffffff if name in NV_SIGNED_SLOTS else value
+            device.write_slot(slot, wire)
+            if device.read_slot(slot) != wire:
                 raise RuntimeError('RAM write verification failed')
             if args.save:
                 save_verified(device)

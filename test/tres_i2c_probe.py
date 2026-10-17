@@ -150,6 +150,19 @@ NV_SIGNED_SLOTS = frozenset((
     "TEMP_VALID_MAX",
 ))
 
+# Value windows the FIRMWARE enforces. tec_params_load() replaces an
+# out-of-range value with the slot default and carries on, so an out-of-range
+# write otherwise looks like "the device silently ignored me and went back to
+# 0". Checking here turns that into an immediate local error before anything
+# is sent. Only slots with a known firmware-enforced window are listed; every
+# other slot accepts the full uint32 range.
+# Keep TARGET_OFFSET in step with TEC_TARGET_OFFSET_MAX_MILLIC in
+# Core/SRC/tec_control.c.
+NV_RANGES = {
+    # 0..20 C: how far below the dew-point floor the cold target may be aimed
+    "TARGET_OFFSET": (0, 20000),
+}
+
 
 def nv_raw_to_signed(raw):
     """Reinterpret an unsigned 32-bit slot value as a signed int32."""
@@ -179,7 +192,11 @@ def nv_value_to_raw(text, scale):
     "2.0" is treated as the float value and converted with
     raw = round(value * 65536); a plain integer literal is taken as the raw
     Q16 code already (e.g. "131072"). For all other slots the value is the
-    raw code itself (decimal or 0x-hex). Returns -1 on invalid input.
+    raw code itself (decimal or 0x-hex); signed slots may be negative and the
+    caller converts them to two's complement.
+
+    Returns None on invalid input. (It used to return -1, which collided with
+    a perfectly legal -1 for a signed slot.)
     """
     s = text.strip()
     try:
@@ -187,7 +204,7 @@ def nv_value_to_raw(text, scale):
             return int(round(float(s) * NVM_Q16_SCALE))
         return int(s, 0)
     except (ValueError, OverflowError):
-        return -1
+        return None
 
 TRES_ERR_NAMES = {0: "NONE", 1: "ILLEGAL", 2: "MAGIC", 3: "FLASH", 4: "BUSY"}
 TRES_STATE_NAMES = {
@@ -363,9 +380,14 @@ NVRAM parameter window (0x44..0xD7, 4-byte big-endian per slot):
     ENV_COMP_TEMP (mC)                ambient above this raises the target
     SOC_TIGHTEN_TEMP / SOC_TIGHTEN_DELTA (mC)  SoC compensation
     COLD_SOURCE (-)                   cold-side source: 0=TEC_COLD ADC, 1=SDM845
-    TARGET_OFFSET (mC)                0..20000 UNSIGNED; the firmware LOWERS the
-                                      cold target by this much (NTC-to-CPU gap),
-                                      which may take it below the dew floor
+    TARGET_OFFSET (mC)                UNSIGNED magnitude, 0..20000, range-checked
+                                      here before the write: the firmware LOWERS
+                                      the cold target by this much (NTC-to-CPU
+                                      gap), which may take it below the dew
+                                      floor. 0 = no compensation; the firmware
+                                      rejects anything outside 0..20000 and
+                                      falls back to 0, so this probe refuses
+                                      such a value instead of sending it
 
   Signed slots: the window is 4-byte unsigned, but TARGET_BASE,
   TEMP_VALID_MIN and TEMP_VALID_MAX are SIGNED int32 milli-degC (two's
@@ -379,6 +401,9 @@ Examples:
   python3 tres_i2c_probe.py --set COLD_SOURCE 1 --save    # SDM845, FLASH
   python3 tres_i2c_probe.py --set PID_KP 2.0 --save       # KP=2.0 (auto Q16)
   python3 tres_i2c_probe.py --set PID_KI 0.1 --save       # KI=0.1 (auto Q16)
+  python3 tres_i2c_probe.py --set TARGET_OFFSET 5000 --save  # aim the cold
+                                                 # target 5 C lower (NTC gap)
+  python3 tres_i2c_probe.py --set TARGET_OFFSET 0 --save     # no compensation
   python3 tres_i2c_probe.py --reset              # reset SDM845 (gated)
   python3 tres_i2c_probe.py --dfu                # boot DFU (gated)
   python3 tres_i2c_probe.py --params             # NVRAM SAVE round-trip
@@ -506,6 +531,21 @@ Prerequisites:
             i, name, int(disp) if scale >= 1 else disp, unit))
     print("    (Q16 slots PID_KP/KI/KD are stored as int(raw)/65536)")
     print("    (signed mC slots: {})".format(", ".join(sorted(NV_SIGNED_SLOTS))))
+    # TARGET_OFFSET is the one slot whose value is a direction as well as a
+    # magnitude, so translate it instead of leaving a bare number in the dump.
+    # (NV_SLOT_BY_NAME is keyed by the lower-case name.)
+    if "target_offset" in NV_SLOT_BY_NAME:
+        i = NV_SLOT_BY_NAME["target_offset"]
+        off = int.from_bytes(raw[i * 4:(i + 1) * 4], "big")
+        lo, hi = NV_RANGES["TARGET_OFFSET"]
+        if lo <= off <= hi:
+            print("    -> TARGET_OFFSET {:,} mC: cold target aimed {:,} mC "
+                  "BELOW its floor/base value ({} = no compensation, "
+                  "cap {} mC)".format(off, off, lo, hi))
+        else:
+            print("    -> TARGET_OFFSET {:,} mC is OUTSIDE the firmware window "
+                  "{:,}..{:,}: the firmware will have fallen back to 0 and this "
+                  "slot is mis-set".format(off, lo, hi))
 
     if args.params:
         # NVRAM persistence round-trip: pick a slot that is safe to disturb,
@@ -576,28 +616,47 @@ Prerequisites:
         slot = args.set_slot
         name, unit, scale = NV_PARAMS[slot]
         value = nv_value_to_raw(args.set[1], scale)
-        if value < 0:
+        if value is None:
             sys.exit("    FAIL: value {!r} is not a valid number for {}".format(
                 args.set[1], name))
-        if not (0 <= value <= 0xFFFFFFFF):
-            sys.exit("    FAIL: raw value {} out of range (0..0xFFFFFFFF)".format(
-                value))
+        # Signed slots are two's complement on the wire: a negative decimal
+        # such as -20000 is legal (and advertised in --help), so convert it to
+        # the uint32 that goes into the slot instead of rejecting it.
+        if name in NV_SIGNED_SLOTS:
+            if not (-0x80000000 <= value <= 0x7FFFFFFF):
+                sys.exit("    FAIL: {} = {} does not fit a signed 32-bit "
+                         "milli-degree value".format(name, value))
+            wire = value & 0xFFFFFFFF
+        else:
+            lo, hi = NV_RANGES.get(name, (0, 0xFFFFFFFF))
+            if not (lo <= value <= hi):
+                if name in NV_RANGES:
+                    sys.exit("    FAIL: {} = {} is outside the firmware window "
+                             "{:,}..{:,}; tec_params_load() would silently "
+                             "fall back to the slot default, so nothing was "
+                             "sent".format(name, value, lo, hi))
+                sys.exit("    FAIL: raw value {} out of range "
+                         "(0..0xFFFFFFFF)".format(value))
+            wire = value
         # display: Q16 slots show the float equivalent alongside the raw code
         if scale < 1:
             print("[5] set {} = {} (Q16 raw {:#x}){}".format(
-                name, value * scale, value, " " + unit))
+                name, value * scale, wire, " " + unit))
         else:
             print("[5] set {} = {} ({:#x}){}".format(
-                name, value, value, " " + unit))
+                name, value, wire, " " + unit))
 
-        t.write_slot(slot, value)
+        t.write_slot(slot, wire)
         readback = t.read_slot(slot)
-        if readback != value:
+        if readback != wire:
             sys.exit("    FAIL: write did not land in the RAM cache "
-                     "(read {} != {})".format(readback, value))
+                     "(read {} != {})".format(readback, wire))
         if scale < 1:
             print("    written to RAM cache, read back {} "
                   "(= {})".format(readback, readback * scale))
+        elif name in NV_SIGNED_SLOTS:
+            print("    written to RAM cache, read back {} ({:#x}, signed "
+                  "{})".format(readback, readback, nv_raw_to_signed(readback)))
         else:
             print("    written to RAM cache, read back {} ({:#x})".format(
                 readback, readback))
@@ -606,7 +665,7 @@ Prerequisites:
             t.write_cmd(TRES_CMD_MAGIC, TRES_CMD_SAVE_PARAMS)
             time.sleep(0.2)
             t.write_cmd(TRES_CMD_MAGIC, 6)
-            if t.read_slot(slot) != value:
+            if t.read_slot(slot) != wire:
                 sys.exit("FLASH reload mismatch")
             print("    FLASH save acknowledged and reloaded: {}".format(name))
         else:

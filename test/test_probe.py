@@ -118,11 +118,81 @@ class ProbeTests(unittest.TestCase):
         run_main(dev, '--set', '0', '1234', '--save')
         self.assertEqual(dev.flash[0], 1234)
 
+    def test_target_offset_reads_back_translated(self):
+        dev = Device()
+        slot = probe.NV_SLOT_BY_NAME['target_offset']
+        dev.ram[slot] = 5000
+        out = run_main(dev)
+        self.assertIn('TARGET_OFFSET 5,000 mC', out)
+        self.assertIn('BELOW', out)
+
+    def test_target_offset_flags_out_of_window_slot(self):
+        # A slot value the firmware would have rejected: say so instead of
+        # printing a plausible-looking compensation.
+        dev = Device()
+        slot = probe.NV_SLOT_BY_NAME['target_offset']
+        dev.ram[slot] = 30000
+        out = run_main(dev)
+        self.assertIn('OUTSIDE the firmware window', out)
+
+    def test_target_offset_set_in_range(self):
+        dev = Device()
+        slot = probe.NV_SLOT_BY_NAME['target_offset']
+        out = run_main(dev, '--set', 'TARGET_OFFSET', '5000', '--save')
+        self.assertEqual(dev.flash[slot], 5000)
+        self.assertIn('TARGET_OFFSET', out)
+
+    def test_target_offset_out_of_range_rejected_before_write(self):
+        dev = Device()
+        slot = probe.NV_SLOT_BY_NAME['target_offset']
+        before = dev.ram[slot]
+        for bad in ('20001', '-1', '100000'):
+            with self.assertRaises(SystemExit):
+                run_main(dev, '--set', 'TARGET_OFFSET', bad, '--save')
+        self.assertEqual(dev.ram[slot], before)
+        self.assertEqual(dev.flash[slot], before)
+        self.assertEqual(dev.writes, [])
+
+    def test_target_offset_bounds_are_accepted(self):
+        dev = Device()
+        slot = probe.NV_SLOT_BY_NAME['target_offset']
+        for good in ('0', '20000'):
+            run_main(dev, '--set', 'TARGET_OFFSET', good)
+            self.assertEqual(dev.ram[slot], int(good))
+
+    def test_negative_value_on_a_signed_slot(self):
+        # --help advertises "a negative decimal such as -20000"; the wire form
+        # is two's complement, so -20000 must land as 0xFFFFB1E0.
+        dev = Device()
+        slot = probe.NV_SLOT_BY_NAME['temp_valid_min']
+        run_main(dev, '--set', 'TEMP_VALID_MIN', '-20000', '--save')
+        self.assertEqual(dev.ram[slot], 0xFFFFB1E0)
+        self.assertEqual(dev.flash[slot], 0xFFFFB1E0)
+
+    def test_negative_value_rejected_on_unsigned_slot(self):
+        dev = Device()
+        slot = probe.NV_SLOT_BY_NAME['target_offset']
+        before = dev.ram[slot]
+        with self.assertRaises(SystemExit):
+            run_main(dev, '--set', 'TARGET_OFFSET', '-20000')
+        self.assertEqual(dev.ram[slot], before)
+
+    def test_unparseable_value_reports_and_writes_nothing(self):
+        dev = Device()
+        with self.assertRaises(SystemExit):
+            run_main(dev, '--set', 'TARGET_OFFSET', 'abc')
+        self.assertEqual(dev.writes, [])
+
     def test_q16_numbers(self):
         scale = 1 / 65536
         for text, expected in [('0x1e', 30), ('0xDEAD', 57005), ('2.0', 131072),
-                               ('1e-3', 66), ('131072', 131072), ('1e9999', -1)]:
+                               ('1e-3', 66), ('131072', 131072), ('1e9999', None)]:
             self.assertEqual(probe.nv_value_to_raw(text, scale), expected)
+
+    def test_negative_numbers_are_parsed_not_mistaken_for_errors(self):
+        # -1 used to be the "unparseable" sentinel, colliding with a legal -1.
+        for text, expected in [('-1', -1), ('-20000', -20000), ('0x10', 16)]:
+            self.assertEqual(probe.nv_value_to_raw(text, 1), expected)
 
 
 if __name__ == '__main__':
