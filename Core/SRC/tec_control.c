@@ -43,13 +43,16 @@
 
 #define TEC_DEW_RELEASE_MILLIC ( 1000 )
 
-/* Hard cap on NV_TEC_TARGET_OFFSET_MILLIC. The offset lowers the cold-side
- * target after the dew-point floor, i.e. it buys a deliberate excursion
- * below the dew point to compensate the NTC-to-CPU gap; 20 C is the most
- * undercut the operator may ask for. Enforced in tec_params_load(), so a
- * corrupt or mis-scaled slot (a host writing Celsius instead of milli-C, a
- * FLASH bit flip) cannot sink the target arbitrarily far below the floor.
- * The floor clamp runs before the subtraction, so this cap is also the exact
+/* Magnitude cap on NV_TEC_TARGET_OFFSET_MILLIC: the signed correction may be
+ * anywhere in [-20 C, +20 C], POSITIVE raises the cold-side target and
+ * NEGATIVE lowers it. A negative offset is what buys a deliberate excursion
+ * below the dew-point floor (to compensate an NTC that reads colder than the
+ * die), so 20 C is the most undercut the operator may ask for; a positive
+ * offset moves away from the floor and carries no condensation risk.
+ * Enforced in tec_params_load(), so a corrupt or mis-scaled slot (a host
+ * writing Celsius instead of milli-C, a FLASH bit flip) cannot move the
+ * target arbitrarily far.
+ * The floor clamp runs before the addition, so this cap is also the exact
  * bound on how far the FINAL target can sit under the dew floor. */
 #define TEC_TARGET_OFFSET_MAX_MILLIC   ( 20000 )
 
@@ -229,13 +232,14 @@ static void tec_params_load( Tec_Params_t *p )
      * compare bounded values - e.g. FAN_TEMP_BASE = 0x80000000 passes a
      * naive base<full relation but overflows the fan-ramp subtraction. */
     p->target_base_millic     = temp_param_or_default( p->target_base_millic, NV_TEC_TARGET_BASE_MILLIC );
-    /* Fixed target offset: a NON-NEGATIVE magnitude (how far to aim the
-     * cold-side target below the dew-point floor), so it gets its own
-     * 0..TEC_TARGET_OFFSET_MAX_MILLIC window instead of the signed
-     * temperature envelope. A negative or oversized value falls back to the
-     * 0 default (no compensation), exactly like a corrupt temperature slot. */
-    if ( ( p->target_offset_millic < 0 ) ||
-         ( p->target_offset_millic > TEC_TARGET_OFFSET_MAX_MILLIC ) ) {
+    /* Fixed target offset: a SIGNED correction of at most
+     * +/-TEC_TARGET_OFFSET_MAX_MILLIC (20 C). POSITIVE raises the cold-side
+     * target, NEGATIVE lowers it (a negative value is what crosses below the
+     * dew-point floor). Its own symmetric window instead of the temperature
+     * envelope, and anything outside it falls back to the 0 default (no
+     * compensation), exactly like a corrupt temperature slot. */
+    if ( ( p->target_offset_millic < -TEC_TARGET_OFFSET_MAX_MILLIC ) ||
+         ( p->target_offset_millic >  TEC_TARGET_OFFSET_MAX_MILLIC ) ) {
         p->target_offset_millic = (int32_t)NvParams_GetDefault( NV_TEC_TARGET_OFFSET_MILLIC );
     }
     p->hot_overtemp_millic    = temp_param_or_default( p->hot_overtemp_millic, NV_TEC_HOT_OVERTEMP_MILLIC );
@@ -772,10 +776,11 @@ static void TecControl_Cb( qEvent_t e )
      *                      is only known in section 4 (it needs the AHT20
      *                      sample), so target_mc is assigned there; this
      *                      branch deliberately leaves it untouched.
-     * The fixed NTC-to-CPU offset (4b) applies to BOTH modes. Because it is
-     * subtracted after the floor, a non-zero offset also takes the final
-     * target below the dew-point floor - i.e. configuring an offset is what
-     * crosses the dew-point protection, by design. */
+     * The fixed NTC-to-CPU offset (4b) applies to BOTH modes: positive raises
+     * the target, negative lowers it. Because it is applied after the floor, a
+     * NEGATIVE offset also takes the final target below the dew-point floor -
+     * i.e. configuring a negative offset is what crosses the dew-point
+     * protection, by design. */
     if ( s_p.target_base_millic != 0 ) {
         target_mc = s_p.target_base_millic;
         if ( env_mc > s_p.env_comp_temp_millic ) {
@@ -852,20 +857,21 @@ static void TecControl_Cb( qEvent_t e )
         if (s_dew_hold) s_alarm |= TEC_ALARM_DEWPOINT;
     }
 
-    /*--- 4b. fixed NTC-to-CPU target offset (bounded below-dew allowance) --*/
-    /* The cold-side NTC sits on the cold plate, not on the die, so the die
-     * runs hotter than this sensor reads; compensating for that gap means
-     * aiming the MEASURED target LOWER by the gap, hence the subtraction.
-     * Being applied after the dew-point floor (in BOTH target modes), this is
-     * also what lets a configured offset cross below the floor: with
-     * TARGET_OFFSET == 0 the floor is a hard limit, with it non-zero the
+    /*--- 4b. fixed NTC-to-CPU target offset (SIGNED, +/-20 C) --------------*/
+    /* POSITIVE raises the cold-side target, NEGATIVE lowers it. The cold-side
+     * NTC sits on the cold plate, not on the die, so the die runs hotter than
+     * this sensor reads; to make the DIE hold its setpoint the plate has to be
+     * aimed lower, i.e. the usual NTC-to-CPU correction is NEGATIVE.
+     * Being applied after the dew-point floor (in BOTH target modes), a
+     * negative offset is also what lets the operator cross below the floor:
+     * with TARGET_OFFSET >= 0 the floor is a hard limit, with it negative the
      * final target sits up to TEC_TARGET_OFFSET_MAX_MILLIC under the floor.
-     * That excursion is BOUNDED by tec_params_load(), and the DEWPOINT alarm
-     * still asserts so the host can see it - only the floor itself is
-     * crossed, not the visibility.
+     * The excursion is BOUNDED by tec_params_load() and the DEWPOINT alarm
+     * still asserts, so only the clamping action is bypassed, not the
+     * visibility. A positive offset moves away from the floor.
      * The hot-side foldback is NOT reachable from here: its lift is added
      * afterwards in 4c, so the derating always survives. */
-    target_mc -= s_p.target_offset_millic;
+    target_mc += s_p.target_offset_millic;
 
     /*--- 4c. apply the foldback lift (never cancellable) -------------------*/
     if ( hot_lift > 0 ) {

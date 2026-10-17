@@ -118,16 +118,18 @@ def main(argv=None):
         if value is None:
             raise ValueError('invalid parameter value')
         # Signed slots are two's complement on the wire, so a negative decimal
-        # is legal; unsigned slots are range-checked against the firmware
-        # window when one is known (otherwise the device silently reloads the
-        # default and the write looks successful but does nothing).
-        if name in NV_SIGNED_SLOTS:
+        # is legal. Slots with a known firmware window (signed or not) are
+        # range-checked too, otherwise the device silently reloads the default
+        # and the write looks successful but does nothing.
+        is_signed = name in NV_SIGNED_SLOTS
+        if is_signed:
             if not -0x80000000 <= value <= 0x7FFFFFFF:
                 raise ValueError('signed slot value out of int32 range')
+            lo, hi = NV_RANGES.get(name, (-0x80000000, 0x7FFFFFFF))
         else:
             lo, hi = NV_RANGES.get(name, (0, 0xffffffff))
-            if not lo <= value <= hi:
-                raise ValueError('{} must be in {}..{}'.format(name, lo, hi))
+        if not lo <= value <= hi:
+            raise ValueError('{} must be in {}..{}'.format(name, lo, hi))
     device = Tres(args.bus, args.addr)
     try:
         check_version(device)

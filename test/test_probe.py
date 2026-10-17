@@ -121,10 +121,18 @@ class ProbeTests(unittest.TestCase):
     def test_target_offset_reads_back_translated(self):
         dev = Device()
         slot = probe.NV_SLOT_BY_NAME['target_offset']
+        dev.ram[slot] = 0xFFFFEC78          # -5000 in two's complement
+        out = run_main(dev)
+        self.assertIn('TARGET_OFFSET -5,000 mC', out)
+        self.assertIn('LOWERED', out)
+
+    def test_target_offset_positive_raises(self):
+        dev = Device()
+        slot = probe.NV_SLOT_BY_NAME['target_offset']
         dev.ram[slot] = 5000
         out = run_main(dev)
         self.assertIn('TARGET_OFFSET 5,000 mC', out)
-        self.assertIn('BELOW', out)
+        self.assertIn('RAISED', out)
 
     def test_target_offset_flags_out_of_window_slot(self):
         # A slot value the firmware would have rejected: say so instead of
@@ -138,15 +146,15 @@ class ProbeTests(unittest.TestCase):
     def test_target_offset_set_in_range(self):
         dev = Device()
         slot = probe.NV_SLOT_BY_NAME['target_offset']
-        out = run_main(dev, '--set', 'TARGET_OFFSET', '5000', '--save')
-        self.assertEqual(dev.flash[slot], 5000)
+        out = run_main(dev, '--set', 'TARGET_OFFSET', '-5000', '--save')
+        self.assertEqual(dev.flash[slot], 0xFFFFEC78)   # two's complement
         self.assertIn('TARGET_OFFSET', out)
 
     def test_target_offset_out_of_range_rejected_before_write(self):
         dev = Device()
         slot = probe.NV_SLOT_BY_NAME['target_offset']
         before = dev.ram[slot]
-        for bad in ('20001', '-1', '100000'):
+        for bad in ('20001', '-20001', '100000', '-100000'):
             with self.assertRaises(SystemExit):
                 run_main(dev, '--set', 'TARGET_OFFSET', bad, '--save')
         self.assertEqual(dev.ram[slot], before)
@@ -156,9 +164,9 @@ class ProbeTests(unittest.TestCase):
     def test_target_offset_bounds_are_accepted(self):
         dev = Device()
         slot = probe.NV_SLOT_BY_NAME['target_offset']
-        for good in ('0', '20000'):
+        for good, wire in (('0', 0), ('20000', 20000), ('-20000', 0xFFFFB1E0)):
             run_main(dev, '--set', 'TARGET_OFFSET', good)
-            self.assertEqual(dev.ram[slot], int(good))
+            self.assertEqual(dev.ram[slot], wire)
 
     def test_negative_value_on_a_signed_slot(self):
         # --help advertises "a negative decimal such as -20000"; the wire form
@@ -170,11 +178,13 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(dev.flash[slot], 0xFFFFB1E0)
 
     def test_negative_value_rejected_on_unsigned_slot(self):
+        # EN_OFF_PCT is an unsigned percentage: a negative value must not reach
+        # the device (it would otherwise be reinterpreted as two's complement).
         dev = Device()
-        slot = probe.NV_SLOT_BY_NAME['target_offset']
+        slot = probe.NV_SLOT_BY_NAME['en_off_pct']
         before = dev.ram[slot]
         with self.assertRaises(SystemExit):
-            run_main(dev, '--set', 'TARGET_OFFSET', '-20000')
+            run_main(dev, '--set', 'EN_OFF_PCT', '-8')
         self.assertEqual(dev.ram[slot], before)
 
     def test_unparseable_value_reports_and_writes_nothing(self):

@@ -129,9 +129,8 @@ NV_PARAMS = [
     ("HOT_FB_MAX", "mC", 1),   # hot foldback: max cold-target lift
     ("FF_ENABLE", "-", 1),     # feedforward master switch: 0 = PID only
     ("EN_OFF_PCT", "%", 1),    # anti-hiccup deadband: duty below this drops TEC_VEN
-    ("TARGET_OFFSET", "mC", 1), # NTC-to-CPU gap: UNSIGNED 0..20000, LOWERS the
-                                # target by this much (firmware applies the
-                                # direction); may take it below the dew floor
+    ("TARGET_OFFSET", "mC", 1), # SIGNED +/-20000: POSITIVE lowers the cold target
+                                # (below the dew floor), NEGATIVE raises it
 ]
 
 # Slot name -> index, case-insensitive (e.g. "target_base", "TARGET_BASE").
@@ -148,6 +147,7 @@ NV_SIGNED_SLOTS = frozenset((
     "TARGET_BASE",
     "TEMP_VALID_MIN",
     "TEMP_VALID_MAX",
+    "TARGET_OFFSET",
 ))
 
 # Value windows the FIRMWARE enforces. tec_params_load() replaces an
@@ -155,12 +155,14 @@ NV_SIGNED_SLOTS = frozenset((
 # write otherwise looks like "the device silently ignored me and went back to
 # 0". Checking here turns that into an immediate local error before anything
 # is sent. Only slots with a known firmware-enforced window are listed; every
-# other slot accepts the full uint32 range.
+# other slot accepts the full uint32 range (or the full int32 range when it is
+# a signed slot).
 # Keep TARGET_OFFSET in step with TEC_TARGET_OFFSET_MAX_MILLIC in
 # Core/SRC/tec_control.c.
 NV_RANGES = {
-    # 0..20 C: how far below the dew-point floor the cold target may be aimed
-    "TARGET_OFFSET": (0, 20000),
+    # +/-20 C: how far the cold target may be moved below (positive) or above
+    # (negative) its floor/base value
+    "TARGET_OFFSET": (-20000, 20000),
 }
 
 
@@ -381,14 +383,15 @@ NVRAM parameter window (0x44..0xD7, 4-byte big-endian per slot):
     ENV_COMP_TEMP (mC)                ambient above this raises the target
     SOC_TIGHTEN_TEMP / SOC_TIGHTEN_DELTA (mC)  SoC compensation
     COLD_SOURCE (-)                   cold-side source: 0=TEC_COLD ADC, 1=SDM845
-    TARGET_OFFSET (mC)                UNSIGNED magnitude, 0..20000, range-checked
-                                      here before the write: the firmware LOWERS
-                                      the cold target by this much (NTC-to-CPU
-                                      gap), which may take it below the dew
-                                      floor. 0 = no compensation; the firmware
-                                      rejects anything outside 0..20000 and
-                                      falls back to 0, so this probe refuses
-                                      such a value instead of sending it
+    TARGET_OFFSET (mC)                SIGNED, -20000..+20000, range-checked here
+                                      before the write: POSITIVE raises the cold
+                                      target, NEGATIVE lowers it (the usual
+                                      NTC-to-CPU correction, and the only
+                                      direction that may cross below the dew
+                                      floor). 0 = no compensation; the firmware
+                                      rejects anything outside +/-20000 and falls
+                                      back to 0, so this probe refuses such a
+                                      value instead of sending it
 
   Signed slots: the window is 4-byte unsigned, but TARGET_BASE,
   TEMP_VALID_MIN and TEMP_VALID_MAX are SIGNED int32 milli-degC (two's
@@ -402,9 +405,10 @@ Examples:
   python3 tres_i2c_probe.py --set COLD_SOURCE 1 --save    # SDM845, FLASH
   python3 tres_i2c_probe.py --set PID_KP 2.0 --save       # KP=2.0 (auto Q16)
   python3 tres_i2c_probe.py --set PID_KI 0.1 --save       # KI=0.1 (auto Q16)
-  python3 tres_i2c_probe.py --set TARGET_OFFSET 5000 --save  # aim the cold
-                                                 # target 5 C lower (NTC gap)
-  python3 tres_i2c_probe.py --set TARGET_OFFSET 0 --save     # no compensation
+  python3 tres_i2c_probe.py --set TARGET_OFFSET -5000 --save  # aim the cold
+                                                 # target 5 C LOWER (NTC gap)
+  python3 tres_i2c_probe.py --set TARGET_OFFSET 5000 --save   # 5 C HIGHER
+  python3 tres_i2c_probe.py --set TARGET_OFFSET 0 --save      # no compensation
   python3 tres_i2c_probe.py --reset              # reset SDM845 (gated)
   python3 tres_i2c_probe.py --dfu                # boot DFU (gated)
   python3 tres_i2c_probe.py --params             # NVRAM SAVE round-trip
@@ -537,12 +541,19 @@ Prerequisites:
     # (NV_SLOT_BY_NAME is keyed by the lower-case name.)
     if "target_offset" in NV_SLOT_BY_NAME:
         i = NV_SLOT_BY_NAME["target_offset"]
-        off = int.from_bytes(raw[i * 4:(i + 1) * 4], "big")
+        off = nv_raw_to_signed(int.from_bytes(raw[i * 4:(i + 1) * 4], "big"))
         lo, hi = NV_RANGES["TARGET_OFFSET"]
         if lo <= off <= hi:
-            print("    -> TARGET_OFFSET {:,} mC: cold target aimed {:,} mC "
-                  "BELOW its floor/base value ({} = no compensation, "
-                  "cap {} mC)".format(off, off, lo, hi))
+            if off == 0:
+                what = "no compensation"
+            elif off > 0:
+                what = ("cold target RAISED {:,.0f} C above its floor/base value"
+                        .format(off / 1000))
+            else:
+                what = ("cold target LOWERED {:,.0f} C below its floor/base "
+                        "value (-ve crosses the dew floor)".format(-off / 1000))
+            print("    -> TARGET_OFFSET {:,} mC: {} (window {:,}..{:,})".format(
+                off, what, lo, hi))
         else:
             print("    -> TARGET_OFFSET {:,} mC is OUTSIDE the firmware window "
                   "{:,}..{:,}: the firmware will have fallen back to 0 and this "
@@ -622,23 +633,26 @@ Prerequisites:
                 args.set[1], name))
         # Signed slots are two's complement on the wire: a negative decimal
         # such as -20000 is legal (and advertised in --help), so convert it to
-        # the uint32 that goes into the slot instead of rejecting it.
-        if name in NV_SIGNED_SLOTS:
+        # the uint32 that goes into the slot instead of rejecting it. Signed
+        # slots can also carry a firmware window (TARGET_OFFSET: +/-20 C), so
+        # the window check below applies to both kinds.
+        is_signed = name in NV_SIGNED_SLOTS
+        if is_signed:
             if not (-0x80000000 <= value <= 0x7FFFFFFF):
                 sys.exit("    FAIL: {} = {} does not fit a signed 32-bit "
                          "milli-degree value".format(name, value))
-            wire = value & 0xFFFFFFFF
+            lo, hi = NV_RANGES.get(name, (-0x80000000, 0x7FFFFFFF))
         else:
             lo, hi = NV_RANGES.get(name, (0, 0xFFFFFFFF))
-            if not (lo <= value <= hi):
-                if name in NV_RANGES:
-                    sys.exit("    FAIL: {} = {} is outside the firmware window "
-                             "{:,}..{:,}; tec_params_load() would silently "
-                             "fall back to the slot default, so nothing was "
-                             "sent".format(name, value, lo, hi))
-                sys.exit("    FAIL: raw value {} out of range "
-                         "(0..0xFFFFFFFF)".format(value))
-            wire = value
+        if not (lo <= value <= hi):
+            if name in NV_RANGES:
+                sys.exit("    FAIL: {} = {} is outside the firmware window "
+                         "{:,}..{:,}; tec_params_load() would silently "
+                         "fall back to the slot default, so nothing was "
+                         "sent".format(name, value, lo, hi))
+            sys.exit("    FAIL: raw value {} out of range "
+                     "(0..0xFFFFFFFF)".format(value))
+        wire = (value & 0xFFFFFFFF) if is_signed else value
         # display: Q16 slots show the float equivalent alongside the raw code
         if scale < 1:
             print("[5] set {} = {} (Q16 raw {:#x}){}".format(

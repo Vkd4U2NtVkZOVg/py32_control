@@ -256,15 +256,15 @@ int main(int argc, char **argv)
 
     /* TARGET_BASE == 0 is a MODE SELECTOR ("track the dew point"): the target
      * IS the dew-point floor (dew + margin), with no environment/SoC
-     * compensation on top, and TARGET_OFFSET still applies afterwards so a
-     * non-zero offset crosses the floor. */
+     * compensation on top, and TARGET_OFFSET still applies afterwards (a
+     * NEGATIVE offset is what crosses below the floor). */
     reset_fixture(); cold = 60000; dew = 50000;      /* floor = 52000 */
     s_p.target_base_millic = 0;
     s_p.target_offset_millic = 0;
     s_p.env_comp_temp_millic = 20000;                /* would add 20 C if used */
     TecControl_Cb(NULL);
     assert(target_mc == 52000);                      /* exactly the floor */
-    s_p.target_offset_millic = 5000;
+    s_p.target_offset_millic = -5000;
     TecControl_Cb(NULL);
     assert(target_mc == 47000);                      /* offset crosses the floor */
 
@@ -273,7 +273,7 @@ int main(int argc, char **argv)
      * become a full-cooling command). */
     dew = INT32_MIN;                                 /* "no sample" sentinel */
     for (int i = 0; i < 3; ++i) TecControl_Cb(NULL);
-    assert(target_mc == 52000 - 5000);
+    assert(target_mc == 52000 - 5000);               /* holds floor, offset kept */
     assert(s_alarm & TEC_ALARM_SENSOR);
 
     /* And before the very first valid sample the seed is "no cooling", so a
@@ -297,18 +297,25 @@ int main(int argc, char **argv)
      * the firmware SUBTRACTS - it buys a bounded excursion below the dew-point
      * floor rather than raising the target. Floor here is dew(50000) +
      * margin(2000) = 52000, above the 45000 base target, so the floor clamp
-     * sets 52000 first; the offset then subtracts from that.
-     * 0 keeps the legacy behaviour. */
+     * sets 52000 first; the offset is then ADDED, POSITIVE raising the target
+     * and NEGATIVE lowering it (a negative value is what crosses below the
+     * floor). 0 keeps the legacy behaviour. */
     reset_fixture(); cold = 12000; dew = 50000;
     s_p.target_offset_millic = 0;
     for (int i = 0; i < 3; ++i) TecControl_Cb(NULL);
     assert(s_dew_hold && target_mc == 52000);        /* legacy: target == floor */
-    s_p.target_offset_millic = 5000;
+    s_p.target_offset_millic = 5000;                 /* POSITIVE: raise */
     for (int i = 0; i < 3; ++i) TecControl_Cb(NULL);
-    assert(s_dew_hold && target_mc == 47000);        /* 5 C BELOW the floor */
-    s_p.target_offset_millic = TEC_TARGET_OFFSET_MAX_MILLIC;
+    assert(s_dew_hold && target_mc == 57000);
+    s_p.target_offset_millic = -5000;                /* NEGATIVE: lower, crosses */
+    for (int i = 0; i < 3; ++i) TecControl_Cb(NULL);
+    assert(s_dew_hold && target_mc == 47000);
+    s_p.target_offset_millic = -TEC_TARGET_OFFSET_MAX_MILLIC;
     for (int i = 0; i < 3; ++i) TecControl_Cb(NULL);
     assert(target_mc == 52000 - TEC_TARGET_OFFSET_MAX_MILLIC);   /* cap = 20 C */
+    s_p.target_offset_millic = TEC_TARGET_OFFSET_MAX_MILLIC;
+    for (int i = 0; i < 3; ++i) TecControl_Cb(NULL);
+    assert(target_mc == 52000 + TEC_TARGET_OFFSET_MAX_MILLIC);   /* +20 C cap */
 
     /* The hot-side foldback lift is applied AFTER the offset, so no target
      * offset can cancel the heatsink derating. hot 85000 is 5 C above the
@@ -317,7 +324,7 @@ int main(int argc, char **argv)
     s_p.target_offset_millic = 0;
     for (int i = 0; i < 3; ++i) TecControl_Cb(NULL);
     assert((s_alarm & TEC_ALARM_HOT_WARNING) && target_mc == 55000);
-    s_p.target_offset_millic = TEC_TARGET_OFFSET_MAX_MILLIC;
+    s_p.target_offset_millic = -TEC_TARGET_OFFSET_MAX_MILLIC;
     for (int i = 0; i < 3; ++i) TecControl_Cb(NULL);
     assert((s_alarm & TEC_ALARM_HOT_WARNING) && target_mc == 35000);
     /* Undo the offset again: the lift is still exactly the full 10000, i.e.
@@ -326,18 +333,25 @@ int main(int argc, char **argv)
     for (int i = 0; i < 3; ++i) TecControl_Cb(NULL);
     assert(target_mc == 55000);
 
-    /* Range gate: below 0 or above the cap falls back to the 0 default, so a
-     * corrupt/misscaled slot cannot sink the target arbitrarily. */
+    /* Range gate: +/-20 C is the accepted window; anything outside falls back
+     * to the 0 default, so a corrupt/misscaled slot cannot move the target
+     * arbitrarily. */
     params[NV_TEC_TARGET_OFFSET_MILLIC] = 0u;
     tec_params_load(&s_p);
     assert(s_p.target_offset_millic == 0);
     params[NV_TEC_TARGET_OFFSET_MILLIC] = TEC_TARGET_OFFSET_MAX_MILLIC;
     tec_params_load(&s_p);
     assert(s_p.target_offset_millic == TEC_TARGET_OFFSET_MAX_MILLIC);
-    params[NV_TEC_TARGET_OFFSET_MILLIC] = (uint32_t)(int32_t)-1;   /* -1 */
+    params[NV_TEC_TARGET_OFFSET_MILLIC] = (uint32_t)(int32_t)(-TEC_TARGET_OFFSET_MAX_MILLIC);
+    tec_params_load(&s_p);
+    assert(s_p.target_offset_millic == -TEC_TARGET_OFFSET_MAX_MILLIC);
+    params[NV_TEC_TARGET_OFFSET_MILLIC] = (uint32_t)(int32_t)-1;   /* -1 is legal */
+    tec_params_load(&s_p);
+    assert(s_p.target_offset_millic == -1);
+    params[NV_TEC_TARGET_OFFSET_MILLIC] = TEC_TARGET_OFFSET_MAX_MILLIC + 1u;
     tec_params_load(&s_p);
     assert(s_p.target_offset_millic == 0);
-    params[NV_TEC_TARGET_OFFSET_MILLIC] = TEC_TARGET_OFFSET_MAX_MILLIC + 1u;
+    params[NV_TEC_TARGET_OFFSET_MILLIC] = (uint32_t)(int32_t)(-TEC_TARGET_OFFSET_MAX_MILLIC - 1);
     tec_params_load(&s_p);
     assert(s_p.target_offset_millic == 0);
 

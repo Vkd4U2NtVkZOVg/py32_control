@@ -71,10 +71,10 @@ extern "C" {
  * casts the uint32 back to int32). A host must reinterpret those slots as
  * signed: reading TEMP_VALID_MIN's default 0xFFFFB1E0 as 4294947296 instead
  * of -20000 is the classic mistake. The affected slots are TARGET_BASE,
- * TEMP_VALID_MIN and TEMP_VALID_MAX - the latter two hold negative
- * temperatures by definition, TARGET_BASE is signed for symmetry.
- * TARGET_OFFSET is deliberately NOT one of them: it is an unsigned magnitude
- * and the firmware applies the (downward) direction itself.
+ * TEMP_VALID_MIN, TEMP_VALID_MAX and TARGET_OFFSET - the middle two hold
+ * negative temperatures by definition, TARGET_BASE is signed for symmetry,
+ * and TARGET_OFFSET is a signed +/-20 C correction (positive raises the
+ * target, negative lowers it).
  * test/tres_i2c_probe.py keeps the matching NV_SIGNED_SLOTS list.
  */
 typedef enum {
@@ -179,27 +179,27 @@ typedef enum {
                                             Default 8 % ~= 0.5 V on the 6 V TEC;
                                             bench-calibrate the boundary.        */
     NV_TEC_TARGET_OFFSET_MILLIC,       /**< fixed cold-target offset, milli-degC.
-                                            UNSIGNED magnitude, default 0, valid
-                                            0..20000 (TEC_TARGET_OFFSET_MAX_MILLIC).
-                                            The NTC sits on the cold plate, not on
-                                            the die, so the die runs hotter than
-                                            this sensor reads. The firmware
-                                            compensates by LOWERING the cold-side
-                                            target by exactly this amount
-                                            (target_mc -= offset): a value of
-                                            5000 aims the measured target 5 C
-                                            BELOW where it would otherwise sit.
-                                            Direction is the firmware's job -
-                                            enter a magnitude only; a negative
-                                            value is out of range and falls back
-                                            to 0.
-                                            Applied AFTER the dew-point floor, so
-                                            it may also take the target below that
-                                            floor; the 0..20000 range bounds that
-                                            excursion to at most 20 C.
-                                            The hot-side foldback lift is added
-                                            AFTER it, so this slot can never
-                                            cancel the heatsink derating.          */
+                                            SIGNED, default 0, valid
+                                            -20000..+20000
+                                            (TEC_TARGET_OFFSET_MAX_MILLIC).
+                                            POSITIVE RAISES the cold-side target
+                                            by that much; NEGATIVE LOWERS it.
+                                            The NTC sits on the cold plate, not
+                                            on the die, so the die runs hotter
+                                            than this sensor reads - making the
+                                            plate hold a lower temperature is
+                                            what brings the DIE to its setpoint,
+                                            so the usual correction is NEGATIVE
+                                            (e.g. -5000 aims the measured target
+                                            5 C lower). Only a negative value can
+                                            cross below the dew-point floor; the
+                                            20 C cap bounds that excursion.
+                                            Applied AFTER the dew-point floor in
+                                            both target modes; the hot-side
+                                            foldback lift is added after it, so
+                                            this slot can never cancel the
+                                            heatsink derating.
+                                            Out-of-range values fall back to 0.  */
     NV_PARAM_COUNT_MARKER,             /**< sentinel: MUST stay last. NVM_PARAM_COUNT
                                             is derived from it, so adding a slot
                                             is just adding a line above.         */
