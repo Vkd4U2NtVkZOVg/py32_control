@@ -127,9 +127,9 @@ static void nv_cache_bump( void )
  * is stored as-is, with float gains in Q16; scale back with
  * (float)value / NVM_Q16_SCALE. */
 static const uint32_t s_defaults[ NVM_PARAM_COUNT ] = {
-    [NV_TEC_PID_KP_Q16]                = NVM_Q16( 0.1f ),
-    [NV_TEC_PID_KI_Q16]                = NVM_Q16( 0.1f ),
-    [NV_TEC_PID_KD_Q16]                = NVM_Q16( 0.1f ),
+    [NV_TEC_PID_KP_Q16]                = NVM_Q16( 0.01f ),
+    [NV_TEC_PID_KI_Q16]                = NVM_Q16( 0.01f ),
+    [NV_TEC_PID_KD_Q16]                = NVM_Q16( 0.25f ),
     [NV_TEC_TARGET_BASE_MILLIC]        = 45000u,
     [NV_TEC_HOT_OVERTEMP_MILLIC]       = 80000u,
     [NV_TEC_HOT_DANGER_MILLIC]         = 90000u,
