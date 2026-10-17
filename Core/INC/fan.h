@@ -20,12 +20,20 @@
  * applies to them and the protection demand would crawl up at 30 %/s
  * (30 -> 100 % takes ~2.5 s) exactly when full airflow is the point.
  *
- * Fan power rail: the high-speed fan's driver IC requires >50 % PWM on its
- * first application, otherwise it stays latched-off with no response.
- * Fan_Init() therefore powers the rail (FAN_PWR_EN, active-high) AND writes
- * 100 % duty, then blocks for FAN_STARTUP_KICK_MS so the fan spins up and
- * the driver unlatches BEFORE the TEC task first commands a (possibly low)
- * duty. QuarkTS has not started yet, so the blocking delay is safe here.
+ * Fan power rail and duty floor:
+ *  - The high-speed fan's driver IC only needs >50 % PWM at RAIL POWER-UP;
+ *    once it has unlatched the duty can be taken all the way down to 1 %.
+ *    Fan_Init() therefore powers the rail (FAN_PWR_EN, active-high) and
+ *    presents 100 %, then blocks for FAN_STARTUP_KICK_MS so the driver
+ *    unlatches before any task commands a low duty. QuarkTS has not started
+ *    yet, so that blocking delay is safe.
+ *  - After power-up the fan must NEVER be commanded below the base airflow
+ *    from NV_TEC_FAN_DUTY_BASE. That floor lives here, not at the call sites:
+ *    Fan_SetMinDutyPercent() is refreshed from NVRAM whenever the TEC
+ *    parameters load, and every duty writer clamps to it, so no path (TEC
+ *    ramp, protection, boot FSM, a future caller) can stop the fan by
+ *    accident. 0 % is therefore unreachable through the duty API - only
+ *    Fan_SetEnabled(0), which nothing in the firmware calls, parks the pin.
  */
 #ifndef __FAN_H__
 #define __FAN_H__
@@ -55,6 +63,14 @@ extern "C" {
 #ifndef FAN_RAMP_MAX_PCT_PER_S
 #define FAN_RAMP_MAX_PCT_PER_S    (30u)
 #endif
+/* Nominal writer period, used only for the ONE step taken immediately after
+ * the Fan_Init() kick: the first post-kick write is treated as if a control
+ * period had elapsed, so the fan starts gliding down at once instead of
+ * waiting a period (or - worse - jumping straight to a low duty). Matches the
+ * default NV_TEC_CONTROL_PERIOD_MS. */
+#ifndef FAN_RAMP_STEP_MS
+#define FAN_RAMP_STEP_MS          (500u)
+#endif
 /* Startup kick: how long Fan_Init() holds the fan at 100 % duty after
  * powering the rail, to unlatch the high-speed fan driver. Tune on the bench:
  * too short = the driver stays latched off (no response); longer than needed
@@ -69,8 +85,10 @@ extern "C" {
 #endif
 
 void Fan_Init(void);
-void fan_pwr_enable(uint8_t on);
 void Fan_SetEnabled(uint8_t enabled);
+/** Lowest duty any writer may command (the NVRAM base airflow). */
+void Fan_SetMinDutyPercent(uint8_t pct);
+uint8_t Fan_GetMinDutyPercent(void);
 void Fan_SetDutyPercent(uint8_t duty_percent);
 void Fan_SetDutyPercentImmediate(uint8_t duty_percent);
 uint8_t Fan_GetDutyPercent(void);

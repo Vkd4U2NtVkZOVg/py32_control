@@ -121,15 +121,15 @@ void Studio_GPIO_Init(void)
   LL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /* Fan power rail enable (FAN_PWR_EN, PA11): push-pull output, default OFF
-   * so the fan is unpowered until Fan_Init() runs its startup kick. */
+   * so the fan is unpowered until Fan_Init() runs its startup kick. A pull
+   * resistor is meaningless on a driven push-pull output, so PULL_NO. */
   LL_GPIO_ResetOutputPin( GPIOA, FAN_PWR_EN_Pin );
   GPIO_InitStruct.Pin = FAN_PWR_EN_Pin;
   GPIO_InitStruct.Mode = LL_GPIO_MODE_OUTPUT;
-  GPIO_InitStruct.Pull = LL_GPIO_PULL_DOWN;
+  GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
   GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_LOW;
   GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
   LL_GPIO_Init( GPIOA, &GPIO_InitStruct );
-  
   LL_GPIO_ResetOutputPin(GPIOB, TRES_BOOT0_Pin|TRES_PWR_EN_Pin);
   GPIO_InitStruct.Pin = TRES_BOOT0_Pin|TRES_PWR_EN_Pin;
   GPIO_InitStruct.Mode = LL_GPIO_MODE_OUTPUT;

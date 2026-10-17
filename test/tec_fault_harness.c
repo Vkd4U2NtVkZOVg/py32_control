@@ -42,6 +42,9 @@ int main(int argc, char **argv)
         return 0;
     }
     reset_fixture();
+    /* The NVRAM base airflow must be published as the fan's duty floor on
+     * every parameter load (boot and live reload alike). */
+    assert(fan_min_duty == 30);
     adc_code = 4000;
     assert(Studio_ADC1_ReadCurrentMilliamp(&ma) == 1);
     assert(ma == 3516);   /* ADC=4000, NVRAM divider 1:2 (div-calibration fix) */

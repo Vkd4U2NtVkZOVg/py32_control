@@ -53,7 +53,7 @@ static int fail_dac, demand = 50;
 static int32_t hot = 35000, dew = 10000;
 static float tracked_output;
 static float pid_measure;    /* cold sample fed to TecPid_Update (EMA-smoothed) */
-static uint8_t adc_ok = 1, fan_duty_seen, fan_enabled;
+static uint8_t adc_ok = 1, fan_duty_seen, fan_enabled, fan_min_duty;
 static uint16_t adc_code = 0;
 static uint32_t params[NVM_PARAM_COUNT];
 static uint32_t nv_cache_gen;   /* stands in for NvParams_GetCacheGeneration() */
@@ -65,6 +65,8 @@ static int MCP4725_SetVoltage_mV(uint16_t mv) { (void)mv; return fail_dac; }
 static void Fan_SetEnabled(uint8_t on) { fan_enabled = on; }
 static void Fan_SetDutyPercent(uint8_t duty) { fan_duty_seen = duty; }
 static void Fan_SetDutyPercentImmediate(uint8_t duty) { fan_duty_seen = duty; }
+static void Fan_SetMinDutyPercent(uint8_t pct) { fan_min_duty = pct; }
+static uint8_t Fan_GetMinDutyPercent(void) { return fan_min_duty; }
 static uint32_t Fan_Get_LastRPM(void) { ++tach_reads; return rpm; }
 static int32_t Studio_ADC1_ReadHotMilliCelsius(void) { return hot; }
 static int32_t Studio_ADC1_ReadColdMilliCelsius(void) { return cold; }

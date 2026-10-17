@@ -346,6 +346,13 @@ static void tec_params_load( Tec_Params_t *p )
         p->hot_fb_gain_q16   = NvParams_GetDefault( NV_TEC_HOT_FB_GAIN_Q16 );
         p->hot_fb_max_millic = (int32_t)NvParams_GetDefault( NV_TEC_HOT_FB_MAX_MILLIC );
     }
+
+    /* Publish the base airflow as the fan's duty floor. Fan_SetDutyPercent()
+     * clamps every writer to it, so no path can stop the fan: NV_TEC_FAN_DUTY_BASE
+     * is the minimum speed the fan must keep in every operating state. Done
+     * here because this is the one place that holds the validated value, and
+     * it runs on both the boot load and every live NVRAM reload. */
+    Fan_SetMinDutyPercent( (uint8_t)p->fan_duty_base );
 }
 
 /*============================================================================*/

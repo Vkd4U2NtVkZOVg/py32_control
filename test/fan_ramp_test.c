@@ -11,6 +11,7 @@
 #define FAN_PWM_FREQUENCY_HZ      (25000UL)
 #define FAN_TIMER_CLOCK_HZ        (32000000UL)
 #define FAN_RAMP_MAX_PCT_PER_S    (30u)
+#define FAN_RAMP_STEP_MS          (500u)
 #define FAN_STARTUP_KICK_MS       (1000u)
 #define FAN_PWR_ACTIVE_HIGH       (1u)
 #define FAN_PWM_PERIOD_TICKS      ((FAN_TIMER_CLOCK_HZ / FAN_PWM_FREQUENCY_HZ) - 1UL)
@@ -63,14 +64,13 @@ int main(void)
     assert(s_compare == expected_compare(100u));  /* 100 % on the pin        */
     assert(s_delay_ms == FAN_STARTUP_KICK_MS);    /* blocking spin-up wait   */
 
-    /* Arm the ramp timestamp on the 100 % the kick left on the pin, then the
-     * control task glides down to a low hot-side target at 30 %/s. */
+    /* Arm the ramp from the 100 % the kick left on the pin: the FIRST writer
+     * after Fan_Init() must glide down, not jump (this is the real boot
+     * order - the TEC loop's first command arrives with a tick delta that
+     * would otherwise take the "first call" fast path). */
     s_tick = 500u;
-    Fan_SetDutyPercent(100u);
-    assert(s_compare == expected_compare(100u));
-    s_tick = 1000u;                               /* +500 ms -> max_step 15  */
     Fan_SetDutyPercent(30u);
-    assert(s_compare == expected_compare(85u));
+    assert(s_compare == expected_compare(85u));   /* one nominal step: 100-15 */
     s_tick += 500u; Fan_SetDutyPercent(30u);
     assert(s_compare == expected_compare(70u));
     s_tick += 500u; Fan_SetDutyPercent(30u);
@@ -127,6 +127,29 @@ int main(void)
     s_tick += 1000u;
     Fan_SetDutyPercent(250u);
     assert(s_compare == expected_compare(100u));
+
+    /* Duty floor (NV_TEC_FAN_DUTY_BASE): no writer may stop the fan. Both the
+     * ramped and the immediate writer clamp to it, and 0 % is unreachable
+     * through the duty API - only Fan_SetEnabled(0) parks the pin. */
+    Fan_SetMinDutyPercent(30u);
+    assert(Fan_GetMinDutyPercent() == 30u);
+    s_tick += 1000u;
+    Fan_SetDutyPercent(0u);
+    assert(s_compare == expected_compare(30u));           /* floored, not 0  */
+    s_tick += 1000u;
+    Fan_SetDutyPercentImmediate(0u);
+    assert(s_compare == expected_compare(30u));           /* floored, not 0  */
+    /* Raising the floor while the pin sits below it lifts the pin at once
+     * (raising airflow is the safe direction), and the explicit off switch
+     * still wins over the floor. */
+    s_tick += 1000u;
+    Fan_SetDutyPercent(35u);
+    Fan_SetMinDutyPercent(60u);
+    assert(s_compare == expected_compare(60u));
+    Fan_SetEnabled(0);
+    assert(s_compare == 0u);
+    Fan_SetEnabled(1);
+    Fan_SetMinDutyPercent(0u);
 
     printf("fan ramp tests passed\n");
     return 0;
