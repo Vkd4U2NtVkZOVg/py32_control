@@ -112,6 +112,14 @@
 #define TEC_FAN_GRACE_S           ( 6u )
 #define TEC_FAN_STALL_S           ( 5u )
 
+/* TEC_VEN deadband hysteresis, in duty percent. See the EN-deadband block in
+ * TecControl_Cb: turn off at NV_TEC_EN_OFF_PCT, turn back on only once the
+ * demand has climbed this far above it. Sized to the gap the fan path already
+ * uses (TEC_FAN_DUTY_HYSTERESIS_PCT) - large enough to absorb the demand
+ * wobble of one control cycle, small enough that a real demand change is
+ * never parked waiting for the band. */
+#define TEC_EN_ON_HYST_PCT        ( 2 )
+
 /* Fan-noise shaping. The hot-side ADC sample is a single 12-bit conversion
  * with no averaging, and the default fan ramp (30 % below 40 C, linear to
  * 100 % at 60 C) is 3.5 %/C - so sample noise alone can make the fan duty
@@ -309,7 +317,11 @@ static void tec_params_load( Tec_Params_t *p )
         p->ramp_step_percent = (int32_t)NvParams_GetDefault( NV_TEC_RAMP_STEP_PERCENT );
     }
     if ( ( p->en_off_pct < 0 ) ||
-         ( p->en_off_pct > 100 ) ) {
+         ( p->en_off_pct > ( 100 - TEC_EN_ON_HYST_PCT ) ) ) {
+        /* The turn-ON point is en_off + TEC_EN_ON_HYST_PCT, so an off value
+         * within the top of the range would put the enable point above the
+         * highest duty the loop can ever command (100) - the TEC could then
+         * never be re-enabled, silently and permanently. */
         p->en_off_pct = (int32_t)NvParams_GetDefault( NV_TEC_EN_OFF_PCT );
     }
     if ( ( p->fan_duty_base < 0 ) || ( p->fan_duty_base > 100 ) ) {
@@ -1072,12 +1084,20 @@ static void TecControl_Cb( qEvent_t e )
      * the inductor audibly whines. Deep-light-load demand is therefore served
      * by DROPPING TEC_VEN (the converter EN) instead: zero TEC current, no
      * hiccup, and the cold side warms back up - which also keeps it from
-     * hanging below the target. NV_TEC_EN_OFF_PCT is the single threshold on
-     * both sides of the boundary (no separate hysteresis):
-     *   EN on  + duty < off  -> EN off, DAC parked, wait
-     *   EN off + duty < off  -> hold off
-     *   EN off + duty >= off -> normal first-enable path below
-     *   EN on  + duty >= off -> keep driving */
+     * hanging below the target.
+     *
+     * Two thresholds, TEC_EN_ON_HYST_PCT apart, so the boundary is a band and
+     * not a relay:
+     *   EN on  + duty <  off          -> EN off, DAC parked, wait
+     *   EN off + duty <  off + hyst   -> hold off
+     *   EN off + duty >= off + hyst   -> normal first-enable path below
+     *   EN on  + duty >= off          -> keep driving
+     * With a single threshold a demand sitting on it flipped the converter
+     * every control cycle (EN drops, cold warms, demand climbs, EN returns),
+     * which is thermal cycling of the TEC at the loop rate. The band also
+     * lines the enable point up with the startup anchor: the defaults are
+     * 8 % off + 2 % = 10 %, exactly DAC_STARTUP_PCT, so a demand just above
+     * the cut no longer fires a 10 % anchor pulse every other cycle. */
     drive = 1u;
     if ( s_tec_enabled != 0u ) {
         if ( duty < s_p.en_off_pct ) {
@@ -1086,7 +1106,12 @@ static void TecControl_Cb( qEvent_t e )
             drive = 0u;
         }
     } else {
-        if ( duty < s_p.en_off_pct ) {
+        int32_t en_on_pct = s_p.en_off_pct + TEC_EN_ON_HYST_PCT;
+
+        if ( en_on_pct > 100 ) {
+            en_on_pct = 100;   /* tec_params_load() keeps off <= 98; belt and braces */
+        }
+        if ( duty < en_on_pct ) {
             drive = 0u;   /* hold off; the DAC is already parked */
         }
     }

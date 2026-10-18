@@ -294,6 +294,16 @@ int main(int argc, char **argv)
     TecControl_Cb(NULL);
     assert(s_tec_enabled);
 
+    /* Hysteresis: the turn-on point sits TEC_EN_ON_HYST_PCT above EN_OFF, so a
+     * demand that only just clears the cut must NOT restart the converter -
+     * with a single threshold it did, once per control cycle. */
+    demand = 10; TecControl_Cb(NULL);
+    assert(!s_tec_enabled);                        /* below the cut: off        */
+    demand = 20 + TEC_EN_ON_HYST_PCT - 1; TecControl_Cb(NULL);
+    assert(!s_tec_enabled);                        /* inside the band: still off */
+    demand = 20 + TEC_EN_ON_HYST_PCT; TecControl_Cb(NULL);
+    assert(s_tec_enabled);                         /* past off + hyst: on        */
+
     /* Cold-side EMA: the PID feedback follows the smoothed cold temperature,
      * not a single noisy ADC sample. The expected step is derived from
      * TEC_COLD_EMA_DIV rather than hardcoded, so retuning the filter (DIV 8,
