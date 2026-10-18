@@ -54,6 +54,22 @@
  * ~8 us at the 8 MHz ADC clock, so this is orders of magnitude of margin and
  * only ever reached if the peripheral is not responding at all. */
 #define ADC_CAL_SPIN_LIMIT            ( 200000U )
+
+/* Bounded wait for EOC on a single conversion, in poll passes.
+ *
+ * Sized from the hardware, not guessed: a conversion is 239.5 sampling +
+ * 12.5 conversion clocks at the 8 MHz ADC clock, i.e. ~32 us. One pass of the
+ * loop below (read ISR, decrement, compare, branch) is ~8-12 cycles at
+ * 32 MHz, i.e. ~0.3 us - so the worst case needs roughly 100 passes and this
+ * bound leaves a ~100x margin.
+ *
+ * The upper bound matters as much as the margin: adc1_convert() is called
+ * three times per TEC control cycle (hot, cold, current), and a dead EOC
+ * blocks the caller for the whole timeout. The previous 1000000 was
+ * ~100-300 ms per channel - up to ~0.9 s of a 1 s control period spent
+ * blocked, with the overtemp/overcurrent/fan-stall guards not running. At
+ * 10000 the worst case is a few milliseconds, which the 1 s period absorbs. */
+#define ADC_EOC_SPIN_LIMIT            ( 10000U )
 /* USER CODE END Define */
 
 /* Private macro -------------------------------------------------------------*/
@@ -272,7 +288,7 @@ void Studio_ADC1_Init(void)
 static uint16_t adc1_convert(uint32_t channel, uint8_t *ok)
 {
   uint16_t value = 0U;
-  uint32_t timeout = 1000000U;   /* ~ms at 32 MHz; abort if EOC never arrives */
+  uint32_t timeout = ADC_EOC_SPIN_LIMIT;   /* abort if EOC never arrives */
 
   /* Clear all channels */
   WRITE_REG(ADC1->CHSELR, 0U);
