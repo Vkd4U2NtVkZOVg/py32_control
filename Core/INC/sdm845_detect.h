@@ -54,22 +54,47 @@ extern "C" {
 
 /* String lengths remain derived from the string literals, while enum values
  * are valid integer constant expressions usable for array sizes and switch/
- * preprocessor-independent compile-time layout. */
+ * preprocessor-independent compile-time layout.
+ *
+ * SDM845_BANNER_MAX_LEN sizes the KMP failure table (Sdm845_Matcher_t.fail[]),
+ * a fixed-size array that every matcher shares. It MUST be the maximum of ALL
+ * FIVE banner lengths: sdm845_matcher_init() writes fail[0..len-1], so a table
+ * shorter than any single banner runs off the end and overwrites the automaton
+ * state that follows it in the struct (q, seen) - a silent mis-match, not a
+ * crash. Taking the max explicitly, and asserting it, keeps that a build error
+ * rather than a runtime mystery. */
+#define SDM845_LEN_MAX2( a, b )   ( ( (a) > (b) ) ? (a) : (b) )
+
 enum {
     SDM845_BOOT_BANNER_LEN  = (int)(sizeof(SDM845_BOOT_BANNER) - 1u),
     SDM845_LOGIN_BANNER_LEN = (int)(sizeof(SDM845_LOGIN_BANNER) - 1u),
     SDM845_STAGE3_BANNER_LEN = (int)(sizeof(SDM845_STAGE3_BANNER) - 1u),
     SDM845_STAGE4_BANNER_LEN = (int)(sizeof(SDM845_STAGE4_BANNER) - 1u),
     SDM845_STAGE5_BANNER_LEN = (int)(sizeof(SDM845_STAGE5_BANNER) - 1u),
-    SDM845_BANNER_MAX_LEN   = ( (SDM845_BOOT_BANNER_LEN  > SDM845_LOGIN_BANNER_LEN) &&
-                                (SDM845_BOOT_BANNER_LEN  > SDM845_STAGE3_BANNER_LEN) &&
-                                (SDM845_BOOT_BANNER_LEN  > SDM845_STAGE4_BANNER_LEN) &&
-                                (SDM845_BOOT_BANNER_LEN  > SDM845_STAGE5_BANNER_LEN) )
-                              ? SDM845_BOOT_BANNER_LEN
-                              : ( (SDM845_STAGE4_BANNER_LEN > SDM845_STAGE5_BANNER_LEN)
-                                  ? SDM845_STAGE4_BANNER_LEN
-                                  : SDM845_STAGE5_BANNER_LEN )
+    SDM845_BANNER_MAX_LEN   = SDM845_LEN_MAX2(
+        SDM845_LEN_MAX2( SDM845_BOOT_BANNER_LEN, SDM845_LOGIN_BANNER_LEN ),
+        SDM845_LEN_MAX2( SDM845_STAGE3_BANNER_LEN,
+                         SDM845_LEN_MAX2( SDM845_STAGE4_BANNER_LEN,
+                                          SDM845_STAGE5_BANNER_LEN ) ) )
 };
+
+#undef SDM845_LEN_MAX2
+
+/* Two ways the table can silently become too small: a hand-set value (someone
+ * trimming RAM) and an entry that stores a matched-prefix length in uint8_t.
+ * Both corrupt the matcher instead of failing, so fail the build. */
+_Static_assert( SDM845_BOOT_BANNER_LEN   <= SDM845_BANNER_MAX_LEN,
+                "boot banner is longer than the KMP failure table" );
+_Static_assert( SDM845_LOGIN_BANNER_LEN  <= SDM845_BANNER_MAX_LEN,
+                "login banner is longer than the KMP failure table" );
+_Static_assert( SDM845_STAGE3_BANNER_LEN <= SDM845_BANNER_MAX_LEN,
+                "stage 3 banner is longer than the KMP failure table" );
+_Static_assert( SDM845_STAGE4_BANNER_LEN <= SDM845_BANNER_MAX_LEN,
+                "stage 4 banner is longer than the KMP failure table" );
+_Static_assert( SDM845_STAGE5_BANNER_LEN <= SDM845_BANNER_MAX_LEN,
+                "stage 5 banner is longer than the KMP failure table" );
+_Static_assert( SDM845_BANNER_MAX_LEN    <= 255,
+                "failure-table entries are uint8_t: banner too long" );
 
 /** Idle time (ms) that must elapse after stage 2 to declare "boot OK". */
 #define SDM845_BOOT_IDLE_MS     (2000u)
