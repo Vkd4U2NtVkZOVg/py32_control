@@ -221,7 +221,9 @@ static uint8_t TRES_Seq_GetPinsSnapshot(void) { return 0; }
 static uint8_t TRES_Cmd_LastErr(void) { return 0; }
 static uint8_t TRES_Cmd_Completed(void) { return 0; }
 static uint8_t USART2_DMA_GetOverruns(void) { return 0; }
-static uint32_t NvParams_Get(uint8_t id) { (void)id; return 0; }
+/* Not static: nv_params.h (pulled in by tres_i2c_slave.h) declares it with
+ * external linkage, and GCC/Clang reject a static definition after that. */
+uint32_t NvParams_Get(uint8_t id) { (void)id; return 0; }
 #define TRES_IF_VERSION 4u
 ''' + function(src, 'Reg_LatchSensorBlock') + function(src, 'Reg_Read') + '''
 static int32_t rd32(uint8_t base)
