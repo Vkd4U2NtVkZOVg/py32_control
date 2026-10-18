@@ -361,51 +361,68 @@ uint8_t Studio_ADC1_ReadCurrentMilliamp(uint32_t *out_ma)
     *out_ma = 0u;
     return 0U;
   }
-  /* Current-sense chain calibration from NVRAM (INA181A2 + divider). Values
-   * are snapshotted once; changing NVRAM takes effect after reboot. Zero OR
-   * out-of-envelope values refetch and, if still bad, fall back to the
-   * factory defaults: extreme non-zero magnitudes are physically meaningless
-   * AND overflow the intermediate uV products (uint64) - a divider
-   * denominator near 2^32 pushes shunt_voltage_uV past 2^64, and two near-
-   * 2^32 factors overflow the shunt*gain denominator. Envelopes fit any
-   * sane chain: shunt 0.1 mOhm..1 Ohm, gain 1..1000, divider 1..1e6, Vref
-   * 1 mV..5 V. Bounded this way the worst-case product stays below 2^53. */
-  static uint32_t shunt_uohm = 0u;
-  static uint32_t amp_gain   = 0u;
-  static uint32_t div_num    = 0u;
-  static uint32_t div_den    = 0u; /* zero means not loaded, not unity gain */
-  static uint32_t adc_vref_mv = 0u;
+  /* Current-sense chain calibration from NVRAM (INA181A2 + divider).
+   *
+   * Refreshed when the NVRAM cache generation moves - not on every call, and
+   * no longer only when a cached value looks wrong. The old "refetch while
+   * the cached value is out of envelope" rule could never observe a NEW valid
+   * value: once a sane one was cached it stayed forever, so a host
+   * recalibration over the I2C parameter window - or CMD_DEFAULT_PARAMS,
+   * which rewrites the whole table at run time - left the overcurrent guard
+   * scaling milliamps with the boot-time chain while every other consumer of
+   * the table had already moved. Same stale-cache class as the DAC percentage
+   * cache fixed in 787659c. One 32-bit compare is the steady-state cost.
+   *
+   * The envelope check still runs on every refresh: extreme magnitudes are
+   * physically meaningless AND overflow the intermediate uV products
+   * (uint64) - a divider denominator near 2^32 pushes shunt_voltage_uV past
+   * 2^64, and two near-2^32 factors overflow the shunt*gain denominator.
+   * Envelopes fit any sane chain: shunt 0.1 mOhm..1 Ohm, gain 1..1000,
+   * divider 1..1e6, Vref 1 mV..5 V. Bounded this way the worst-case product
+   * stays below 2^53. A refresh that fails the check falls back to the
+   * factory defaults, so the arithmetic can never divide by zero.
+   *
+   * Known window: the five reads are not atomic against the I2C slave ISR, so
+   * a write landing between them can mix two versions of the table. Every
+   * value is still individually in envelope, and the mix cannot outlive the
+   * next generation bump (the same write causes one). tec_params_load() has
+   * the same property; closing it would need a seqlock around both. */
+  static uint32_t shunt_uohm;      /* calibration snapshot, see above        */
+  static uint32_t amp_gain;
+  static uint32_t div_num;
+  static uint32_t div_den;         /* never 0 here: envelope-checked above   */
+  static uint32_t adc_vref_mv;
+  static uint32_t cal_gen;         /* generation the snapshot was taken from */
+  static uint8_t  cal_valid;       /* 0 = never loaded (generation 0 is legal)*/
   uint16_t adc_code;
   uint8_t  ok;
+  uint32_t gen;
   uint64_t adc_voltage_uV;
   uint64_t shunt_voltage_uV;
   uint64_t current_mA;
 
-  if ( ( shunt_uohm < 100u ) || ( shunt_uohm > 1000000u ) ) {
-    shunt_uohm = NvParams_Get( NV_TEC_CURRENT_SHUNT_UOHM );
-  }
-  if ( ( amp_gain < 1u ) || ( amp_gain > 1000u ) ) {
-    amp_gain = NvParams_Get( NV_TEC_CURRENT_AMP_GAIN );
-  }
-  if ( ( div_num < 1u ) || ( div_num > 1000000u ) ) {
-    div_num = NvParams_Get( NV_TEC_CURRENT_DIVIDER_NUM );
-  }
-  if ( ( div_den < 1u ) || ( div_den > 1000000u ) ) {
-    div_den = NvParams_Get( NV_TEC_CURRENT_DIVIDER_DEN );
-  }
-  if ( ( adc_vref_mv < 1u ) || ( adc_vref_mv > 5000u ) ) {
+  gen = NvParams_GetCacheGeneration();
+  if ( ( cal_valid == 0u ) || ( cal_gen != gen ) ) {
+    cal_gen   = gen;
+    cal_valid = 1u;
+
+    shunt_uohm  = NvParams_Get( NV_TEC_CURRENT_SHUNT_UOHM );
+    amp_gain    = NvParams_Get( NV_TEC_CURRENT_AMP_GAIN );
+    div_num     = NvParams_Get( NV_TEC_CURRENT_DIVIDER_NUM );
+    div_den     = NvParams_Get( NV_TEC_CURRENT_DIVIDER_DEN );
     adc_vref_mv = NvParams_Get( NV_TEC_CURRENT_ADC_VREF_MV );
-  }
-  if ( ( shunt_uohm < 100u ) || ( shunt_uohm > 1000000u ) ||
-       ( amp_gain < 1u ) || ( amp_gain > 1000u ) ||
-       ( div_num < 1u ) || ( div_num > 1000000u ) ||
-       ( div_den < 1u ) || ( div_den > 1000000u ) ||
-       ( adc_vref_mv < 1u ) || ( adc_vref_mv > 5000u ) ) {
-    shunt_uohm  = NvParams_GetDefault( NV_TEC_CURRENT_SHUNT_UOHM );
-    amp_gain    = NvParams_GetDefault( NV_TEC_CURRENT_AMP_GAIN );
-    div_num     = NvParams_GetDefault( NV_TEC_CURRENT_DIVIDER_NUM );
-    div_den     = NvParams_GetDefault( NV_TEC_CURRENT_DIVIDER_DEN );
-    adc_vref_mv = NvParams_GetDefault( NV_TEC_CURRENT_ADC_VREF_MV );
+
+    if ( ( shunt_uohm < 100u ) || ( shunt_uohm > 1000000u ) ||
+         ( amp_gain < 1u ) || ( amp_gain > 1000u ) ||
+         ( div_num < 1u ) || ( div_num > 1000000u ) ||
+         ( div_den < 1u ) || ( div_den > 1000000u ) ||
+         ( adc_vref_mv < 1u ) || ( adc_vref_mv > 5000u ) ) {
+      shunt_uohm  = NvParams_GetDefault( NV_TEC_CURRENT_SHUNT_UOHM );
+      amp_gain    = NvParams_GetDefault( NV_TEC_CURRENT_AMP_GAIN );
+      div_num     = NvParams_GetDefault( NV_TEC_CURRENT_DIVIDER_NUM );
+      div_den     = NvParams_GetDefault( NV_TEC_CURRENT_DIVIDER_DEN );
+      adc_vref_mv = NvParams_GetDefault( NV_TEC_CURRENT_ADC_VREF_MV );
+    }
   }
 
   /* A timed-out conversion reads as code 0 - indistinguishable at this
