@@ -92,12 +92,14 @@ typedef Handler *qSM_Handler_t;
 #define SDM845_BOOT_MAX_RETRIES 3
 #define SDM845_T_STAGE5_SETTLE_MS 10000
 #define USART2_TXSRC_PY32 0
+#define USART2_TXSRC_CH343 1
 #define GPIOB 0
 #define SOM_BOOTED_Pin 0
 static int stBootSuccess, stPwrPress, stStage2Wait, stStage3Wait,
     stStage4Wait, stStage5Wait, stBootReset, stStrapFail;
 static struct { uint8_t stateId, retryCount; } s_boot;
 static int seen;
+static unsigned fan_duty_writes;
 static const char SDM845_CMD_ACCOUNT[] = "account";
 static const char SDM845_CMD_PASSWORD[] = "password";
 static const char SDM845_CMD_AMIXER[] = "amixer";
@@ -110,6 +112,8 @@ static int Sdm845_Detect_IsStage5Seen(void) { return seen; }
 static void Pin_PwrKey(int p) {}
 static void Pin_RstKey(int p) {}
 static void USART2_SetTxSource(int p) {}
+static void Fan_SetEnabled(int on) { (void)on; }
+static void Fan_SetDutyPercent(int duty) { (void)duty; ++fan_duty_writes; }
 static void Sdm845_Detect_ResetStage345(void) {}
 static void sdm845_stage_send(const char *p, size_t n, unsigned ms) {}
 static void sdm845_stage_send_retry(void) {}
@@ -117,6 +121,7 @@ static void sdm845_stage_send_retry(void) {}
     functions = ''.join(function(src, 'st_' + state + '_Cb') for state in
                         ('PowerOnWait', 'BootCheck', 'Stage2Wait',
                          'Stage3Wait', 'Stage4Wait', 'Stage5Wait'))
+    functions += function(src, 'st_StrapFail_Cb')
     yield 'boot_timeout', prefix + functions + '''
 int main(void) {
     qSM_Status_t (*cb[])(qSM_Handler_t) = {st_Stage2Wait_Cb, st_Stage3Wait_Cb,
@@ -134,6 +139,16 @@ int main(void) {
     seen = 1; st_BootCheck_Cb(&h); assert(h.NextState == &stStage2Wait);
     st_PowerOnWait_Cb(&h); assert(h.NextState == &stBootSuccess);
     seen = 0; st_PowerOnWait_Cb(&h); assert(h.NextState == &stPwrPress);
+
+    /* STRAP_FAIL must not command the fan: the TEC loop owns it and keeps
+     * regulating in this state. A duty write here only went through the slew
+     * limiter (15 % at a 500 ms period) and was undone by the next TEC cycle -
+     * a one-cycle blip with no airflow benefit. */
+    fan_duty_writes = 0;
+    h.Signal = QSM_SIGNAL_ENTRY;
+    st_StrapFail_Cb(&h);
+    assert(fan_duty_writes == 0);
+    assert(s_boot.stateId == SDM845_STRAP_FAIL);
 }
 '''
     src = read('Core/SRC/aht20_task.c')

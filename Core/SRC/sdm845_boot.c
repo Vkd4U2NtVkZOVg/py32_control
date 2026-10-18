@@ -543,7 +543,18 @@ static qSM_Status_t st_PmicSettle_Cb( qSM_Handler_t h )
     return qSM_STATUS_EXIT_SUCCESS;
 }
 
-/* STRAP_FAIL: all released, halt (terminal). */
+/* STRAP_FAIL: all released, halt (terminal).
+ *
+ * The heatsink fan is deliberately NOT commanded here. It has exactly one
+ * owner - the TEC control loop - which keeps running in this state
+ * (thermalReady stays latched) and ramps the fan from the hot-side
+ * temperature. The previous "hold 100 %" write could not deliver what it
+ * claimed: it goes through Fan_SetDutyPercent()'s 30 %/s slew limiter, so at
+ * the 500 ms control period it moved the duty by only 15 %, and the next TEC
+ * cycle pulled it straight back to the ramp value - a visible one-cycle blip
+ * and nothing else. A protection path that really needs full airflow uses
+ * tec_fan_force(); a terminal state that expects the loop to keep regulating
+ * must simply stay out of the loop's way. */
 static qSM_Status_t st_StrapFail_Cb( qSM_Handler_t h )
 {
     switch ( h->Signal ) {
@@ -552,10 +563,9 @@ static qSM_Status_t st_StrapFail_Cb( qSM_Handler_t h )
             Pin_PwrKey( 0u );             /* release */
             Pin_RstKey( 0u );             /* release */
             USART2_SetTxSource( USART2_TXSRC_CH343 );  /* end the TX window */
-            /* Terminal state: nothing else will ever drive the fan again.
-             * Hold full airflow through the halt state. */
+            /* Idempotent backstop only (Fan_Init already enabled the
+             * channel): it sets a flag, it does not touch the pin. */
             Fan_SetEnabled( 1u );
-            Fan_SetDutyPercent( 100u );
             break;
         default:
             break;
