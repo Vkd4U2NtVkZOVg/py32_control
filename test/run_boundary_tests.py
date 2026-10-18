@@ -384,6 +384,117 @@ int main(void) {
     assert(sent[1] == 0xff && sent[2] == 0xf0);
 }
 '''
+    # ADC end-of-conversion wait. Two properties the control loop depends on:
+    # a dead conversion must give up in milliseconds (the loop calls this three
+    # times per 1 s cycle, so a ~quarter-second bound per channel would overrun
+    # the period), and a stale EOC left latched by a conversion the previous
+    # call abandoned must not be read as THIS conversion's result.
+    src = read('Core/SRC/adc.c')
+    spin = re.search(r'#define\s+ADC_EOC_SPIN_LIMIT\s+\(\s*(\d+)U\s*\)', src).group(1)
+    code = COMMON + '''
+typedef struct { volatile uint32_t CHSELR; volatile uint32_t ISR; } Adc_t;
+static Adc_t adc0;
+#define ADC1 (&adc0)
+#define WRITE_REG(r, v) ((r) = (v))
+#define ADC_EOC_SPIN_LIMIT (SPIN)
+
+/* Faithful EOC model: StartConversion does NOT clear the flag (the hardware
+ * keeps it latched); a conversion completes after conv_polls polls. */
+static int eoc_flag, conv_polls, pending, polls;
+static void LL_ADC_REG_SetSequencerChannels(Adc_t *a, uint32_t ch) { (void)a; (void)ch; }
+static void LL_ADC_Enable(Adc_t *a) { (void)a; }
+static void LL_mDelay(uint32_t ms) { (void)ms; }
+static void LL_ADC_REG_StartConversion(Adc_t *a) { (void)a; pending = conv_polls; }
+static uint32_t LL_ADC_IsActiveFlag_EOC(Adc_t *a) {
+    (void)a; ++polls;
+    if (pending > 0 && --pending == 0) eoc_flag = 1;
+    return (uint32_t)eoc_flag;
+}
+static void LL_ADC_ClearFlag_EOC(Adc_t *a) { (void)a; eoc_flag = 0; }
+static uint16_t LL_ADC_REG_ReadConversionData12(Adc_t *a) { (void)a; return 1234u; }
+''' + function(src, 'adc1_convert') + '''
+static void reset(int stale, int conv)
+{
+    eoc_flag = stale; conv_polls = conv; pending = 0; polls = 0;
+}
+int main(void) {
+    uint8_t ok;
+
+    /* Bounded: 100000 passes is already ~30-100 ms, far more than a 32 us
+     * conversion needs and far less than the 1 s control period. */
+    assert(ADC_EOC_SPIN_LIMIT <= 100000u);
+
+    reset(0, 3);                     /* normal conversion */
+    assert(adc1_convert(4u, &ok) == 1234u && ok == 1u && polls == 3);
+
+    /* Stale flag from an abandoned conversion: the pre-clear must force a
+     * fresh wait. Without it the loop exits on the first pass and reads the
+     * other channel's result. */
+    reset(1, 3);
+    assert(adc1_convert(4u, &ok) == 1234u && ok == 1u && polls == 3);
+
+    reset(0, 0);                     /* never completes */
+    assert(adc1_convert(4u, &ok) == 0u && ok == 0u);
+    assert(polls > 0u && polls <= ADC_EOC_SPIN_LIMIT + 1u);
+}
+'''
+    yield 'adc_eoc_wait', code.replace('SPIN', spin + 'U')
+    # Current-sense calibration cache: the five NVRAM slots are re-read when
+    # the table moves (host write over the I2C window, or CMD_DEFAULT_PARAMS)
+    # and are NOT re-read on every call. The old "refetch only while the cached
+    # value is out of envelope" rule could never observe a new valid value, so
+    # the overcurrent guard kept scaling milliamps with the boot-time chain.
+    src = read('Core/SRC/adc.c')
+    yield 'adc_current_cal', COMMON + '#include "nv_params.h"\n' + '''
+static uint32_t nv[ NV_PARAM_COUNT_MARKER ];
+static uint32_t nv_def[ NV_PARAM_COUNT_MARKER ];
+static uint32_t nv_gen;
+static uint8_t s_calib_failed;
+static uint16_t adc1_convert(uint32_t ch, uint8_t *ok) { (void)ch; *ok = 1u; return 2048u; }
+#define LL_ADC_CHANNEL_6 6u
+/* Not static: nv_params.h declares all three with external linkage. */
+uint32_t NvParams_Get(uint8_t id) { return nv[id]; }
+uint32_t NvParams_GetDefault(uint8_t id) { return nv_def[id]; }
+uint32_t NvParams_GetCacheGeneration(void) { return nv_gen; }
+''' + function(src, 'Studio_ADC1_ReadCurrentMilliamp') + '''
+/* code 2048, Vref 3300 mV -> 1650402 uV; 10 mOhm * gain 50 -> 3300 mA. */
+static void cal(uint32_t shunt, uint32_t den)
+{
+    nv[ NV_TEC_CURRENT_SHUNT_UOHM ]      = shunt;
+    nv[ NV_TEC_CURRENT_AMP_GAIN ]        = 50u;
+    nv[ NV_TEC_CURRENT_DIVIDER_NUM ]     = 1u;
+    nv[ NV_TEC_CURRENT_DIVIDER_DEN ]     = den;
+    nv[ NV_TEC_CURRENT_ADC_VREF_MV ]     = 3300u;
+}
+int main(void) {
+    uint32_t ma;
+
+    nv_def[ NV_TEC_CURRENT_SHUNT_UOHM ]  = 10000u;
+    nv_def[ NV_TEC_CURRENT_AMP_GAIN ]    = 50u;
+    nv_def[ NV_TEC_CURRENT_DIVIDER_NUM ] = 1u;
+    nv_def[ NV_TEC_CURRENT_DIVIDER_DEN ] = 1u;
+    nv_def[ NV_TEC_CURRENT_ADC_VREF_MV ] = 3300u;
+
+    cal(10000u, 1u);
+    assert(Studio_ADC1_ReadCurrentMilliamp(&ma) == 1u && ma == 3300u);
+
+    /* Same generation: the snapshot holds, nothing is re-read per call. */
+    cal(20000u, 1u);
+    assert(Studio_ADC1_ReadCurrentMilliamp(&ma) == 1u && ma == 3300u);
+
+    /* NvParams_Set() bumps the generation: the new calibration applies. */
+    ++nv_gen;
+    assert(Studio_ADC1_ReadCurrentMilliamp(&ma) == 1u && ma == 1650u);
+
+    /* CMD_DEFAULT_PARAMS path: table reset + bump, the guard follows. */
+    cal(10000u, 1u); ++nv_gen;
+    assert(Studio_ADC1_ReadCurrentMilliamp(&ma) == 1u && ma == 3300u);
+
+    /* Corrupt slot on reload: fall back to the defaults, never divide by 0. */
+    cal(10000u, 0u); ++nv_gen;
+    assert(Studio_ADC1_ReadCurrentMilliamp(&ma) == 1u && ma == 3300u);
+}
+'''
 
 
 def main(argv=None):
