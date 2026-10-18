@@ -17,10 +17,16 @@
 #include "nv_params.h"
 
 /* Private typedef -----------------------------------------------------------*/
+/* Single-slot command mailbox. All three fields are volatile, not just the
+ * flag: the ISR publishes cmd/param and then valid, and the parser task reads
+ * them only after seeing valid. Without volatile on cmd/param the compiler is
+ * free to hoist those two loads above the flag load (only volatile accesses
+ * are ordered against each other), which would let the task act on a command
+ * that arrived after the one it saw flagged. */
 typedef struct {
     volatile uint8_t valid;
-    uint8_t          cmd;
-    uint8_t          param;   /* unused (no command carries a parameter)    */
+    volatile uint8_t cmd;
+    volatile uint8_t param;   /* unused (no command carries a parameter)    */
 } Cmd_Mailbox_t;
 
 /* Private variables ---------------------------------------------------------*/
