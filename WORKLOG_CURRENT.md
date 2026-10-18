@@ -1,5 +1,27 @@
 # Mix3_TRES_2 Firmware 当前工作日志（精简版）
 
+## 2026-10-18：修复增量审核 6 项（露点 / PID 播种 / DAC 标定 / I2C 快照 / reset-mcu）
+
+### 背景
+
+- 外部审核 `CODE_REVIEW_2026-10-18.md`（基线 `577c68f`，头 `802954d`）列 1×P1 + 5×P2；逐条对照当前代码，6 项全部成立。
+
+### 改动
+
+- `tec_control.c`：湿度无效分支在**两种目标模式**都沿用 `s_dew_target_mc`（最后有效露点下限）；普通模式不再回落到未受保护的 `TARGET_BASE`。从未有过有效样本时仍是 200 °C 的"不制冷"种子。
+- `tec_control.c`：新增 `s_pid_seed_pending`。`tec_apply_pid_params()` 不再用 `-TARGET_BASE` 充当 PID 历史测量；首次 Update 前用真实 `s_cold_ema` 调 `TecPid_Reset()`，启动与在线改增益走同一路径。
+- `tec_control.c`：DAC 缓存改为"实际写入 mV + 有效位"；端点在线变化时置 `s_dac_recal`，控制周期先撤 EN、按新窗口停到零电流端，再走首次使能锚点 + 斜坡（不再按百分比缓存跳过重写）。
+- `tres_i2c_slave.c`：读地址匹配时 `Reg_LatchSensorBlock()` 锁存 RPM / 冷 / 热 / 露点，`0x36..0x43` 整块从该事务快照发送。
+- `test/tres_i2c_probe.py` / `test/tres_host.py`：新增 `Tres.send_cmd()`（只查 mailbox busy，不等 COMPLETED）；`reset-mcu` 改走该路径；probe 复位后用 5 s 有界重连探测替代 COMPLETED 等待。
+
+### 验证
+
+- `run_tec_fault_tests.py`：默认 / 0 / 1 三种配置通过；新增普通模式露点失效、启动与增益重载 PID 播种、DAC 端点重锚用例。
+- `run_boundary_tests.py`：10 组通过（新增 `pid_seed_from_measure`、`sensor_snapshot`）。
+- `run_fan_ramp_test.py` 通过；Python unittest 28 项通过（新增 3 项 reset-mcu）。
+- `arm-none-eabi-gcc -fsyntax-only`（PY32F030x8、`TRES_AES_ENABLE=1`）检查 `tec_control.c`、`tres_i2c_slave.c`、`tec_pid.c` 通过，仅厂商头文件 `-Wextra` 警告。
+- 未做完整固件链接与上板验证；本机测试编译器用 `.hostcc/ccwrap.py`（MSVC 适配器）。
+
 ## 2026-10-16：EN 死区去滞回；露点保护去掉最小输出钳位（duty < EN_OFF_PCT 直接关 TEC_VEN）
 
 ### 背景

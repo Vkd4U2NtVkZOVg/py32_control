@@ -37,7 +37,11 @@ class Device(probe.Tres):
                 self.ram = [0] * len(self.ram)
             elif cmd == 6:
                 self.ram = self.flash[:]
-            self.done = (self.done + 1) & 255
+            # RESET_MCU never acknowledges: the MCU resets before the parser
+            # can advance COMPLETED (and the reboot clears the counter). A
+            # host that waits for it must time out.
+            if cmd != 7:
+                self.done = (self.done + 1) & 255
         else:
             self.ram[(reg - probe.TRES_REG_NV_BASE) // 4] = \
                 int.from_bytes(data, 'big')
@@ -112,6 +116,22 @@ class ProbeTests(unittest.TestCase):
         dev.done = 255
         dev.write_cmd(0xa5, 4)
         self.assertEqual(dev.done, 0)
+
+    def test_reset_mcu_sends_without_waiting_for_completion(self):
+        # The device never advances COMPLETED for cmd 7 (real reset behaviour),
+        # so write_cmd() would time out; the probe must use send_cmd().
+        dev = Device()
+        out = run_main(dev, '--reset-mcu')
+        self.assertEqual([data for reg, data in dev.writes if reg == 0],
+                         [[0xA5, 7, 0]])
+        self.assertIn("responding again", out)
+
+    def test_reset_mcu_rejected_when_mailbox_busy(self):
+        dev = Device()
+        dev.busy = True
+        with self.assertRaisesRegex(RuntimeError, 'busy'):
+            dev.send_cmd(0xa5, 7)
+        self.assertEqual(dev.writes, [])
 
     def test_set_save(self):
         dev = Device()

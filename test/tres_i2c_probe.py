@@ -247,6 +247,20 @@ class Tres:
         self.bus.i2c_rdwr(wr, rd)
         return list(rd)
 
+    def send_cmd(self, magic, cmd, param=0):
+        """Write one command WITHOUT waiting for its completion.
+
+        RESET_MCU resets the MCU before the parser can advance COMPLETED, so
+        the normal completion handshake can only time out - and a stale
+        counter of 255 would "succeed" by coincidence when it wraps to 0.
+        The mailbox-busy check stays: a command dropped because another one
+        is still in flight must not look sent.
+        """
+        if self.status() & 0x20:
+            raise RuntimeError("MCU command mailbox busy; command not sent")
+        self.bus.write_i2c_block_data(
+            self.addr, TRES_REG_CMD, [magic, cmd, param])
+
     def write_cmd(self, magic, cmd, param=0):
         """Single-writer protocol v3: wait for this command's completion."""
         before = self.read_reg(0x15)[0]
@@ -713,16 +727,27 @@ Prerequisites:
     elif args.reset_mcu:
         print("[5] issue CMD_RESET_MCU: the PY32 hard-resets itself.")
         print("There is no acknowledgement - re-probe after a short delay.")
-        t.write_cmd(TRES_CMD_MAGIC, TRES_CMD_RESET_MCU)
-        time.sleep(1.0)
-        try:
-            version = t.read_reg(TRES_REG_VERSION)[0]
-            print("    after reset: VERSION=0x{:02X}".format(version))
-            if version != 0x04:
-                sys.exit("    FAIL: VERSION mismatch after reset")
-            print("    OK: MCU has reset and is responding again")
-        except Exception as e:
-            sys.exit("    FAIL: MCU not reachable after reset: {}".format(e))
+        # Fire-and-forget: NVIC_SystemReset() happens before the parser can
+        # advance COMPLETED, and the reboot clears the counter. Then probe
+        # with a bounded retry loop that tolerates the reboot gap (the slave
+        # NACKs while it is resetting).
+        t.send_cmd(TRES_CMD_MAGIC, TRES_CMD_RESET_MCU)
+        deadline = time.monotonic() + 5.0
+        version = None
+        while time.monotonic() < deadline:
+            time.sleep(0.2)
+            try:
+                version = t.read_reg(TRES_REG_VERSION)[0]
+            except Exception:
+                version = None
+                continue
+            if version == 0x04:
+                break
+        if version != 0x04:
+            sys.exit("    FAIL: MCU not reachable after reset (last VERSION={})"
+                     .format("none" if version is None else "0x{:02X}".format(version)))
+        print("    after reset: VERSION=0x{:02X}".format(version))
+        print("    OK: MCU has reset and is responding again")
 
     elif args.reset or args.dfu:
         cmd = TRES_CMD_RESET if args.reset else TRES_CMD_ENTER_DFU

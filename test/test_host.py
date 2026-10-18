@@ -51,7 +51,7 @@ class HostTests(unittest.TestCase):
 
     def test_backup_restore(self):
         dev = HostDevice()
-        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as tmp:
+        with tempfile.TemporaryDirectory() as tmp:
             path = str(Path(tmp) / 'backup.json')
             run(dev, ['backup', path])
             expected = dev.ram[:]
@@ -62,7 +62,7 @@ class HostTests(unittest.TestCase):
                 run(dev, ['backup', path])
 
     def test_malformed_backup_rejected_before_bus_open(self):
-        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as tmp:
+        with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'bad.json'
             for data in ([], {'format': 'tres-params-v1', 'interface': 3,
                                'raw': [True] * len(host.NV_PARAMS)}):
@@ -73,7 +73,7 @@ class HostTests(unittest.TestCase):
 
     def test_publisher_reads_actual_source_and_stops_on_error(self):
         dev = HostDevice()
-        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as tmp:
+        with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / 'temp'
             source.write_text('45000', encoding='ascii')
             with contextlib.redirect_stdout(io.StringIO()):
@@ -92,6 +92,15 @@ class HostTests(unittest.TestCase):
         dev.fail_save = True
         with self.assertRaisesRegex(RuntimeError, 'FLASH'):
             run(dev, ['save'])
+        self.assertTrue(dev.closed)
+
+    def test_reset_mcu_is_dispatched_without_waiting(self):
+        # cmd 7 never advances COMPLETED in the fake device (the real MCU is
+        # gone), so a write_cmd() path would time out instead of returning.
+        dev = HostDevice()
+        run(dev, ['reset-mcu'])
+        self.assertEqual([data for reg, data in dev.writes if reg == 0],
+                         [[0xA5, 7, 0]])
         self.assertTrue(dev.closed)
 
 

@@ -42,6 +42,16 @@ int main(int argc, char **argv)
         return 0;
     }
     reset_fixture();
+    /* A freshly initialised PID must reseed its history from the REAL
+     * measurement before its first update. The incremental P/D terms read a
+     * seed that is not a measurement as a temperature step; with the target
+     * used as the seed this was a one-cycle full-output pulse. The stub
+     * records the measure passed to TecPid_Reset(), so the first control
+     * cycle has to reset from the EMA-smoothed cold sample. */
+    cold = 30000;
+    reset_measure = 0.0f;
+    TecControl_Cb(NULL);
+    assert(reset_measure == -30000.0f);
     /* The NVRAM base airflow must be published as the fan's duty floor on
      * every parameter load (boot and live reload alike). */
     assert(fan_min_duty == 30);
@@ -208,6 +218,43 @@ int main(int argc, char **argv)
         assert(pid_inits == before + 1);
         assert(s_tec_enabled);          /* duty 50 is outside the deadband again */
     }
+    /* A gain reload rebuilds the PID, so it must reseed the history from the
+     * measurement exactly like the boot path - not from the target. */
+    {
+        reset_fixture();
+        cold = 28000;
+        TecControl_Cb(NULL);            /* boot seed consumed here */
+        params[NV_TEC_PID_KP_Q16] = NVM_Q16(0.5f);
+        nv_cache_gen++;
+        reset_measure = 0.0f;
+        TecControl_Cb(NULL);            /* gain reload must reseed */
+        assert(reset_measure == -28000.0f);
+    }
+
+    /* DAC_MIN/MAX are live-reloadable calibration points: the same duty maps
+     * to a different voltage, so the percentage cache must not suppress the
+     * rewrite. The endpoint change drops EN, parks on the NEW zero-current
+     * end, and re-anchors through the normal soft start instead of stepping
+     * the TEC voltage straight to the re-mapped value. */
+    {
+        reset_fixture();
+        demand = 50;
+        cold = 60000;
+        for (int i = 0; i < 12; ++i) TecControl_Cb(NULL);
+        assert(s_tec_enabled && s_dac_percent == 50);
+        assert(dac_mv == 1180);         /* old window [760,1600] at 50 % */
+        params[NV_TEC_DAC_MAX_CTRL_MV] = 2500;
+        nv_cache_gen++;
+        dac_writes = 0;
+        TecControl_Cb(NULL);            /* reload: park(0) + anchor(10) + 15 */
+        assert(s_tec_enabled && s_dac_percent == 15);
+        assert(dac_mv == 2239);         /* 2500 - 15 % of 1740 = 2239 */
+        assert(dac_writes == 3);        /* park, anchor and ramp write */
+        for (int i = 0; i < 10; ++i) TecControl_Cb(NULL);
+        assert(s_dac_percent == 50);
+        assert(dac_mv == 1630);         /* 2500 - 50 % of 1740 = 1630 */
+        assert(s_tec_enabled);
+    }
 
     /* The loop period is owned by the scheduler, so a mid-run write to it must
      * NOT reach the fan-stall timers and rescale their millisecond maths. */
@@ -282,6 +329,30 @@ int main(int argc, char **argv)
     params[NV_TEC_TARGET_BASE_MILLIC] = 0;
     TecControl_Init();                               /* reloads params, seeds */
     dew = INT32_MIN;                                 /* still no valid sample */
+    TecControl_Cb(NULL);
+    assert(target_mc == TEC_TEMP_ENVELOPE_MAX_MILLIC);
+
+    /* The NORMAL target mode must hold the last valid floor too. The P1 case:
+     * dew 33 C + 2 C margin holds the target at 35 C while the uncompensated
+     * base asks for 10 C; when the AHT20 sample expires, falling back to the
+     * base would resume cooling the floor had just held off. */
+    reset_fixture();
+    cold = 30000; dew = 33000; demand = 0;
+    s_p.target_base_millic = 10000;
+    s_p.target_offset_millic = 0;
+    TecControl_Cb(NULL);
+    assert(s_dew_hold && target_mc == 35000);        /* floor = 33000 + 2000 */
+    dew = INT32_MIN;                                 /* sample expires */
+    for (int i = 0; i < 4; ++i) TecControl_Cb(NULL);
+    assert(target_mc == 35000);                      /* NOT the 10 C base */
+    assert(s_alarm & TEC_ALARM_SENSOR);
+    assert(s_alarm & TEC_ALARM_DEWPOINT);
+    /* Before the first valid sample in normal mode the target is the
+     * "no cooling" seed, not the unprotected base either. */
+    reset_fixture();
+    s_p.target_base_millic = 10000;
+    s_p.target_offset_millic = 0;
+    dew = INT32_MIN;
     TecControl_Cb(NULL);
     assert(target_mc == TEC_TEMP_ENVELOPE_MAX_MILLIC);
 

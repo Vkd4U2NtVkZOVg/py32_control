@@ -184,8 +184,13 @@ def main(argv=None):
             save_verified(device)
             print('whole parameter table saved and reloaded from FLASH')
         elif args.action in ('reload', 'defaults', 'reset', 'dfu'):
-            device.write_cmd(0xa5, dict(reload=6, defaults=5, reset=1, dfu=2, reset_mcu=7)[args.action.replace("-", "_")])
+            device.write_cmd(0xa5, dict(reload=6, defaults=5, reset=1, dfu=2)[args.action])
             print('command executed: ' + args.action)
+        elif args.action == 'reset-mcu':
+            # No completion handshake: the MCU resets before it can advance
+            # COMPLETED. send_cmd() still rejects a busy mailbox.
+            device.send_cmd(0xa5, 7)
+            print('MCU reset requested; no acknowledgement is expected')
         elif args.action == 'temp':
             write_temperature(device, args.millic)
             print('sample published; expires in 5 seconds without another update')

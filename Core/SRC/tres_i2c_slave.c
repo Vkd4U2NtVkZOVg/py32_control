@@ -72,6 +72,32 @@ static uint8_t  s_chalBuf[ TRES_REG_CHAL_LEN ];
 /* Private function prototypes -----------------------------------------------*/
 static uint8_t Reg_Read(uint8_t addr);
 
+/* Live sensor block snapshot (TRES_REG_FANRPM..TRES_REG_DEWPOINT+3).
+ *
+ * The block is composed from four independent run-time variables that the
+ * control/AHT20 tasks update between bytes of one I2C read. Serving each byte
+ * from a fresh getter could therefore splice the high half of an old sample
+ * with the low half of a new one (e.g. 65530 mC -> 65540 mC reads back as
+ * 4 mC), and can tear the dew-point valid/invalid state as well. Latch the
+ * whole block once, when the read transaction's address is matched, and serve
+ * every byte of that transaction from the latched copy. A 32-bit store is
+ * atomic on Cortex-M0+, but only the transaction-level snapshot makes the
+ * multi-byte I2C window atomic too. */
+static uint16_t s_snap_rpm;
+static int32_t  s_snap_cold_mc;
+static int32_t  s_snap_hot_mc;
+static int32_t  s_snap_dew_mc;
+
+static void Reg_LatchSensorBlock( void )
+{
+    uint32_t rpm = Fan_Get_LastRPM();
+
+    s_snap_rpm     = ( rpm > 0xFFFFu ) ? 0xFFFFu : (uint16_t)rpm;
+    s_snap_cold_mc = TecControl_GetColdMilliCelsius();
+    s_snap_hot_mc  = TecControl_GetHotMilliCelsius();
+    s_snap_dew_mc  = AHT20_Get_LastDewPointMilliCelsius();
+}
+
 /*============================================================================*/
 /* Register file: host-visible values, composed live                         */
 /*============================================================================*/
@@ -97,36 +123,35 @@ static uint8_t Reg_Read(uint8_t addr)
     }
 
     /* Live sensor block (0x36..0x43): fan speed (u16), cold/hot temperature
-     * and dew point (i32, milli-degC), big-endian each. Composed live so a
-     * burst read of 0x36..0x43 yields a consistent snapshot of the last TEC
-     * cycle plus the latest AHT20 dew point. */
+     * and dew point (i32, milli-degC), big-endian each. Served from the
+     * snapshot latched at address match (Reg_LatchSensorBlock), so a burst
+     * read of 0x36..0x43 is one consistent transaction rather than a splice
+     * of two control cycles. */
     if ( ( addr >= TRES_REG_FANRPM ) && ( addr <= TRES_REG_DEWPOINT + 3u ) ) {
         uint32_t off = (uint32_t)( addr - TRES_REG_FANRPM );   /* 0..13 */
 
         if ( off < 2u ) {
-            /* 0x36-0x37: FANRPM, uint16 BE, cap at 0xFFFF. */
-            uint32_t rpm = Fan_Get_LastRPM();
-            if ( rpm > 0xFFFFu ) { rpm = 0xFFFFu; }
-            return (uint8_t)( rpm >> ( 8u * ( 1u - off ) ) );
+            /* 0x36-0x37: FANRPM, uint16 BE, capped at 0xFFFF at latch time. */
+            return (uint8_t)( s_snap_rpm >> ( 8u * ( 1u - off ) ) );
         }
 
         if ( off < 6u ) {
             /* 0x38-0x3B: COLDTEMP, int32 BE milli-degC. */
-            uint32_t v = (uint32_t)TecControl_GetColdMilliCelsius();
+            uint32_t v = (uint32_t)s_snap_cold_mc;
             uint32_t rel = off - 2u;
             return (uint8_t)( v >> ( 24u - 8u * rel ) );
         }
 
         if ( off < 10u ) {
             /* 0x3C-0x3F: HOTTEMP, int32 BE milli-degC. */
-            uint32_t v = (uint32_t)TecControl_GetHotMilliCelsius();
+            uint32_t v = (uint32_t)s_snap_hot_mc;
             uint32_t rel = off - 6u;
             return (uint8_t)( v >> ( 24u - 8u * rel ) );
         }
 
         /* 0x40-0x43: DEWPOINT, int32 BE milli-degC from the AHT20 task. */
         {
-            uint32_t v = (uint32_t)AHT20_Get_LastDewPointMilliCelsius();
+            uint32_t v = (uint32_t)s_snap_dew_mc;
             uint32_t rel = off - 10u;
             return (uint8_t)( v >> ( 24u - 8u * rel ) );
         }
@@ -239,8 +264,10 @@ void I2C1_IRQHandler(void)
         uint32_t sr2 = I2C1->SR2;
 
         if ( ( sr2 & I2C_SR2_TRA ) != 0u ) {
-            /* master read: load the first byte now, TXE refills afterwards  */
+            /* master read: latch the sensor block once for this transaction,
+             * then load the first byte (TXE refills from the same snapshot) */
             s_tx = 1u;
+            Reg_LatchSensorBlock();
             LL_I2C_TransmitData8( I2C1, Reg_Read( s_regPtr ) );
             s_regPtr++;
         } else {

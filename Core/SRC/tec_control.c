@@ -371,6 +371,9 @@ static uint8_t     s_dac_percent = 0xFFu; /* last duty written to the DAC;
                                            0xFF = "unknown" sentinel so the
                                            first tec_dac_set() is never
                                            short-circuited                    */
+static uint16_t    s_dac_mv;        /* last voltage acknowledged by the DAC   */
+static uint8_t     s_dac_mv_valid;  /* 0 = unknown (boot, no successful write)*/
+static uint8_t     s_dac_recal;     /* DAC endpoints changed: park + re-anchor*/
 #if ( TEC_FAN_FAULT_ENABLE == 1 )
 static uint32_t    s_fan_stall_ms;  /* accumulated below-RPM time            */
 static uint32_t    s_fan_grace_ms;  /* remaining fan spool-up grace          */
@@ -378,7 +381,7 @@ static uint8_t     s_fan_stalled;   /* interlock: only healthy RPM clears it */
 static uint8_t     s_fan_started;   /* do not renew grace on each TEC enable */
 #endif /* TEC_FAN_FAULT_ENABLE */
 static uint8_t     s_dew_hold; /* latched low-output mode, 1 C release band */
-static int32_t     s_dew_target_mc;  /* last valid dew floor (tracking mode) */
+static int32_t     s_dew_target_mc;  /* last valid dew floor (both modes)     */
 static uint8_t     s_cold_fault;    /* reset PID from real feedback on recovery */
 static uint8_t     s_hot_fault;     /* reseed the fan EMA on hot-sensor recovery */
 static int32_t     s_cold_ema;          /* EMA-smoothed cold side for the PID       */
@@ -418,6 +421,14 @@ static float       s_pid_kp = FLOAT_NAN;
 static float       s_pid_ki = FLOAT_NAN;
 static float       s_pid_kd = FLOAT_NAN;
 
+/* Set whenever the controller (re)initialises its history (boot or a live
+ * gain reload): the next PID update must first reseed that history from the
+ * REAL measurement. TecPid_Init() takes an initial measure, but
+ * tec_apply_pid_params() has no valid measurement at boot, and using the
+ * target there made the first update treat (target - measured) as a
+ * temperature STEP - see the reseed in the PID section of TecControl_Cb(). */
+static uint8_t     s_pid_seed_pending;
+
 /* (Re-)apply the parameter snapshot to the PID controller.
  *
  * The sample period is the boot-time loop period, NOT s_p.control_period_ms:
@@ -448,7 +459,8 @@ static void tec_apply_pid_params( void )
     (void)TecPid_Init( &s_pid,
                        s_p.pid_kp, s_p.pid_ki, s_p.pid_kd,
                        period_s,
-                       -(float)s_p.target_base_millic,
+                       0.0f,          /* placeholder: reseeded before the
+                                       * first Update, see s_pid_seed_pending */
                        0.0f, 100.0f,
                        -( TEC_I_SLEW_PCT_PER_S * period_s ),
                        ( TEC_I_SLEW_PCT_PER_S * period_s ),
@@ -456,6 +468,7 @@ static void tec_apply_pid_params( void )
     s_pid_kp = s_p.pid_kp;
     s_pid_ki = s_p.pid_ki;
     s_pid_kd = s_p.pid_kd;
+    s_pid_seed_pending = 1u;
 }
 
 /* Refresh the parameter snapshot when the NVRAM cache has moved, then re-apply
@@ -465,18 +478,31 @@ static void tec_apply_pid_params( void )
 static void tec_params_reload_if_needed( void )
 {
     uint32_t gen = NvParams_GetCacheGeneration();
+    int32_t  old_dac_min;
+    int32_t  old_dac_max;
 
     if ( gen == s_nv_gen ) {
         return;
     }
 
     s_nv_gen = gen;
+    old_dac_min = s_p.dac_min_ctrl_mv;
+    old_dac_max = s_p.dac_max_ctrl_mv;
     tec_params_load( &s_p );
 
     /* The running schedule owns the period, so a value written over the I2C
      * window must not reach the fan-stall timers - they accumulate in ms and
      * would otherwise measure against a period the loop does not run at. */
     s_p.control_period_ms = s_loop_period_ms;
+
+    /* The DAC window is a CALIBRATION: the same duty now means a different
+     * voltage, so a value cached by percentage can no longer be reused. Flag
+     * it here and let the control cycle drop EN and re-anchor before the new
+     * mapping is used (see the top of TecControl_Cb). */
+    if ( ( old_dac_min != s_p.dac_min_ctrl_mv ) ||
+         ( old_dac_max != s_p.dac_max_ctrl_mv ) ) {
+        s_dac_recal = 1u;
+    }
 
     tec_apply_pid_params();
 }
@@ -525,19 +551,19 @@ static void tec_set_enabled( uint8_t on )
  * regions; the TPS565201's 1 ms internal soft start only covers the initial
  * 0 -> anchor step.
  *
- * Failure handling: the DAC write status is returned; s_dac_percent is only
- * advanced on SUCCESS, so a failed write never pretends the value was applied
- * (a stale DAC output while the control loop thinks it moved the TEC voltage
- * would be a silent mis-actuation). Callers that gate TEC enable on this must
- * check the return. */
-/* Force a real DAC write even when `duty` equals the cached value: the cache
- * can diverge from the physical DAC (the boot "unknown" sentinel, a
- * previously failed write, or the MCP4725 falling back to its EEPROM
- * power-up value after a brown-out). Callers that must GUARANTEE a bus
- * transaction (the first-enable anchor before TEC_VEN) go through here.
- * s_dac_percent advances only on SUCCESS, so a failed forced write leaves
- * the cache pointing at the last value known to be on the DAC. */
-static int tec_dac_set_forced( uint8_t duty )
+ * Failure handling: the DAC write status is returned; s_dac_percent and
+ * s_dac_mv are only advanced on SUCCESS, so a failed write never pretends the
+ * value was applied (a stale DAC output while the control loop thinks it moved
+ * the TEC voltage would be a silent mis-actuation). Callers that gate TEC
+ * enable on this must check the return.
+ *
+ * The write cache is keyed on the VOLTAGE, not the percentage: DAC_MIN/MAX are
+ * live-reloadable calibration points, so the same duty maps to a different mV
+ * after a reload. Comparing duty alone kept the old voltage on the bus (the
+ * percentage was unchanged, so no write happened) while the loop believed the
+ * new calibration had been applied. Both the duty and the computed mV must
+ * match the last acknowledged write before a write is skipped. */
+static int tec_dac_write( uint8_t duty, uint8_t force )
 {
     uint16_t mv;
     uint32_t span;
@@ -546,19 +572,36 @@ static int tec_dac_set_forced( uint8_t duty )
     span = (uint32_t)( s_p.dac_max_ctrl_mv - s_p.dac_min_ctrl_mv );
     mv = (uint16_t)( (uint32_t)s_p.dac_max_ctrl_mv -
                      ( ( (uint32_t)duty * span ) / 100u ) );
+
+    if ( ( force == 0u ) && ( s_dac_mv_valid != 0u ) &&
+         ( duty == s_dac_percent ) && ( mv == s_dac_mv ) ) {
+        return (int)MCP4725_OK;
+    }
+
     st = MCP4725_SetVoltage_mV( mv );
     if ( st == MCP4725_OK ) {
-        s_dac_percent = duty;
+        s_dac_percent  = duty;
+        s_dac_mv       = mv;
+        s_dac_mv_valid = 1u;
     }
     return (int)st;
 }
 
+/* Force a real DAC write even when `duty` maps to the cached voltage: the
+ * cache can diverge from the physical DAC (the boot "unknown" sentinel, a
+ * previously failed write, or the MCP4725 falling back to its EEPROM
+ * power-up value after a brown-out). Callers that must GUARANTEE a bus
+ * transaction (the first-enable anchor before TEC_VEN, the endpoint-change
+ * park) go through here. The cache advances only on SUCCESS, so a failed
+ * forced write leaves it pointing at the last value known to be on the DAC. */
+static int tec_dac_set_forced( uint8_t duty )
+{
+    return tec_dac_write( duty, 1u );
+}
+
 static int tec_dac_set( uint8_t duty )
 {
-    if ( duty == s_dac_percent ) {
-        return MCP4725_OK;
-    }
-    return tec_dac_set_forced( duty );
+    return tec_dac_write( duty, 0u );
 }
 
 /* Heatsink fan is decoupled from the TEC PID output: base airflow while the
@@ -654,6 +697,18 @@ static void TecControl_Cb( qEvent_t e )
      * previous cycle's EN_OFF_PCT with this cycle's deadband, target and
      * fan thresholds. */
     tec_params_reload_if_needed();
+
+    /*--- 0b. DAC recalibration: park before the new mapping is used --------*/
+    /* DAC_MIN/MAX changed under a possibly running converter. A percentage
+     * cache no longer describes the same voltage, and simply rewriting the
+     * same duty would step the TEC voltage by the calibration delta. Drop EN
+     * first, park on the NEW zero-current end, then let the normal
+     * first-enable path below write the startup anchor and ramp back up. */
+    if ( s_dac_recal != 0u ) {
+        s_dac_recal = 0u;
+        tec_set_enabled( 0u );
+        (void)tec_dac_set_forced( 0u );
+    }
 
     /*--- 1. read all sources ------------------------------------------------*/
     hot_mc = Studio_ADC1_ReadHotMilliCelsius();
@@ -827,8 +882,9 @@ static void TecControl_Cb( qEvent_t e )
      * floor. In tracking mode (TARGET_BASE == 0) the floor IS the target.
      * There is NO minimum-output clamp: once the demand falls below
      * NV_TEC_EN_OFF_PCT the EN deadband cuts TEC_VEN (converter off = zero
-     * current = no overcooling). An unavailable humidity sample must not
-     * silently restore unrestricted cooling. */
+     * current = no overcooling). An unavailable humidity sample does not
+     * silently restore unrestricted cooling: both modes keep using the last
+     * valid floor (see the invalid branch below). */
     {
         int32_t dew_mc = AHT20_Get_LastDewPointMilliCelsius();
 
@@ -836,12 +892,18 @@ static void TecControl_Cb( qEvent_t e )
             (dew_mc > TEC_TEMP_ENVELOPE_MAX_MILLIC)) {
             s_dew_hold = 1u;
             s_alarm |= TEC_ALARM_SENSOR;
+            /* No fresh humidity: hold the last valid floor in BOTH target
+             * modes. Falling back to the uncompensated base target here would
+             * silently restore cooling that the dew floor was holding off
+             * (the P1 path: floor 35 C, base 10 C, sensor expires -> the loop
+             * would cool toward 10 C again). The seed is
+             * TEC_TEMP_ENVELOPE_MAX_MILLIC ("no cooling") until the first
+             * valid sample, so a board that boots without a humidity reading
+             * never falls back to an unprotected setpoint either. */
             if ( s_p.target_base_millic == 0 ) {
-                /* Tracking mode with no fresh sample: hold the last valid
-                 * floor. The seed is TEC_TEMP_ENVELOPE_MAX_MILLIC ("no
-                 * cooling") so a board that boots without a humidity reading
-                 * never turns the setpoint into 0 C. */
-                target_mc = s_dew_target_mc;
+                target_mc = s_dew_target_mc;       /* tracking: floor IS target */
+            } else if ( target_mc < s_dew_target_mc ) {
+                target_mc = s_dew_target_mc;       /* normal: floor is a clamp */
             }
         } else {
             int32_t floor_mc = dew_mc + s_p.dewpoint_margin_millic;
@@ -929,7 +991,18 @@ static void TecControl_Cb( qEvent_t e )
      * increases when temperature is above setpoint), so we invert both
      * setpoint and measure to flip the effective error to (x - SP). The
      * reset paths above/below deliberately reseed from the RAW sdm_mc so a
-     * recovered controller starts from the real temperature, not the filter. */
+     * recovered controller starts from the real temperature, not the filter.
+     *
+     * A freshly (re)initialised controller has NO history: its xk_1/xk_2 seed
+     * is not a real measurement, so the incremental P/D terms would read the
+     * first real sample as a step of (measure - seed) and could saturate the
+     * output for one cycle - with a "track the dew point" target of 200 C and
+     * no humidity that meant a spurious full-cooling pulse. Reseed from the
+     * value actually fed to the update, before the first update. */
+    if ( s_pid_seed_pending != 0u ) {
+        TecPid_Reset( &s_pid, -(float)s_cold_ema );
+        s_pid_seed_pending = 0u;
+    }
     TecPid_SetSetpoint( &s_pid, -(float)target_mc );
     TecPid_Update( &s_pid, -(float)s_cold_ema );
     pid_out = (int32_t)TecPid_GetOutput( &s_pid );
@@ -1199,12 +1272,13 @@ void TecControl_Init( void )
      * I-clamp and the D-filter factor are derived from the PHYSICAL-time
      * macros above for the same reason (period-independent dynamics).
      * The EPID is "heating semantics"; TecControl_Cb flips the sign of both
-     * setpoint and measure ((x - SP) cooling error) of the cold side, so the
-     * init seed MUST be in the same (negative) domain, otherwise the first
-     * Update computes P/D against a +45 V..+45 C seed vs -sdm and slams the
-     * output to 100 % even at zero error. Seed with the (negated) base
-     * target: at init no measurement exists yet, and the first real
-     * measurement replaces it next cycle.
+     * setpoint and measure ((x - SP) cooling error) of the cold side, so any
+     * seed passed here MUST be in that same (negative) domain. There is no
+     * valid measurement yet at init, so tec_apply_pid_params() passes a
+     * neutral 0 and flags the history as needing a reseed: the first Update
+     * is preceded by TecPid_Reset() with the real (EMA) measurement in
+     * TecControl_Cb, not by the target. Using the target as history made the
+     * first P/D terms see a (target - measured) step and slam the output.
      * tec_apply_pid_params() owns this call so the live-reload path applies
      * the gains through exactly the same expression - the two cannot drift.
      * The NaN seed makes the first call always take effect. */
@@ -1241,6 +1315,9 @@ void TecControl_Init( void )
      * DAC sits at a code that commands zero TEC current even if the enable
      * line were ever asserted unexpectedly. */
     s_dac_percent  = 0xFFu;
+    s_dac_mv       = 0u;
+    s_dac_mv_valid = 0u;
+    s_dac_recal    = 0u;
     (void)tec_dac_set( 0u );
 
     (void)qOS_Add_Task( &s_task, TecControl_Cb, qLowest_Priority,

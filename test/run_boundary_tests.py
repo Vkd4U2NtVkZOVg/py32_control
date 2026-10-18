@@ -58,6 +58,28 @@ int main(void) {
     assert(TecPid_GetOutput(&pid) == 0);
 }
 '''
+    yield 'pid_seed_from_measure', COMMON + read('Drivers/Embedded-PID/src/pid.c') + '\n' + read('Core/SRC/tec_pid.c') + '''
+int main(void) {
+    TecPid_t pid;
+    /* No measurement history yet: a "track the dew point" target (200 C) and
+     * the first real sample (45 C) look like a step to the incremental P/D
+     * terms, which saturate the output for one cycle. Reproduces the hazard
+     * the control path must never expose. */
+    assert(TecPid_Init(&pid, .01f, .01f, .25f, .5f, 0.0f,
+                       0, 100, -25, 25, .33f) == 0);
+    TecPid_SetSetpoint(&pid, -200000);
+    TecPid_Update(&pid, -45000);
+    assert(TecPid_GetOutput(&pid) == 100);
+    /* The control path's contract: seed the history from the real measure
+     * before the first update. Only the clamped I term may act. */
+    assert(TecPid_Init(&pid, .01f, .01f, .25f, .5f, 0.0f,
+                       0, 100, -25, 25, .33f) == 0);
+    TecPid_SetSetpoint(&pid, -200000);
+    TecPid_Reset(&pid, -45000);
+    TecPid_Update(&pid, -45000);
+    assert(TecPid_GetOutput(&pid) == 0);
+}
+'''
     src = read('Core/SRC/sdm845_boot.c')
     prefix = COMMON + '#include "sdm845_boot.h"\n' + '''
 typedef int qSM_Status_t;
@@ -173,6 +195,52 @@ int main(void) {
     tick = s_temp_tick; assert(!TRES_I2C_Slave_GetSdm845TempValid());
     s_temp_valid = 1; s_temp_tick = tick;
     assert(TRES_I2C_Slave_GetSdm845TempValid());
+}
+'''
+    # Sensor block snapshot: the four live values are latched once per read
+    # transaction, so a task update between two bytes cannot splice halves of
+    # two samples (65530 mC -> 65540 mC used to read back as 4 mC).
+    yield 'sensor_snapshot', COMMON + '#include "tres_i2c_slave.h"\n' + '''
+static uint16_t s_snap_rpm;
+static int32_t s_snap_cold_mc, s_snap_hot_mc, s_snap_dew_mc;
+static volatile uint32_t s_temp_raw;
+static int32_t rpm, cold_mc, hot_mc, dew_mc;
+static uint32_t Fan_Get_LastRPM(void) { return (uint32_t)rpm; }
+static int32_t TecControl_GetColdMilliCelsius(void) { return cold_mc; }
+static int32_t TecControl_GetHotMilliCelsius(void) { return hot_mc; }
+static int32_t AHT20_Get_LastDewPointMilliCelsius(void) { return dew_mc; }
+static uint8_t Sdm845_Boot_GetState(void) { return 0; }
+static uint8_t Sdm845_Boot_GetRetries(void) { return 0; }
+static uint8_t TecControl_GetAlarm(void) { return 0; }
+static int AHT20_Get_LastStatus(void) { return 0; }
+static uint8_t Fan_GetDutyPercent(void) { return 0; }
+static uint8_t TecControl_GetDacPercent(void) { return 0; }
+static uint8_t TRES_Cmd_StatusByte(void) { return 0; }
+static uint8_t TRES_Cmd_Retries(void) { return 0; }
+static uint8_t TRES_Seq_GetPinsSnapshot(void) { return 0; }
+static uint8_t TRES_Cmd_LastErr(void) { return 0; }
+static uint8_t TRES_Cmd_Completed(void) { return 0; }
+static uint8_t USART2_DMA_GetOverruns(void) { return 0; }
+static uint32_t NvParams_Get(uint8_t id) { (void)id; return 0; }
+#define TRES_IF_VERSION 4u
+''' + function(src, 'Reg_LatchSensorBlock') + function(src, 'Reg_Read') + '''
+static int32_t rd32(uint8_t base)
+{
+    return (int32_t)(((uint32_t)Reg_Read(base) << 24) |
+                     ((uint32_t)Reg_Read(base + 1) << 16) |
+                     ((uint32_t)Reg_Read(base + 2) << 8) |
+                     (uint32_t)Reg_Read(base + 3));
+}
+int main(void) {
+    rpm = 3000; cold_mc = 65530; hot_mc = 35000; dew_mc = INT32_MIN;
+    Reg_LatchSensorBlock();
+    /* The control task and the AHT20 task update between the bytes of one read */
+    rpm = 4000; cold_mc = 65540; hot_mc = 50000; dew_mc = 20000;
+    assert(Reg_Read(TRES_REG_FANRPM) == 0x0B);
+    assert(Reg_Read(TRES_REG_FANRPM + 1) == 0xB8);
+    assert(rd32(TRES_REG_COLDTEMP) == 65530);   /* not the 4 mC splice */
+    assert(rd32(TRES_REG_HOTTEMP) == 35000);
+    assert(rd32(TRES_REG_DEWPOINT) == INT32_MIN);
 }
 '''
     src = read('Core/SRC/tres_cmd.c')

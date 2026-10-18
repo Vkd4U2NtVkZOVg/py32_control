@@ -55,13 +55,15 @@ static float tracked_output;
 static float pid_measure;    /* cold sample fed to TecPid_Update (EMA-smoothed) */
 static uint8_t adc_ok = 1, fan_duty_seen, fan_enabled, fan_min_duty;
 static uint16_t adc_code = 0;
+static uint16_t dac_mv;      /* last mV handed to the DAC (forced writes too) */
+static unsigned dac_writes;  /* DAC bus transactions (attempts)              */
 static uint32_t params[NVM_PARAM_COUNT];
 static uint32_t nv_cache_gen;   /* stands in for NvParams_GetCacheGeneration() */
 static float reset_measure;
 static unsigned enable_edges, tach_reads, pid_inits;
 static void LL_GPIO_SetOutputPin(int a, int b) { (void)a; (void)b; ++enable_edges; }
 static void LL_GPIO_ResetOutputPin(int a, int b) { (void)a; (void)b; }
-static int MCP4725_SetVoltage_mV(uint16_t mv) { (void)mv; return fail_dac; }
+static int MCP4725_SetVoltage_mV(uint16_t mv) { dac_mv = mv; ++dac_writes; return fail_dac; }
 static void Fan_SetEnabled(uint8_t on) { fan_enabled = on; }
 static void Fan_SetDutyPercent(uint8_t duty) { fan_duty_seen = duty; }
 static void Fan_SetDutyPercentImmediate(uint8_t duty) { fan_duty_seen = duty; }
