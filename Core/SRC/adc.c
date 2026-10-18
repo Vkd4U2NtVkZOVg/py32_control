@@ -298,6 +298,13 @@ static uint16_t adc1_convert(uint32_t channel, uint8_t *ok)
   LL_ADC_Enable(ADC1);                             /* ADC must remain enabled; no disable */
   LL_mDelay(1);                                    /* ADC stabilization, min 8 ADC clocks */
 
+  /* Drop any EOC still latched by a conversion a previous call abandoned on
+   * timeout: that conversion completed AFTER we stopped waiting, so its flag
+   * is set but its data belongs to a different channel. StartConversion()
+   * does not clear EOC (hardware keeps it latched), so without this the loop
+   * below would exit on the first pass and read the other channel's sample -
+   * a stale reading that looks perfectly valid. */
+  LL_ADC_ClearFlag_EOC(ADC1);
   LL_ADC_REG_StartConversion(ADC1);
   while (LL_ADC_IsActiveFlag_EOC(ADC1) == 0U) {
     if ( timeout-- == 0U ) {
