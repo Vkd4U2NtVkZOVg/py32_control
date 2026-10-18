@@ -41,8 +41,25 @@
 #define NVM_ERR_CRC     (-2)
 #define NVM_ERR_FLASH   (-3)
 
-/* Timeout for flash busy-poll, in arbitrary iterations (~1 s of margin). */
-#define NVM_FLASH_TIMEOUT  ( 1000000u )
+/* Bound on each flash BUSY poll, in loop iterations.
+ *
+ * Sized from the datasheet instead of picked: page program t_prog is 1.0 ms
+ * typ / 1.5 ms max, page/sector erase tERASE is 3.0 ms typ / 4.5 ms max
+ * (PY32F030 datasheet V2.1, table 5-18 "存储器特性"). One Save erases and
+ * programs NVM_PAGES (2) pages, and every wait below covers a single
+ * operation, so the longest wait is one 4.5 ms erase.
+ *
+ * One pass of the poll loop is ~0.3 us at 32 MHz with -Og, i.e. ~15000 passes
+ * for that worst case; 100000 leaves a ~7x margin. The old 1000000 was
+ * ~300 ms per wait - and all four waits run inside __disable_irq(), so a
+ * stuck BUSY flag held the whole system, scheduler tick included, for over a
+ * second before returning NVM_ERR_FLASH. 100000 bounds that to ~30 ms.
+ *
+ * The assert refuses a bound that could expire before the hardware is done
+ * (~30000 passes is 6-9 ms depending on the pass cost). */
+#define NVM_FLASH_TIMEOUT  ( 100000u )
+_Static_assert( NVM_FLASH_TIMEOUT >= 30000u,
+                "flash wait bound is shorter than the datasheet worst-case erase" );
 
 /* Program/erase timing rows: each entry is the base address of the device
  * flash-timing parameter table in the information block (row 0 = HSI grade 0
