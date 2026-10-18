@@ -107,6 +107,14 @@ int main(int argc, char **argv)
     assert(enable_edges == edges && !s_tec_enabled);
     fail_dac = 0; TecControl_Cb(NULL);
     assert(s_tec_enabled);
+    /* Before the first successful DAC write there is no duty to report, and
+     * the host register is a PERCENTAGE: the old 0xFF "unknown" sentinel
+     * surfaced on the bus as 255 %. The getter must stay in 0..100 even when
+     * the boot park write fails and nothing was ever acknowledged. */
+    fail_dac = 1;
+    TecControl_Init();                 /* the park write fails: no duty known */
+    assert(TecControl_GetDacPercent() == 0u);
+    fail_dac = 0;
     /* ADC timeout must cool an already hot heatsink, not return at old PWM. */
     reset_fixture(); TecControl_Cb(NULL);
     hot = 95000; adc_ok = 0; TecControl_Cb(NULL);

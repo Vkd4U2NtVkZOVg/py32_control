@@ -367,10 +367,10 @@ static TecPid_t    s_pid;
 static Tec_Params_t s_p;
 static uint8_t     s_alarm;
 static uint8_t     s_tec_enabled;
-static uint8_t     s_dac_percent = 0xFFu; /* last duty written to the DAC;
-                                           0xFF = "unknown" sentinel so the
-                                           first tec_dac_set() is never
-                                           short-circuited                    */
+static uint8_t     s_dac_percent;   /* last duty written to the DAC; only
+                                       meaningful while s_dac_mv_valid is 1, so
+                                       it never carries an "unknown" value that
+                                       could leak into the host register      */
 static uint16_t    s_dac_mv;        /* last voltage acknowledged by the DAC   */
 static uint8_t     s_dac_mv_valid;  /* 0 = unknown (boot, no successful write)*/
 static uint8_t     s_dac_recal;     /* DAC endpoints changed: park + re-anchor*/
@@ -1158,8 +1158,14 @@ static void TecControl_Cb( qEvent_t e )
      * where the TEC control starts from after enable - under the calibrated
      * window duty% == TEC voltage %, so a low anchor plus this ramp bounds the
      * inrush and avoids slamming the TEC (TI SNVAA70 §3.3 "start close to Vin
-     * and regulate slowly"). */
-    if ( drive != 0u ) {
+     * and regulate slowly").
+     *
+     * The anchor is what this ramp measures from, so it needs a real previous
+     * duty: s_dac_mv_valid is set by the forced anchor write in the enable
+     * path above, which is the only way drive can be 1 with the TEC just
+     * switched on. Without a written duty there is nothing to ramp from and
+     * the demand is applied as-is. */
+    if ( ( drive != 0u ) && ( s_dac_mv_valid != 0u ) ) {
         if ( duty > ( (int32_t)s_dac_percent + s_p.ramp_step_percent ) ) {
             duty = (int32_t)s_dac_percent + s_p.ramp_step_percent;
         }
@@ -1311,10 +1317,11 @@ void TecControl_Init( void )
      * the inverted topology DAC=0V is the FULL-cooling code (no injection
      * current -> VOUT at the divider set point), so leaving the power-up
      * 0 V there would rely on TEC_VEN alone as the single safety barrier.
-     * With the sentinel set, this write always happens; from here on the
-     * DAC sits at a code that commands zero TEC current even if the enable
-     * line were ever asserted unexpectedly. */
-    s_dac_percent  = 0xFFu;
+     * s_dac_mv_valid = 0 makes the cache check below take the write path, so
+     * this park always reaches the bus; from here on the DAC sits at a code
+     * that commands zero TEC current even if the enable line were ever
+     * asserted unexpectedly. */
+    s_dac_percent  = 0u;
     s_dac_mv       = 0u;
     s_dac_mv_valid = 0u;
     s_dac_recal    = 0u;
@@ -1337,7 +1344,12 @@ void TecControl_ClearAlarm( void )
 
 uint8_t TecControl_GetDacPercent( void )
 {
-    return s_dac_percent;
+    /* A percentage, 0..100, always. Before the first successful DAC write
+     * there is no duty to report - and the register the host parses has no
+     * encoding for "unknown", so the old 0xFF sentinel surfaced as 255 %.
+     * 0 % is also the truthful reading in that state: the DAC has not been
+     * commanded away from the zero-current end. */
+    return ( s_dac_mv_valid != 0u ) ? s_dac_percent : 0u;
 }
 
 int32_t TecControl_GetHotMilliCelsius( void )
